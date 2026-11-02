@@ -1,17 +1,17 @@
-# Agent orchestration: Hatchet vs Trigger.dev (self-hosted, offline-ready)
+# Agent orchestration: Hatchet vs Trigger.dev vs Prefect (self-hosted, offline-ready)
 
-Self-hosted Docker Compose setups for running AI-agent workloads on Hatchet and Trigger.dev, built to run in an offline network and to stay upgradable to new upstream releases. Each stack has the same example agents (a DAG pipeline, a durable agent loop, a human-steerable agent, hardware-bound tasks), and [COMPARISON.md](COMPARISON.md) compares the two.
+Self-hosted Docker Compose setups for running AI-agent workloads on Hatchet and Trigger.dev, built to run in an offline network and to stay upgradable to new upstream releases. Each stack has the same example agents (a DAG pipeline, a durable agent loop, a human-steerable agent, hardware-bound tasks), and [COMPARISON.md](COMPARISON.md) compares them, now including Prefect.
 
 | Folder | What | Local URL |
 |---|---|---|
 | [hatchet/](hatchet/README.md) | Hatchet v0.114.2: Postgres + engine + dashboard, plus a Python example worker | http://localhost:8080 |
 | [trigger.dev/](trigger.dev/README.md) | Trigger.dev v4.8.3 combined stack, plus a TypeScript example project | http://localhost:8030 |
 | [board/](board/README.md) | Agent Board: kanban view over both systems. Shows queue position and live progress, and can steer, stop, cancel and replay cards. | http://localhost:8090 |
-| [prefect/](prefect/docker-compose.yml) | Prefect 3 server and example flows for the same scenarios (work in progress) | http://localhost:4200 |
-| [observability/](observability/docker-compose.yml) | Optional shared trace backend (Jaeger, OTLP) for agents on both systems | http://localhost:16686 |
+| [prefect/](prefect/README.md) | Prefect 3.9.1 server, served example flows and two hardware-station workers; tested against the same requirements (offline bundle not done yet) | http://localhost:4200 |
+| [observability/](observability/docker-compose.yml) | Optional shared trace backend (Jaeger, OTLP) for agents on all three systems | http://localhost:16686 |
 | [offline/](OFFLINE.md) | `bundle.sh` (connected side) / `load.sh` (offline side), offline npm mirror | — |
 | [COMPARISON.md](COMPARISON.md) | Capabilities, ops cost and offline difficulty compared | — |
-| [comparison-page/](comparison-page/index.html) | The comparison as a single web page | — |
+| [comparison-page/](comparison-page/index.html) | The comparison as a single web page, published by `.github/workflows/pages.yml` | https://shohamh.github.io/agent_orchestration/ |
 
 Both stacks run side by side on one machine with no port conflicts. Docker Desktop needs about 3 GB of RAM for both.
 
