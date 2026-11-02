@@ -207,7 +207,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 18px; display: grid; ga
         <tr><th scope="row">Run start latency</th><td class="num">≈ 1–5 s end to end, including result fetch</td><td class="num">≈ 3–20 s (polling + new process per run)</td><td class="num">≈ 0.3–0.4 s from queue to start</td></tr>
         <tr><th scope="row">First successful run</th><td class="num">≈ 2 min</td><td class="num">≈ 3 min</td><td class="num">≈ 10 min, including image build</td></tr>
         <tr><th scope="row">Datastores</th><td>Postgres</td><td>Postgres (Redis for HA)</td><td>Postgres, Redis, ClickHouse, MinIO, registry, s2, Electric</td></tr>
-        <tr><th scope="row">Offline transfer</th><td><span class="chip good">Easy</span> done</td><td><span class="chip good">Likely easy</span> not done yet</td><td><span class="chip mid">Moderate</span> done</td></tr>
+        <tr><th scope="row">Offline transfer</th><td><span class="chip good">Easy</span> done</td><td><span class="chip good">Easy</span> done, tested with no internet route</td><td><span class="chip mid">Moderate</span> done</td></tr>
         <tr><th scope="row">UI login</th><td>Built-in users</td><td>None by default (optional basic auth)</td><td>Magic link, email allow-list</td></tr>
         <tr><th scope="row">License</th><td>MIT</td><td>Apache-2.0</td><td>Apache-2.0</td></tr>
       </tbody>
@@ -253,7 +253,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 18px; display: grid; ga
 </section>
 
 <footer>
-  <p class="note">Rows marked tested were run against the local setup with the example code (task, fan-out pipeline, agent loop, steerable agent, approval, hardware-bound task). Other rows come from the official documentation and the SDK and server source at the listed versions. Prefect has not been packaged for offline transfer yet.</p>
+  <p class="note">Rows marked tested were run against the local setup with the example code (task, fan-out pipeline, agent loop, steerable agent, approval, hardware-bound task). Other rows come from the official documentation and the SDK and server source at the listed versions. All three are in the offline bundle.</p>
 </footer>
 
 </div>

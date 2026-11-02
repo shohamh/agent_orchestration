@@ -12,7 +12,7 @@
 #   images/*.tar             docker save archives (load with `docker load`)
 #   trigger-base-images.tar  triggerdotdev/node base images for `trigger deploy` (OCI dirs, digests preserved)
 #   npm-storage.tar          Verdaccio storage with every npm package the JS projects need
-#   wheelhouse/              Python wheels for the Hatchet example worker (linux x86_64, py3.12)
+#   wheelhouse/              Python wheels for the Hatchet and Prefect example workers (linux x86_64, py3.12)
 #   source.tar               this repo without secrets / node_modules
 #   load.sh, SHA256SUMS
 set -euo pipefail
@@ -29,6 +29,7 @@ PLATFORM_ARCH=${PLATFORM_ARCH:-amd64}
 
 SKOPEO_IMAGE=${SKOPEO_IMAGE:-quay.io/skopeo/stable:v1.20.0}
 BUILDKIT_IMAGE=${BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}
+PY_IMAGE=${PY_IMAGE:-python:3.12-slim}  # downloads the Linux wheels (also the Hatchet worker's base image)
 NPM_MIRROR_PORT=${NPM_MIRROR_PORT:-4873}
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -38,6 +39,18 @@ mkdir -p "$OUT/images" "$OUT/wheelhouse"
 ensure_env() { [ -f "$1/.env" ] || cp "$1/.env.example" "$1/.env"; }
 # Native path for non-POSIX tools (Windows Python under Git Bash); identity elsewhere.
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
+
+# Scripts go into the bundle as they are in the working copy. One saved with Windows (CRLF) line
+# endings fails on the Linux side ("bash\r: not found"), so stop before doing any work.
+crlf_scripts=$(cd "$ROOT" && find hatchet trigger.dev prefect offline observability board \
+  -name node_modules -prune -o -name '*.sh' -type f -print 2>/dev/null |
+  while read -r script; do [ "$(tr -cd '\r' <"$script" | wc -c)" -eq 0 ] || echo "$script"; done || true)
+if [ -n "$crlf_scripts" ]; then
+  echo "These scripts have Windows (CRLF) line endings and would not run on the offline Linux servers:" >&2
+  echo "$crlf_scripts" | sed 's/^/  /' >&2
+  echo "Convert them to LF, e.g.: (cd \"$ROOT\" && sed -i 's/\r\$//' $(echo $crlf_scripts))" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------- 1. Hatchet images
 if [ "${SKIP_IMAGES:-0}" != 1 ]; then # SKIP_IMAGES=1 reuses images/*.tar from a previous run
@@ -98,6 +111,22 @@ ensure_env "$ROOT/board"
   { docker compose config --images; sed -n 's/^FROM //p' Dockerfile; } | sort -u | tee "$OUT/images/board.txt"
   docker save $(cat "$OUT/images/board.txt") >"$OUT/images/board.tar"
 )
+
+# ---------------------------------------------------------------- 2d. Prefect images
+log "Prefect images"
+ensure_env "$ROOT/prefect"
+(
+  cd "$ROOT/prefect"
+  set -a; . ./.env; set +a
+  docker compose pull --ignore-buildable --quiet
+  docker compose build
+  {
+    docker compose config --images
+    # base of the example worker (FROM uses the PREFECT_VERSION build arg), for offline rebuilds
+    echo "prefecthq/prefect:${PREFECT_VERSION:-3.9.1}-python3.12"
+  } | sort -u | tee "$OUT/images/prefect.txt"
+  docker save $(cat "$OUT/images/prefect.txt") >"$OUT/images/prefect.tar"
+)
 fi
 
 # ---------------------------------------------------------------- 3. Trigger.dev deploy base images
@@ -154,12 +183,23 @@ docker run --rm -v npm-mirror-storage:/s busybox tar -C /s -cf - . >"$OUT/npm-st
 docker save npm-mirror:offline busybox:1.37 >"$OUT/images/npm-mirror.tar"
 
 # ---------------------------------------------------------------- 5. Python wheels
-log "Python wheels ($PY_REQUIREMENTS)"
-for req in $PY_REQUIREMENTS; do
-  python -m pip download --quiet --disable-pip-version-check -r "$(native "$ROOT/$req")" -d "$(native "$OUT/wheelhouse")" \
-    --only-binary=:all: --python-version 3.12 --implementation cp \
-    --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux_2_28_x86_64
+log "Python wheels ($PY_REQUIREMENTS prefect/example-worker/requirements.txt)"
+# Downloaded inside a Linux container: pip evaluates environment markers against the machine it
+# runs on even with --platform, so on a Windows bundling host it would demand Windows-only deps
+# (e.g. Prefect -> docker -> pywin32). The container is exactly the target platform.
+# Prefect's requirements leave the version to PREFECT_VERSION in prefect/.env; pin it with a constraint.
+prefect_version=$(sed -n 's/^PREFECT_VERSION=//p' "$ROOT/prefect/.env" | tail -n1)
+wheel_cid=$(docker create --platform "linux/$PLATFORM_ARCH" -e "PREFECT_PIN=prefect==${prefect_version:-3.9.1}" "$PY_IMAGE" sh -c '
+  set -e; mkdir -p /wh; echo "$PREFECT_PIN" >/tmp/constraints.txt
+  for r in /tmp/req-*.txt; do pip download --quiet --disable-pip-version-check -c /tmp/constraints.txt -d /wh -r "$r"; done')
+i=0
+for req in $PY_REQUIREMENTS prefect/example-worker/requirements.txt; do
+  i=$((i + 1))
+  docker cp "$(native "$ROOT/$req")" "$wheel_cid:/tmp/req-$i.txt"
 done
+docker start -a "$wheel_cid"
+docker cp "$wheel_cid:/wh/." "$(native "$OUT/wheelhouse")"
+docker rm "$wheel_cid" >/dev/null
 
 # ---------------------------------------------------------------- 6. Source + loader
 log "Source (no secrets, no node_modules)"
@@ -167,7 +207,7 @@ tar -C "$ROOT" -cf "$OUT/source.tar" \
   --exclude=node_modules --exclude=dist --exclude=.trigger --exclude='*.pyc' \
   --exclude=.env --exclude=webapp.env --exclude=offline-deploy.env --exclude=.env.local --exclude=auth.htpasswd \
   --exclude='wheelhouse/*.whl' \
-  hatchet trigger.dev offline observability board $(cd "$ROOT" && ls *.md 2>/dev/null)
+  hatchet trigger.dev prefect offline observability board $(cd "$ROOT" && ls *.md 2>/dev/null)
 cp "$ROOT/offline/load.sh" "$OUT/"
 
 (cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)

@@ -1,6 +1,6 @@
 # Prefect 3 (self-hosted, Docker Compose)
 
-Prefect `3.9.1`: the open-source API/UI server with Postgres, plus Python workers. Brought up and tested on 2026-11-02 against the same agent requirements as Hatchet and Trigger.dev. Offline bundling is not done yet.
+Prefect `3.9.1`: the open-source API/UI server with Postgres, plus Python workers. Brought up and tested on 2026-11-02 against the same agent requirements as Hatchet and Trigger.dev. Included in the offline bundle (`../offline/bundle.sh`). The bundled worker image builds with networking disabled, and every requirement test passed on a Docker network with no internet route (2026-11-02).
 
 | URL / port | What |
 |---|---|

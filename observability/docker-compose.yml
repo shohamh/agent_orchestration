@@ -1,11 +1,12 @@
-# Optional shared trace backend for agents running on Hatchet AND Trigger.dev.
+# Optional shared trace backend for agents running on Hatchet, Trigger.dev and Prefect.
 #
-# Both tools already collect traces into their own dashboards. This adds one place to see
-# traces from both (and from anything else that speaks OTLP), e.g. to follow an agent across
-# systems or keep traces longer than the run history.
+# Hatchet and Trigger.dev already show traces in their own dashboards; Prefect has no trace viewer,
+# so this is where its traces go. It gives one place to see traces from all three (and from anything
+# else that speaks OTLP), e.g. to follow an agent across systems or keep traces longer than run history.
 #
 #   docker compose up -d                      -> UI http://localhost:16686, OTLP :4317 (gRPC) / :4318 (HTTP)
-#   then enable the overlays: hatchet/docker-compose.otel.yml, trigger.dev/docker-compose.otel.yml
+#   then enable the overlays: hatchet/docker-compose.otel.yml, trigger.dev/docker-compose.otel.yml,
+#   prefect/docker-compose.otel.yml
 #
 # Workers/runs reach it as http://jaeger:4318 over the shared `otel` docker network.
 # Storage is in-memory (lost on restart); for retention use a Jaeger config with Badger/Elasticsearch

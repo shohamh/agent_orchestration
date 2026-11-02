@@ -4,7 +4,7 @@ This compares Hatchet `v0.114.2`, Trigger.dev `v4.8.3` and Prefect `3.9.1`, all 
 
 - **Tested:** rows marked *tested* were run against this setup with the example code in this repo.
 - **Docs/source:** the rest come from the official docs and the SDK/server source at those versions.
-- **Offline:** Prefect has not been offline-bundled yet.
+- **Offline:** all three are in the offline bundle. Prefect's requirement tests also passed on a Docker network with no internet route.
 
 ## TL;DR
 
@@ -46,7 +46,7 @@ This compares Hatchet `v0.114.2`, Trigger.dev `v4.8.3` and Prefect `3.9.1`, all 
 |---|---|---|---|
 | Hard interrupt | ✅ Cancel from UI/API. *Tested:* `CANCELLED`. | ✅ Cancel from UI, or set state `Cancelling`. *Tested:* `CANCELLED`. | ✅ Cancel from UI/API. *Tested:* `CANCELED`. |
 | Steer mid-run | ✅ Event scoped to the run, plus a durable `wait_for`. *Tested:* redirect, then stop. | ✅ `send_input(...)` / `receive_input(...)`, which polls (0.5 s here). *Tested:* redirect, then stop. | ✅ Input streams `steer.send()` / `steer.once()`. *Tested:* redirect, then stop. Needed `STREAM_ORIGIN` when self-hosted. |
-| Approval / pause with input | ✅ Durable event wait. You build the form. | ✅ **`pause_flow_run(wait_for_input=Model)`**: the UI renders a typed form with a Resume button. *Tested:* resumed with input. | ✅ Waitpoint tokens / `steer.wait()`. You build the form. |
+| Approval / pause with input | ✅ Durable event wait. You build the form. | ✅ **`pause_flow_run(wait_for_input=Model)`**: the UI renders a typed form with a Resume button. *Tested:* resumed with approval and with denial. | ✅ Waitpoint tokens / `steer.wait()`. You build the form. |
 | Long human waits | Durable. The worker slot is released, and the wait survives worker restarts. | `pause` keeps the process alive, which is acceptable here. `suspend_flow_run` frees it, but the flow **re-runs from the start** on resume; explicitly cached tasks can reuse results. Persistence alone does not guarantee reuse. | Self-hosted: the container stays alive and holds CPU/RAM |
 | Live view | `put_stream`, logs, run timeline | Logs, run timeline graph, artifacts | Live metadata, realtime streams, React hooks, trace view |
 | Verdict | **Strongest durability** | **Best human-input UX** out of the box; polling and a retained process are acceptable here | **Most UI-ready for web apps** |
@@ -72,7 +72,7 @@ All three report into the bundled Jaeger in `observability/` (http://localhost:1
 | Datastores | Postgres (RabbitMQ optional) | Postgres (Redis for multi-server HA) | Postgres, Redis, ClickHouse, MinIO, registry, s2, Electric |
 | Run start latency | ~1–5 s end-to-end incl. result fetch | **~3–20 s** (worker poll + new Python process per run) | ~0.3–0.4 s queue→start |
 | Getting code to run | Start a worker anywhere | `serve()` or a worker + deployment (code from local path, git or image) | `trigger deploy` builds an image per version |
-| Offline | Easy (done) | Likely easy: images + wheels, same shape as Hatchet. Not done yet. | Moderate (done): base images, npm mirror, builder |
+| Offline | Easy (done) | Easy (done): images + wheels, same shape as Hatchet. All tests passed with no internet route. | Moderate (done): base images, npm mirror, builder |
 | Upgrades | Bump `HATCHET_VERSION` | Bump `PREFECT_VERSION` (server and worker SDK follow it) | `scripts/update-upstream.sh <tag>` |
 | Auth on the UI | Built-in users | None by default (basic auth via `PREFECT_SERVER_API_AUTH_STRING`) | Magic link / GitHub, email whitelist |
 | License | MIT | Apache-2.0 | Apache-2.0 |
@@ -83,7 +83,7 @@ All three report into the bundled Jaeger in `observability/` (http://localhost:1
 |---|---|---|---|
 | Languages | Python, TypeScript, Go, Ruby | Python | TypeScript/JavaScript |
 | DAG / fan-out | ✅ Declared `parents=[...]` | ✅ Tasks + `.submit()` futures (dynamic, in code) | ➖ In code with batch waits |
-| Durable execution | ✅ Durable tasks, event log | ➖ Retries, caching and transactions. No mid-flow resume. | ✅ Cloud only (checkpoints) |
+| Durable execution | ✅ Durable tasks, event log | ➖ Retries, caching and transactions. No mid-flow resume. | ➖ Cloud only (checkpoints); not when self-hosted |
 | Event-triggered runs | ✅ | ✅ Automations and event triggers | ➖ SDK/API |
 | Schedules | ✅ | ✅ (very mature) | ✅ |
 | Concurrency / rate limits | ✅ Keys, strategies, rate limits | ✅ Global and tag concurrency limits, rate limits | ✅ Queues and concurrency keys |

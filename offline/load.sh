@@ -25,7 +25,7 @@ install() {
   tar -C "$target" -xf "$BUNDLE/source.tar"
   echo "$target" >"$TARGET_FILE"
   touch "$target/trigger.dev/registry/auth.htpasswd" # generate-secrets.sh fills it
-  for dir in hatchet/example-worker board; do
+  for dir in hatchet/example-worker prefect/example-worker board; do
     mkdir -p "$target/$dir/wheelhouse"
     cp "$BUNDLE"/wheelhouse/*.whl "$target/$dir/wheelhouse/" 2>/dev/null || true
   done
@@ -44,7 +44,8 @@ Done. Next steps (details in $target/OFFLINE.md):
   cd $target/trigger.dev && cp .env.example .env && cat local.env.example >> .env && ./generate-secrets.sh
                             docker compose up -d
   $BUNDLE/load.sh trigger-base-images
-  cd $target/board       && cp .env.example .env   # add the Hatchet token / Trigger.dev secret key
+  cd $target/prefect     && cp .env.example .env && docker compose up -d --no-build   # -> http://<this-host>:4200
+  cd $target/board      && cp .env.example .env   # add the Hatchet token / Trigger.dev secret key
                             docker compose up -d --no-build   # -> http://<this-host>:8090
 EOF
 }
