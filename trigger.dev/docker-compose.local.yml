@@ -1,0 +1,61 @@
+# Local overrides layered on top of the UNMODIFIED upstream compose files
+# (webapp/docker-compose.yml + worker/docker-compose.yml, from the tag in UPSTREAM_VERSION).
+#
+# Keep every local change here (or in .env) - never edit the upstream files - so upgrading is:
+#   ./scripts/update-upstream.sh vX.Y.Z   (refresh upstream files, bump TRIGGER_IMAGE_TAG)
+# Everything below is additive; nothing here depends on a particular Trigger.dev version.
+#
+# Loaded automatically via COMPOSE_FILE in .env. NOTE: relative paths are resolved against
+# the first compose file's directory (webapp/), hence the ../ prefixes.
+
+services:
+  webapp:
+    # Optional extra webapp settings (signup whitelist, SMTP, limits...) - see webapp.env.example.
+    # Separate file because the webapp rejects some of these when set to an empty string.
+    env_file:
+      - path: ../webapp.env
+        required: false
+    # Exchange/SMTP server with an internal CA: put the CA certificate in ./certs and uncomment,
+    # then set NODE_EXTRA_CA_CERTS in webapp.env (see webapp.env.example).
+    # volumes:
+    #   - ../certs:/certs:ro
+    ports: !override
+      - ${WEBAPP_PUBLISH_IP:-0.0.0.0}:${WEBAPP_PORT:-8030}:3000
+    environment:
+      # Upstream default is "phone home" telemetry + PostHog; off for an offline network.
+      TRIGGER_TELEMETRY_DISABLED: ${TRIGGER_TELEMETRY_DISABLED:-1}
+      # Deployed runs call the API from inside their containers, where API_ORIGIN (localhost:8030)
+      # is the container itself -> child triggers / waits fail with ECONNREFUSED.
+      # Route deployed runs to the webapp service instead (CLI + browser keep using API_ORIGIN).
+      INTERNAL_API_ORIGIN: ${INTERNAL_API_ORIGIN:-http://webapp:3000}
+      INTERNAL_API_ORIGIN_ENABLED: ${INTERNAL_API_ORIGIN_ENABLED:-1}
+      # Same problem for realtime streams (input streams = human steering, metadata/AI streams):
+      # runs get TRIGGER_STREAM_URL = STREAM_ORIGIN ?? API_ORIGIN, and INTERNAL_API_ORIGIN does not
+      # apply to it. Without this, `streams.input(...).once()/.on()` never receive anything.
+      # Trade-off: `trigger dev` runs (on a developer machine) also get this URL; if you need input
+      # streams in dev mode, give the server a real DNS name and use it for API_ORIGIN instead.
+      STREAM_ORIGIN: ${STREAM_ORIGIN:-http://webapp:3000}
+      # Upstream leaves this unset (= whole machine); keep the webapp heap sane on small hosts.
+      NODE_MAX_OLD_SPACE_SIZE: ${NODE_MAX_OLD_SPACE_SIZE:-1600}
+
+  clickhouse:
+    # Host port for the native protocol is configurable: 9090 sits inside a Windows/Hyper-V
+    # reserved port range on some machines.
+    ports: !override
+      - ${CLICKHOUSE_PUBLISH_IP:-127.0.0.1}:9123:8123
+      - ${CLICKHOUSE_PUBLISH_IP:-127.0.0.1}:${CLICKHOUSE_NATIVE_HOST_PORT:-9090}:9000
+
+  registry:
+    # Upstream keeps pushed images in the container filesystem (lost on recreate). Persist them,
+    # which also matters in the offline network where this registry holds the mirrored base images.
+    volumes:
+      - registry:/var/lib/registry
+
+  supervisor:
+    # Upstream starts both stacks at once; the supervisor can race the webapp's bootstrap
+    # (worker_token not written yet) and restart once. Harmless, but this avoids it.
+    depends_on:
+      - webapp
+
+volumes:
+  registry:

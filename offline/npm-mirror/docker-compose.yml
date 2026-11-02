@@ -1,0 +1,23 @@
+# Verdaccio npm mirror.
+#   Connected side: MODE=online  -> proxies registry.npmjs.org and caches every tarball it serves.
+#   Offline side:    MODE=offline -> no uplink; serves only what was cached (storage imported by load.sh).
+# Config is baked into a tiny image (no bind mounts) so it works on any Docker host.
+name: npm-mirror
+
+services:
+  verdaccio:
+    build:
+      context: .
+      args:
+        VERDACCIO_IMAGE_TAG: ${VERDACCIO_IMAGE_TAG:-6}
+        MODE: ${MODE:-offline}
+    image: npm-mirror:${MODE:-offline}
+    restart: unless-stopped
+    ports:
+      - "${NPM_MIRROR_PORT:-4873}:4873"
+    volumes:
+      - storage:/verdaccio/storage
+
+volumes:
+  storage:
+    name: npm-mirror-storage

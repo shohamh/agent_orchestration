@@ -1,0 +1,18 @@
+# Overlay: export flow/task-run traces to the shared OTLP backend (../observability, Jaeger).
+# Prefect's self-hosted server has no trace store/viewer of its own (its UI shows logs and a run
+# timeline), so this is how traces get collected. Requires the observability stack to be up.
+# Enable: COMPOSE_FILE=docker-compose.yml:docker-compose.otel.yml in .env
+x-otel: &otel
+  networks: [default, otel]
+  environment:
+    OTEL_TRACES_EXPORTER: otlp
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+
+services:
+  example-worker: *otel
+  hardware-station-a: *otel
+  hardware-station-b: *otel
+
+networks:
+  otel:
+    external: true

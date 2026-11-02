@@ -1,0 +1,1 @@
+prefect[otel]==3.9.1

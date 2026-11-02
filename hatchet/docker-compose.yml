@@ -1,0 +1,165 @@
+# Hatchet self-hosted stack (production-style layout, Postgres-only message queue).
+# Based on https://docs.hatchet.run/self-hosting/docker-compose, with:
+#   - all images pinned (no :latest) so the offline bundle is reproducible
+#   - RabbitMQ removed (SERVER_MSGQUEUE_KIND=postgres) -> one less image/service
+#   - outbound security check disabled (it phones https://security.hatchet.run)
+#   - host/ports driven by .env so the same files work on localhost or an offline LAN host
+name: hatchet
+
+x-db-url: &db-url "postgres://hatchet:${POSTGRES_PASSWORD:-hatchet}@postgres:5432/hatchet?sslmode=disable"
+
+x-offline-env: &offline-env
+  # Built-in trace collector: workers' OTel spans (hatchet_sdk HatchetInstrumentor) are accepted by
+  # the engine and shown on each run in the dashboard. Stored in Postgres; no extra services.
+  SERVER_OBSERVABILITY_ENABLED: "true"
+  SERVER_SECURITY_CHECK_ENABLED: "false"
+  SERVER_ANALYTICS_POSTHOG_ENABLED: "false"
+  SERVER_ALERTING_SENTRY_ENABLED: "false"
+  SERVER_PYLON_ENABLED: "false"
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_IMAGE_TAG:-15.6}
+    command: postgres -c 'max_connections=1000'
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hatchet}
+      POSTGRES_DB: hatchet
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5435}:5432"
+    volumes:
+      - hatchet_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d hatchet -U hatchet"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  migration:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-migrate:${HATCHET_VERSION:-v0.114.2}
+    command: /hatchet/hatchet-migrate
+    environment:
+      DATABASE_URL: *db-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-shot: generates encryption keys, cookie secrets and server config into the
+  # hatchet_config volume, and seeds the admin user + default tenant.
+  # --overwrite=false means re-running it never rotates existing secrets.
+  setup-config:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-admin:${HATCHET_VERSION:-v0.114.2}
+    command: /hatchet/hatchet-admin quickstart --skip certs --generated-config-dir /hatchet/config --overwrite=false
+    environment:
+      <<: *offline-env
+      DATABASE_URL: *db-url
+      SERVER_MSGQUEUE_KIND: postgres
+      SERVER_URL: http://${HATCHET_HOST:-localhost}:${HATCHET_DASHBOARD_PORT:-8080}
+      SERVER_AUTH_COOKIE_DOMAIN: ${HATCHET_HOST:-localhost}:${HATCHET_DASHBOARD_PORT:-8080}
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+      # Address baked into API tokens: what *workers* dial. Must be reachable from wherever workers run.
+      SERVER_GRPC_BROADCAST_ADDRESS: ${HATCHET_HOST:-localhost}:${HATCHET_GRPC_PORT:-7077}
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: hatchet-engine:7070
+      ADMIN_EMAIL: ${HATCHET_ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD:-Admin123!!}
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  hatchet-engine:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-engine:${HATCHET_VERSION:-v0.114.2}
+    command: /hatchet/hatchet-engine --config /hatchet/config
+    restart: unless-stopped
+    depends_on:
+      setup-config:
+        condition: service_completed_successfully
+      migration:
+        condition: service_completed_successfully
+    ports:
+      - "${HATCHET_GRPC_PORT:-7077}:7070"
+    environment:
+      <<: *offline-env
+      DATABASE_URL: *db-url
+      SERVER_MSGQUEUE_KIND: postgres
+      SERVER_GRPC_BIND_ADDRESS: "0.0.0.0"
+      SERVER_GRPC_INSECURE: "t"
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+  # REST API + web UI (nginx) in one container.
+  hatchet-dashboard:
+    image: ghcr.io/hatchet-dev/hatchet/hatchet-dashboard:${HATCHET_VERSION:-v0.114.2}
+    command: sh ./entrypoint.sh --config /hatchet/config
+    restart: unless-stopped
+    ports:
+      - "${HATCHET_DASHBOARD_PORT:-8080}:80"
+    depends_on:
+      setup-config:
+        condition: service_completed_successfully
+      migration:
+        condition: service_completed_successfully
+    environment:
+      <<: *offline-env
+      DATABASE_URL: *db-url
+      SERVER_MSGQUEUE_KIND: postgres
+    volumes:
+      - hatchet_certs:/hatchet/certs
+      - hatchet_config:/hatchet/config
+
+  # Example Python worker (opt-in: `docker compose --profile worker up -d --build`).
+  # Inside the compose network it dials the engine directly, overriding the address in the token.
+  example-worker:
+    profiles: ["worker"]
+    build: ./example-worker
+    image: hatchet-example-worker:local
+    restart: unless-stopped
+    depends_on:
+      - hatchet-engine
+    environment:
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-} # set by ./scripts/create-token.sh
+      HATCHET_CLIENT_HOST_PORT: hatchet-engine:7070
+      HATCHET_CLIENT_SERVER_URL: http://hatchet-dashboard:80   # REST API (cancel, status...) from inside the network
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      # Optional: also send traces to a shared OTLP backend (../observability), e.g. http://jaeger:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+  # Two simulated "PCs with hardware attached" (opt-in: --profile hardware). In real life run
+  # hardware_worker.py natively on each PC, or in Docker with the device passed through, e.g.:
+  #   devices: ["/dev/ttyUSB0:/dev/ttyUSB0"]   + SENSOR_DEVICE=/dev/ttyUSB0
+  hardware-station-a: &hardware-worker
+    profiles: ["hardware"]
+    build: ./example-worker
+    image: hatchet-example-worker:local
+    command: ["python", "-u", "hardware_worker.py"]
+    restart: unless-stopped
+    depends_on:
+      - hatchet-engine
+    environment: &hardware-env
+      STATION: station-a
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+      HATCHET_CLIENT_HOST_PORT: hatchet-engine:7070
+      HATCHET_CLIENT_SERVER_URL: http://hatchet-dashboard:80   # REST API (cancel, status...) from inside the network
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+  hardware-station-b:
+    <<: *hardware-worker
+    environment:
+      <<: *hardware-env
+      STATION: station-b
+
+volumes:
+  hatchet_postgres_data:
+  hatchet_config:
+  hatchet_certs:

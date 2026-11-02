@@ -1,0 +1,255 @@
+<title>Hatchet vs Trigger.dev</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,500..800&family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: single reading column; requirement sections pair the two tools side by side, detail tables scroll on their own. */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --ink: #17202b;
+  --muted: #5b6676;
+  --rule: #dde2e9;
+  --hatchet: #3b4fd8;
+  --trigger: #0f8a6c;
+  --good: #1f7a3d;
+  --good-bg: #e4f4e8;
+  --mid: #8a5a00;
+  --mid-bg: #fbf0d9;
+  --bad: #b3261e;
+  --bad-bg: #fbe6e4;
+  --code-bg: #eef1f5;
+  --font-display: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11151b; --surface: #181e26; --ink: #e6eaf0; --muted: #9aa5b4; --rule: #2a323d;
+    --hatchet: #8c9bff; --trigger: #4fd1a8;
+    --good: #7ad694; --good-bg: #173322; --mid: #f0c060; --mid-bg: #3a2e12; --bad: #ff8a80; --bad-bg: #3d1a18;
+    --code-bg: #212833; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11151b; --surface: #181e26; --ink: #e6eaf0; --muted: #9aa5b4; --rule: #2a323d;
+  --hatchet: #8c9bff; --trigger: #4fd1a8;
+  --good: #7ad694; --good-bg: #173322; --mid: #f0c060; --mid-bg: #3a2e12; --bad: #ff8a80; --bad-bg: #3d1a18;
+  --code-bg: #212833; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.6 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 980px; margin: 0 auto; padding-block: 40px 64px; display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--font-display); font-stretch: 85%; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); font-weight: 800; letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; font-weight: 700; }
+h3 { font-size: 1.1rem; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+code { font-family: var(--font-mono); font-size: 0.86em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--hatchet); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--hatchet); outline-offset: 2px; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 1.15rem; color: var(--muted); }
+header { display: grid; gap: 14px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+.tool-h { color: var(--hatchet); } .tool-t { color: var(--trigger); }
+section { display: grid; gap: 18px; }
+.verdict {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+  padding: 22px; display: grid; gap: 14px;
+}
+.verdict ul { margin: 0; padding-left: 1.2em; display: grid; gap: 8px; }
+.verdict li { max-width: 72ch; }
+.pick { border-left: 4px solid var(--hatchet); padding-left: 14px; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+nav.toc a {
+  font-size: 0.9rem; text-decoration: none; color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 999px; padding: 4px 12px; background: var(--surface);
+}
+nav.toc a:hover { border-color: var(--muted); }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.card {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px;
+  display: grid; gap: 10px; align-content: start; min-width: 0;
+}
+.card .name { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.card.h { border-top: 3px solid var(--hatchet); } .card.t { border-top: 3px solid var(--trigger); }
+.chip { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.chip.good { color: var(--good); background: var(--good-bg); }
+.chip.mid { color: var(--mid); background: var(--mid-bg); }
+.chip.bad { color: var(--bad); background: var(--bad-bg); }
+.tested { font-family: var(--font-mono); font-size: 0.72rem; color: var(--good); }
+.table-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.93rem; }
+th, td { text-align: left; vertical-align: top; padding: 10px 14px; border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: 0; }
+thead th { font-family: var(--font-display); font-stretch: 85%; font-weight: 700; font-size: 0.95rem; background: var(--code-bg); }
+thead th.h { color: var(--hatchet); } thead th.t { color: var(--trigger); }
+tbody th { font-weight: 700; width: 22%; }
+td { width: 39%; }
+.num { font-variant-numeric: tabular-nums; }
+.sym { font-weight: 700; margin-right: 4px; }
+.sym.y { color: var(--good); } .sym.p { color: var(--mid); } .sym.n { color: var(--bad); }
+.note { font-size: 0.9rem; color: var(--muted); }
+.findings { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.findings li { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; display: grid; gap: 4px; }
+.findings b { font-family: var(--font-display); font-stretch: 90%; }
+footer { border-top: 1px solid var(--rule); padding-top: 18px; display: grid; gap: 6px; }
+@media (max-width: 520px) { .wrap { padding-block: 24px 48px; gap: 36px; } .verdict, .card { padding: 16px; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+html { scroll-behavior: smooth; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Self-hosted agent orchestration · offline network evaluation</span>
+  <h1><span class="tool-h">Hatchet</span> vs <span class="tool-t">Trigger.dev</span></h1>
+  <p class="lede">Both tools ran side by side with Docker Compose on one machine, using the same agent examples. This page covers three requirements: agents bound to local hardware, agents a human can interrupt and steer, and trace collection.</p>
+  <div class="meta">
+    <span>Hatchet v0.114.2</span><span>Trigger.dev v4.8.3</span><span>Tested 2 Nov 2026</span><span>Docker Compose, single host</span>
+  </div>
+</header>
+
+<section class="verdict" aria-labelledby="verdict-h">
+  <h2 id="verdict-h">Verdict</h2>
+  <p class="pick"><strong>Hatchet is the better fit</strong> for agents in an offline network that must talk to hardware on the PC they run on. That holds especially if any agent code is Python. Trigger.dev suits TypeScript-first teams building web-facing agents that stream to a UI, where per-run isolation and versioned deploys matter more than hardware access.</p>
+  <ul>
+    <li><strong>Hardware:</strong> Hatchet workers are your own processes, so they reach any device the PC exposes. Labels route each task to the right machine. Trigger.dev's self-hosted Docker worker runs every run in a fresh container with no device or volume passthrough.</li>
+    <li><strong>Steering and interrupts:</strong> both work, and both were tested here: redirect mid-run, graceful stop, hard cancel. Hatchet's waits are durable and free a worker slot. On self-hosted Trigger.dev, a waiting run keeps its container alive.</li>
+    <li><strong>Traces:</strong> both collect per-run traces in their own dashboards, and both export to a shared OTLP backend. Both were verified in Jaeger.</li>
+    <li><strong>Running offline:</strong> Hatchet only needs <code>docker save</code> and <code>docker load</code>. Trigger.dev also needs mirrored build base images, an npm mirror and a host-network builder. All of it is scripted and was tested.</li>
+  </ul>
+</section>
+
+<nav class="toc" aria-label="Sections">
+  <a href="#hardware">Hardware access</a>
+  <a href="#steering">Interrupt &amp; steer</a>
+  <a href="#tracing">Traces</a>
+  <a href="#ops">Operations</a>
+  <a href="#capabilities">All capabilities</a>
+  <a href="#findings">Setup findings</a>
+</nav>
+
+<section id="hardware" aria-labelledby="hw-h">
+  <span class="eyebrow">Requirement 1</span>
+  <h2 id="hw-h">Agents that talk to hardware on their own PC</h2>
+  <div class="pair">
+    <div class="card h">
+      <div class="name"><span class="tool-h">Hatchet</span><span class="chip good">Natural fit</span></div>
+      <p>Run a worker on each PC that has a device, natively or in Docker with <code>devices:</code>. It advertises labels such as <code>device=sensor</code> and <code>station=lab-pc-2</code>. Tasks declare the labels they need, and a caller can pin a run to one station. <code>slots=1</code> serializes access to the device.</p>
+      <span class="tested">Tested: read-sensor ran only on labelled workers, and the per-run pin landed on station-a.</span>
+    </div>
+    <div class="card t">
+      <div class="name"><span class="tool-t">Trigger.dev</span><span class="chip bad">Indirect</span></div>
+      <p>Regions (worker groups) can send a run to a specific machine, but the run executes in a container the supervisor creates with only network, CPU and memory settings. It has no devices, volumes or privileged mode. To reach hardware you need a small bridge service on each PC that tasks call over HTTP, a patched supervisor, or <code>trigger dev</code> on that PC (development mode only).</p>
+      <span class="note">From source: <code>apps/supervisor/src/workloadManager/docker.ts</code></span>
+    </div>
+  </div>
+</section>
+
+<section id="steering" aria-labelledby="st-h">
+  <span class="eyebrow">Requirement 2</span>
+  <h2 id="st-h">Human-interruptible and steerable agents</h2>
+  <div class="pair">
+    <div class="card h">
+      <div class="name"><span class="tool-h">Hatchet</span><span class="chip good">Strong</span></div>
+      <p>Between steps, the agent durably waits for either a short timeout or a steer event scoped to its run. A human pushes <code>agent:steer</code> with a new instruction or a stop. A hard interrupt is a normal cancel from the dashboard or API. Waits survive worker restarts, and the worker slot is released while waiting.</p>
+      <span class="tested">Tested: goal redirected mid-run, graceful stop, cancel → CANCELLED.</span>
+    </div>
+    <div class="card t">
+      <div class="name"><span class="tool-t">Trigger.dev</span><span class="chip good">Strong</span></div>
+      <p>Input streams: <code>steer.send(runId, …)</code> from outside, and <code>steer.once()</code>, <code>.on()</code> or <code>.wait()</code> inside the task. Waitpoint tokens handle approvals, and cancel works from the dashboard or API. Live metadata and realtime streams make a UI easy, and there are AI-chat helpers with steering. Self-hosted has no checkpoints, so long human waits keep the run's container running.</p>
+      <span class="tested">Tested: redirect, graceful stop, cancel → CANCELED.</span>
+    </div>
+  </div>
+  <p class="note">Self-hosted Trigger.dev needed <code>STREAM_ORIGIN</code> pointed at the internal webapp address. Without it, steering messages are stored but never reach the run. This was found during testing and is fixed in the setup.</p>
+</section>
+
+<section id="tracing" aria-labelledby="tr-h">
+  <span class="eyebrow">Requirement 3</span>
+  <h2 id="tr-h">Trace collection from agents</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col"></th><th scope="col" class="h">Hatchet</th><th scope="col" class="t">Trigger.dev</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Built-in trace view</th><td><span class="sym y">✓</span>The engine's OTel collector is turned on with <code>SERVER_OBSERVABILITY_ENABLED</code>, and workers send spans through <code>HatchetInstrumentor</code>. Spans are stored in Postgres and shown per run.</td><td><span class="sym y">✓</span>Always on. Every run has a trace view with spans and logs.</td></tr>
+        <tr><th scope="row">Custom spans</th><td><code>tracer.start_as_current_span("llm.call")</code></td><td><code>logger.trace("agent.step", …)</code></td></tr>
+        <tr><th scope="row">Recorded in testing</th><td><code>agent.step</code>, <code>llm.call</code>, <code>device.read</code>, durable waits, cancels</td><td><code>agent.step</code>, <code>inputStream.once()</code>, steer log events</td></tr>
+        <tr><th scope="row">Export to your backend</th><td><span class="sym y">✓</span>Any OTLP exporter on the tracer provider</td><td><span class="sym y">✓</span><code>telemetry.exporters</code> in <code>trigger.config.ts</code></td></tr>
+        <tr><th scope="row">Shared view (tested)</th><td colspan="2">Both systems' traces appear in one bundled Jaeger instance, which works offline.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ops" aria-labelledby="ops-h">
+  <span class="eyebrow">Measured on this setup</span>
+  <h2 id="ops-h">Operations</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col"></th><th scope="col" class="h">Hatchet</th><th scope="col" class="t">Trigger.dev</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Containers at idle</th><td class="num">4</td><td class="num">11</td></tr>
+        <tr><th scope="row">RAM at idle</th><td class="num">≈ 0.7 GB</td><td class="num">≈ 2.0 GB</td></tr>
+        <tr><th scope="row">First successful run</th><td class="num">≈ 2 min, 4 commands</td><td class="num">≈ 10 min: secrets, magic-link login, project, token, image build</td></tr>
+        <tr><th scope="row">Datastores</th><td>Postgres</td><td>Postgres, Redis, ClickHouse, MinIO, registry, s2, Electric</td></tr>
+        <tr><th scope="row">Getting code running</th><td>Start a worker anywhere</td><td><code>trigger deploy</code> builds an image, and the supervisor runs one container per run</td></tr>
+        <tr><th scope="row">Offline transfer</th><td><span class="chip good">Easy</span> image save/load</td><td><span class="chip mid">Moderate</span> plus base images, npm mirror, builder</td></tr>
+        <tr><th scope="row">Upgrades</th><td>Bump one version variable; migrations run on start</td><td>Script refreshes the upstream files at a release tag; local changes live in one override</td></tr>
+        <tr><th scope="row">License</th><td>MIT</td><td>Apache-2.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="capabilities" aria-labelledby="cap-h">
+  <span class="eyebrow">From docs and source</span>
+  <h2 id="cap-h">All capabilities</h2>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col"></th><th scope="col" class="h">Hatchet</th><th scope="col" class="t">Trigger.dev</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Languages</th><td>Python, TypeScript, Go, Ruby</td><td>TypeScript/JavaScript (Python via build extension)</td></tr>
+        <tr><th scope="row">DAG workflows</th><td><span class="sym y">✓</span>Declared parents, graph view</td><td><span class="sym p">~</span>In code with batch waits</td></tr>
+        <tr><th scope="row">Durable long waits</th><td><span class="sym y">✓</span>Durable tasks, slot released</td><td><span class="sym p">~</span>Self-hosted: container stays alive</td></tr>
+        <tr><th scope="row">Event-triggered runs</th><td><span class="sym y">✓</span>With filters</td><td><span class="sym p">~</span>SDK/API, webhooks in your code</td></tr>
+        <tr><th scope="row">Schedules and delays</th><td><span class="sym y">✓</span></td><td><span class="sym y">✓</span></td></tr>
+        <tr><th scope="row">Concurrency control</th><td><span class="sym y">✓</span>Group keys and strategies</td><td><span class="sym y">✓</span>Queues and concurrency keys</td></tr>
+        <tr><th scope="row">Rate limits</th><td><span class="sym y">✓</span>Static and dynamic</td><td><span class="sym p">~</span>Via queue concurrency</td></tr>
+        <tr><th scope="row">Worker routing</th><td><span class="sym y">✓</span>Labels, sticky, per-run targeting</td><td><span class="sym p">~</span>Regions, machine sizes</td></tr>
+        <tr><th scope="row">Per-run isolation</th><td><span class="sym p">~</span>Shared worker process</td><td><span class="sym y">✓</span>Container per run with CPU/RAM limits</td></tr>
+        <tr><th scope="row">Streaming to a UI</th><td><span class="sym y">✓</span>Stream subscriptions</td><td><span class="sym y">✓</span>Realtime API, React hooks, AI token streams</td></tr>
+        <tr><th scope="row">Versioned deploys</th><td><span class="sym p">~</span>You version worker images</td><td><span class="sym y">✓</span>Atomic versions, rollback</td></tr>
+        <tr><th scope="row">Local dev loop</th><td>Run the worker locally</td><td><span class="sym y">✓</span><code>trigger dev</code> with hot reload</td></tr>
+        <tr><th scope="row">Scaling out</th><td>Add workers anywhere</td><td>More supervisors; no autoscaling self-hosted</td></tr>
+        <tr><th scope="row">Self-hosted vs cloud</th><td>Same engine</td><td>No checkpoints, warm starts or autoscaling</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note"><span class="sym y">✓</span> built in · <span class="sym p">~</span> partial or by convention</p>
+</section>
+
+<section id="findings" aria-labelledby="fi-h">
+  <span class="eyebrow">Found while setting up</span>
+  <h2 id="fi-h">Setup findings</h2>
+  <ul class="findings">
+    <li><b>Trigger.dev: runs call the API from inside containers</b><span>With the public URL on localhost, child tasks and steering fail. The fix is <code>INTERNAL_API_ORIGIN</code> and <code>STREAM_ORIGIN</code> pointing at the internal webapp, or a real DNS name for the server.</span></li>
+    <li><b>Trigger.dev: offline deploys have hidden downloads</b><span>The build pulls digest-pinned base images, a Dockerfile syntax image from Docker Hub, and runs <code>npm install</code> inside the image. The offline bundle mirrors all three. A deploy was verified using only the local registry and an offline npm mirror.</span></li>
+    <li><b>Trigger.dev: parallel child waits</b><span><code>Promise.all</code> over <code>triggerAndWait</code> fails. Use <code>batch.triggerByTaskAndWait</code>.</span></li>
+    <li><b>Hatchet: trace collector is off by default</b><span>Set <code>SERVER_OBSERVABILITY_ENABLED=true</code> on the engine, or workers silently drop their spans.</span></li>
+    <li><b>Hatchet: REST calls from containers</b><span>API tokens embed the public URL. Inside Docker, set <code>HATCHET_CLIENT_SERVER_URL</code> to the internal dashboard address.</span></li>
+  </ul>
+</section>
+
+<footer>
+  <p class="note">Rows marked tested were run against the local setup with the example code (task, fan-out pipeline, agent loop, steerable agent, hardware-bound task). Other rows come from the official documentation and the SDK and server source at the listed versions.</p>
+</footer>
+
+</div>

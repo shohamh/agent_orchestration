@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Board</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #677085; --line: #e2e5ec;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --danger: #c92a2a; --warn: #e67700; --ok: #2b8a3e;
+    --chip: #eef1f6; --shadow: 0 1px 2px rgba(20, 30, 50, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --ink: #e6e9f0; --muted: #98a1b3; --line: #2b313d;
+      --accent: #7c93f2; --accent-ink: #0f1320; --danger: #ff6b6b; --warn: #ffa94d; --ok: #69db7c;
+      --chip: #262c38; --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+  h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .tabs { display: flex; gap: 4px; background: var(--chip); padding: 3px; border-radius: 8px; }
+  .tabs button { border: 0; background: transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .tabs button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); font-weight: 600; }
+  select, input, textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  button.primary, button.secondary, button.danger { font: inherit; border-radius: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid transparent; }
+  button.primary { background: var(--accent); color: var(--accent-ink); }
+  button.secondary { background: var(--panel); color: var(--ink); border-color: var(--line); }
+  button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  .spacer { flex: 1; }
+  .status { color: var(--muted); font-size: 12px; }
+  .status.error { color: var(--danger); }
+  main { display: grid; grid-template-columns: repeat(6, minmax(220px, 1fr)); gap: 12px; padding: 16px; overflow-x: auto; min-height: calc(100vh - 60px); align-items: start; }
+  .column { background: var(--chip); border-radius: 10px; padding: 8px; min-height: 120px; }
+  .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 4px 6px 8px; display: flex; justify-content: space-between; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); }
+  .card:hover, .card:focus-visible { border-color: var(--accent); outline: none; }
+  .card .title { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
+  .card .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .card .last { margin-top: 6px; font-size: 12px; color: var(--ink); background: var(--chip); border-radius: 4px; padding: 4px 6px; overflow-wrap: anywhere; }
+  .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+  .chip.running { color: var(--accent); } .chip.waiting { color: var(--warn); } .chip.done { color: var(--ok); } .chip.stopped { color: var(--danger); }
+  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 0; }
+  aside { position: fixed; top: 0; right: 0; width: min(520px, 100vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .15s ease; z-index: 3; display: flex; flex-direction: column; }
+  aside.open { transform: none; }
+  aside .head { padding: 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: start; }
+  aside .head h3 { margin: 0; font-size: 16px; flex: 1; overflow-wrap: anywhere; }
+  aside .body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
+  aside h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+  ol.progress { margin: 0; padding-left: 20px; font-size: 13px; max-height: 260px; overflow-y: auto; }
+  ol.progress li { padding: 2px 0; }
+  pre { margin: 0; background: var(--chip); border-radius: 6px; padding: 8px; font-size: 12px; overflow: auto; max-height: 200px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row input { flex: 1; min-width: 180px; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 20px; width: min(440px, 92vw); }
+  dialog form { display: flex; flex-direction: column; gap: 10px; }
+  dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  .close { border: 0; background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+  .dag-wrap { overflow: auto; background: var(--chip); border-radius: 8px; padding: 8px; max-height: 420px; }
+  .dag-wrap svg { display: block; margin: 0 auto; }
+  .dag-node { cursor: pointer; }
+  .dag-node rect.box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+  .dag-node:hover rect.box, .dag-node:focus rect.box { stroke: var(--muted); outline: none; }
+  .dag-node.selected rect.box { stroke: var(--accent); stroke-width: 2.5; }
+  .dag-node text { fill: var(--ink); font-size: 12px; }
+  .dag-node text.st { fill: var(--muted); font-size: 10px; }
+  .dag-edge { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+  .dag-edge.calls { stroke: var(--line); stroke-width: 1.2; }
+  .dag-edge.then { stroke: var(--accent); stroke-dasharray: 5 4; }
+  .bar-pending { fill: var(--line); } .bar-scheduled, .bar-queued { fill: var(--muted); } .bar-running { fill: var(--accent); }
+  .bar-waiting { fill: var(--warn); } .bar-done { fill: var(--ok); } .bar-stopped { fill: var(--danger); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .legend svg { vertical-align: middle; margin-right: 4px; }
+  .node-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .node-panel h5 { margin: 0; font-size: 14px; }
+  @media (max-width: 700px) { main { grid-template-columns: repeat(6, 80vw); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Board</h1>
+  <div class="tabs" id="systems" role="group" aria-label="Backend"></div>
+  <label class="status" for="board">Board</label>
+  <select id="board" aria-label="Board"></select>
+  <button class="secondary" id="add-board" type="button">+ Board</button>
+  <button class="primary" id="new-card" type="button">New card</button>
+  <span class="spacer"></span>
+  <span class="status" id="status" role="status">Loading…</span>
+</header>
+
+<main id="columns" aria-live="polite"></main>
+
+<aside id="drawer" aria-hidden="true" aria-labelledby="d-title">
+  <div class="head">
+    <h3 id="d-title"></h3>
+    <button class="close" id="d-close" type="button" aria-label="Close">×</button>
+  </div>
+  <div class="body">
+    <section><dl id="d-facts"></dl></section>
+    <section id="d-steer-section">
+      <h4>Steer</h4>
+      <form class="row" id="d-steer">
+        <input id="d-instruction" placeholder="New instruction for the agent…" aria-label="Instruction">
+        <button class="primary" type="submit">Send</button>
+      </form>
+      <div class="row" style="margin-top:8px">
+        <button class="secondary" id="d-stop" type="button" title="Ask the agent to finish gracefully after its current step">Stop gracefully</button>
+        <button class="danger" id="d-cancel" type="button" title="Hard interrupt: cancel the run now">Cancel now</button>
+      </div>
+    </section>
+    <section id="d-queue-section">
+      <h4>Queue</h4>
+      <div class="row"><span id="d-queue" class="status"></span>
+        <button class="secondary" id="d-pause" type="button" hidden></button></div>
+    </section>
+    <section id="d-dag-section" hidden>
+      <h4 id="d-dag-title">Graph</h4>
+      <div class="dag-wrap" id="d-dag"></div>
+      <div class="legend" id="d-legend"></div>
+      <div class="node-panel" id="d-node" hidden style="margin-top:10px"></div>
+    </section>
+    <section><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
+    <section id="d-output-section"><h4>Output</h4><pre id="d-output"></pre></section>
+    <section id="d-replay-section"><button class="secondary" id="d-replay" type="button">Run again (replay)</button></section>
+  </div>
+</aside>
+
+<dialog id="new-dialog">
+  <form id="new-form" method="dialog">
+    <strong>New card</strong>
+    <label>Type
+      <select id="n-kind">
+        <option value="steerable-agent">Steerable agent (long-running, steerable)</option>
+        <option value="research-report">Research report (multi-step DAG)</option>
+      </select>
+    </label>
+    <label><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
+    <label class="agent-only">Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
+    <label class="agent-only">Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
+    <div class="row" style="justify-content:flex-end">
+      <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
+      <button class="primary" value="create" type="submit">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const COLUMN_LABELS = { scheduled: "Scheduled", queued: "Queued", running: "Running", waiting: "Waiting", done: "Done", stopped: "Stopped / failed" };
+const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev" };
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+};
+
+let columns = [];
+let systems = [];
+let system = null;
+let boards = store.get("boards", ["research", "lab-a"]);
+let board = store.get("board", boards[0]);
+let cards = [];
+let openCardId = null;
+
+async function api(method, path, body) {
+  const response = await fetch(path, {
+    method, headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function ago(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+
+function queueText(card) {
+  const q = card.queue || {};
+  const parts = [];
+  if (card.column === "queued" && q.ahead != null) parts.push(q.ahead === 0 ? "next up" : `${q.ahead} ahead`);
+  if (q.running != null) parts.push(`${q.running} running${q.limit ? ` / limit ${q.limit}` : ""}`);
+  if (q.queued != null) parts.push(`${q.queued} queued`);
+  if (q.paused) parts.push("queue PAUSED");
+  return parts.join(" · ");
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v; else if (k.startsWith("on")) node.addEventListener(k.slice(2), v); else node.setAttribute(k, v);
+  }
+  for (const child of children) if (child != null) node.append(child);
+  return node;
+}
+
+function renderHeader() {
+  $("systems").replaceChildren(...systems.map((s) =>
+    el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; renderBoard(); refresh(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
+  $("board").replaceChildren(...boards.map((b) => { const o = el("option", { value: b }, b); if (b === board) o.selected = true; return o; }));
+}
+
+function renderBoard() {
+  $("columns").replaceChildren(...columns.map((col) => {
+    const inCol = cards.filter((c) => c.column === col);
+    return el("section", { class: "column", "aria-label": COLUMN_LABELS[col] },
+      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, String(inCol.length))),
+      ...(inCol.length ? inCol.map(renderCard) : [el("div", { class: "empty" }, "—")]));
+  }));
+}
+
+function renderCard(card) {
+  const last = card.progress[card.progress.length - 1];
+  const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
+    : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
+  const q = card.column === "queued" ? queueText(card) : "";
+  return el("div", { class: "card", tabindex: "0", role: "button", onclick: () => openCard(card.id), onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); } },
+    el("div", { class: "title" }, card.title),
+    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.status), el("span", {}, card.task), el("span", {}, when)),
+    q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
+    last ? el("div", { class: "last" }, last) : null);
+}
+
+function duration(card) {
+  if (!card.started_at || !card.finished_at) return "";
+  const s = (new Date(card.finished_at) - new Date(card.started_at)) / 1000;
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m`;
+}
+
+function openCard(id) {
+  if (id !== openCardId) { dag = null; selectedNode = null; nodeLogs = { ref: null, lines: [] }; $("d-dag-section").hidden = true; }
+  openCardId = id; renderDrawer(); refreshDag(); $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false"); $("d-instruction").focus(); }
+function closeDrawer() { openCardId = null; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+
+function renderDrawer() {
+  const card = cards.find((c) => c.id === openCardId);
+  if (!card) return;
+  $("d-title").textContent = card.title;
+  const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", card.created_at], ["Started", card.started_at], ["Finished", card.finished_at]];
+  $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+  $("d-steer-section").hidden = !card.steerable;
+  $("d-queue").textContent = queueText(card);
+  const pause = $("d-pause");
+  pause.hidden = system !== "trigger" || !card.queue?.id;
+  $("d-queue-section").hidden = !queueText(card) && pause.hidden;
+  pause.textContent = card.queue?.paused ? "Resume queue" : "Pause queue";
+  const progress = card.progress.length ? card.progress.map((line) => el("li", {}, line)) : [el("li", {}, "No intermediate results yet")];
+  const list = $("d-progress");
+  const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+  list.replaceChildren(...progress);
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
+  $("d-output-section").hidden = !output;
+  $("d-output").textContent = output;
+  $("d-replay-section").hidden = !["done", "stopped"].includes(card.column);
+}
+
+// ---------------------------------------------------------------- DAG view
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NODE_W = 150, NODE_H = 44, GAP_X = 24, GAP_Y = 44, PAD = 12;
+let dag = null;          // {model, nodes, edges} for the open card
+let selectedNode = null; // node id
+let nodeLogs = { ref: null, lines: [] };
+
+function svg(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v); else node.setAttribute(k, v);
+  }
+  for (const child of children) if (child != null) node.append(child);
+  return node;
+}
+
+// Layered layout, top to bottom: a node's row = 1 + the deepest of its predecessors (nodes arrive
+// topologically sorted). Each node wants to sit under the average of its parents; nodes in a row
+// are then pushed apart just enough not to overlap, keeping the row centred on where they wanted to be.
+function layoutDag(graph) {
+  const preds = Object.fromEntries(graph.nodes.map((n) => [n.id, []]));
+  for (const e of graph.edges) if (preds[e.to] && preds[e.from]) preds[e.to].push(e.from);
+  const row = {};
+  for (const n of graph.nodes) row[n.id] = preds[n.id].length ? Math.max(...preds[n.id].map((p) => row[p] ?? 0)) + 1 : 0;
+  const rows = [];
+  for (const n of graph.nodes) (rows[row[n.id]] ??= []).push(n.id);
+  const step = NODE_W + GAP_X;
+  const x = {};
+  rows.forEach((ids) => {
+    const want = Object.fromEntries(ids.map((id, i) => [id,
+      preds[id].length ? preds[id].reduce((s, p) => s + x[p], 0) / preds[id].length : i * step]));
+    ids.sort((a, b) => want[a] - want[b]);
+    ids.forEach((id, i) => { x[id] = i === 0 ? want[id] : Math.max(want[id], x[ids[i - 1]] + step); });
+    const drift = ids.reduce((s, id) => s + x[id] - want[id], 0) / ids.length;
+    ids.forEach((id) => { x[id] -= drift; });
+  });
+  const xs = Object.values(x);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const pos = {};
+  for (const n of graph.nodes) pos[n.id] = { x: x[n.id] - minX + PAD, y: PAD + row[n.id] * (NODE_H + GAP_Y) };
+  return { pos, width: maxX - minX + NODE_W + 2 * PAD, height: PAD * 2 + rows.length * NODE_H + (rows.length - 1) * GAP_Y };
+}
+
+function renderDag() {
+  const section = $("d-dag-section");
+  if (!dag || dag.nodes.length < 2) { section.hidden = true; return; }
+  section.hidden = false;
+  $("d-dag-title").textContent = dag.model === "declared" ? "DAG (declared dependencies)" : "Run graph (child runs)";
+  const { pos, width, height } = layoutDag(dag);
+  const visible = dag.edges.filter((e) => pos[e.from] && pos[e.to]);
+  // Spread each node's outgoing (bottom) and incoming (top) edge ends across its width, ordered
+  // by the x of the other end, so edges into a node with several parents don't all meet in a point.
+  const anchor = (end, other) => {
+    const groups = {};
+    for (const e of visible) (groups[e[end]] ??= []).push(e);
+    const at = new Map();
+    for (const list of Object.values(groups)) {
+      list.sort((p, q) => pos[p[other]].x - pos[q[other]].x);
+      list.forEach((e, i) => at.set(e, (NODE_W * (i + 1)) / (list.length + 1)));
+    }
+    return at;
+  };
+  const outX = anchor("from", "to"), inX = anchor("to", "from");
+  const edges = visible.map((e) => {
+    const a = pos[e.from], b = pos[e.to];
+    const x1 = a.x + outX.get(e), y1 = a.y + NODE_H, x2 = b.x + inX.get(e), y2 = b.y;
+    const bend = Math.max(20, (y2 - y1) / 2);
+    return svg("path", { class: `dag-edge ${e.kind}`, d: `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2 - 2}`,
+      "marker-end": `url(#arrow-${e.kind})` });
+  });
+  const nodes = dag.nodes.map((n) => {
+    const p = pos[n.id];
+    const label = n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label;
+    const time = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
+    return svg("g", { class: `dag-node${n.id === selectedNode ? " selected" : ""}`, transform: `translate(${p.x},${p.y})`,
+      tabindex: "0", role: "button", "aria-label": `${n.label}: ${n.status}`,
+      onclick: () => selectNode(n.id), onkeydown: (ev) => { if (ev.key === "Enter") selectNode(n.id); } },
+      svg("title", {}, `${n.label} — ${n.status}`),
+      svg("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 8 }),
+      svg("rect", { class: `bar-${n.column}`, width: 5, height: NODE_H - 8, x: 4, y: 4, rx: 2 }),
+      svg("text", { x: 16, y: 18 }, label),
+      svg("text", { class: "st", x: 16, y: 34 }, n.status.toLowerCase() + time));
+  });
+  const markers = ["depends", "calls", "then"].map((kind) =>
+    svg("marker", { id: `arrow-${kind}`, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
+      svg("path", { d: "M0,0 L10,5 L0,10 z", class: `dag-edge ${kind}`, style: "stroke-dasharray:none" })));
+  $("d-dag").replaceChildren(svg("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "Run graph" },
+    svg("defs", {}, ...markers), ...edges, ...nodes));
+  renderLegend();
+  renderNodePanel();
+}
+
+function renderLegend() {
+  const line = (kind) => svg("svg", { width: 26, height: 8 }, svg("path", { class: `dag-edge ${kind}`, d: "M1,4 L25,4" }));
+  const items = dag.model === "declared"
+    ? [[line("depends"), "depends on (enforced by the engine)"]]
+    : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]];
+  $("d-legend").replaceChildren(...items.map(([icon, text]) => el("span", {}, icon, text)),
+    el("span", {}, "Click a node for its output and logs"));
+}
+
+function secs(a, b) {
+  const s = (new Date(b) - new Date(a)) / 1000;
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m`;
+}
+
+function selectNode(id) {
+  selectedNode = selectedNode === id ? null : id;
+  renderDag();
+  refreshNodeLogs();
+}
+
+async function refreshNodeLogs() {
+  const node = dag?.nodes.find((n) => n.id === selectedNode);
+  if (!node?.ref) return;
+  try {
+    const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(node.ref)}/logs`);
+    nodeLogs = { ref: node.ref, lines: data.lines };
+    renderNodePanel();
+  } catch (e) { setStatus(e.message, true); }
+}
+
+function renderNodePanel() {
+  const panel = $("d-node");
+  const node = dag?.nodes.find((n) => n.id === selectedNode);
+  if (!node) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const facts = [["Status", node.status], ["Started", node.started_at], ["Finished", node.finished_at],
+    ["Took", node.started_at && node.finished_at ? secs(node.started_at, node.finished_at) : null], ["Run id", node.ref]];
+  const lines = nodeLogs.ref === node.ref ? nodeLogs.lines : [];
+  panel.replaceChildren(...[
+    el("h5", {}, node.label),
+    el("dl", {}, ...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
+    node.error ? el("pre", {}, node.error) : null,
+    node.output != null ? el("div", {}, el("h4", {}, "Output"), el("pre", {}, JSON.stringify(node.output, null, 2))) : null,
+    el("div", {}, el("h4", {}, "Logs / intermediate results"),
+      lines.length ? el("ol", { class: "progress" }, ...lines.map((l) => el("li", {}, l))) : el("span", { class: "status" }, node.ref ? "None" : "Not started yet")),
+  ].filter(Boolean));
+}
+
+let dagLoading = false;
+async function refreshDag() {
+  const card = cards.find((c) => c.id === openCardId);
+  if (!card || dagLoading) return;
+  // A finished graph doesn't change: fetch it once.
+  if (dag && dag.cardId === card.id && dag.final && ["done", "stopped"].includes(card.column)) return;
+  dagLoading = true;
+  try {
+    const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(card.id)}/dag`);
+    if (openCardId !== card.id) return;
+    dag = { ...data, cardId: card.id, final: ["done", "stopped"].includes(card.column) };
+    renderDag();
+    if (selectedNode) refreshNodeLogs();
+  } catch (e) { setStatus(e.message, true); }
+  finally { dagLoading = false; }
+}
+
+async function act(action, body) {
+  try { setStatus(`${action}…`); await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/${action}`, body); await refresh(); }
+  catch (e) { setStatus(e.message, true); }
+}
+
+function setStatus(text, error = false) { const s = $("status"); s.textContent = text; s.classList.toggle("error", error); }
+
+let refreshing = false;
+async function refresh() {
+  if (!system || refreshing) return;
+  refreshing = true;
+  try {
+    const data = await api("GET", `/api/boards/${system}/${encodeURIComponent(board)}/cards`);
+    cards = data.cards;
+    renderBoard();
+    if (openCardId) { renderDrawer(); refreshDag(); }
+    setStatus(`${SYSTEM_LABELS[system]} · ${cards.length} cards · updated ${new Date().toLocaleTimeString()}`);
+  } catch (e) { setStatus(e.message, true); }
+  finally { refreshing = false; }
+}
+
+$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); refresh(); });
+$("add-board").addEventListener("click", () => {
+  const name = (prompt("Board name (letters, digits, - and _)") || "").trim();
+  if (!/^[\w-]+$/.test(name)) return;
+  if (!boards.includes(name)) boards.push(name);
+  board = name; store.set("boards", boards); store.set("board", board); renderHeader(); refresh();
+});
+$("new-card").addEventListener("click", () => $("new-dialog").showModal());
+$("n-kind").addEventListener("change", (e) => {
+  const agent = e.target.value === "steerable-agent";
+  document.querySelectorAll(".agent-only").forEach((n) => { n.hidden = !agent; });
+  $("n-goal-label").textContent = agent ? "Goal" : "Topic";
+});
+$("new-form").addEventListener("submit", async (e) => {
+  if (e.submitter?.value !== "create") return;
+  e.preventDefault();
+  try {
+    await api("POST", `/api/boards/${system}/${encodeURIComponent(board)}/cards`,
+      { kind: $("n-kind").value, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) });
+    $("new-dialog").close(); $("n-goal").value = ""; refresh();
+  } catch (err) { setStatus(err.message, true); }
+});
+$("d-close").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId) closeDrawer(); });
+$("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
+$("d-stop").addEventListener("click", () => act("stop"));
+$("d-cancel").addEventListener("click", () => act("cancel"));
+$("d-replay").addEventListener("click", () => act("replay"));
+$("d-pause").addEventListener("click", async () => {
+  const card = cards.find((c) => c.id === openCardId);
+  try { await api("POST", `/api/queues/${system}/${encodeURIComponent(card.queue.id)}/pause`, { paused: !card.queue.paused }); refresh(); }
+  catch (e) { setStatus(e.message, true); }
+});
+
+(async () => {
+  try {
+    const info = await api("GET", "/api/systems");
+    columns = info.columns; systems = info.systems;
+    if (!systems.length) { setStatus("No backend configured (set HATCHET_CLIENT_TOKEN and/or TRIGGER_SECRET_KEY)", true); return; }
+    system = systems.includes(store.get("system")) ? store.get("system") : systems[0];
+    if (!boards.includes(board)) board = boards[0];
+    renderHeader(); await refresh();
+    setInterval(refresh, 2000);
+  } catch (e) { setStatus(e.message, true); }
+})();
+</script>
+</body>
+</html>

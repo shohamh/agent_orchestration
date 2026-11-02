@@ -1,0 +1,40 @@
+# Optional overlay: a local mail catcher for networks without a mail server.
+# Mailpit accepts every email the webapp sends (login links, alerts) and shows them in a web inbox:
+#   http://localhost:8025   (set MAILPIT_PUBLISH_IP=0.0.0.0 in .env to open it to other machines)
+#
+# Anyone who can open the inbox can read everyone's login links, so only expose it to people
+# you'd trust with each other's accounts.
+#
+# Switch to a real mail server (e.g. Exchange): fill in the SMTP block in webapp.env, then remove
+# ":docker-compose.mailpit.yml" from COMPOSE_FILE in .env and run `docker compose up -d`.
+# While this file is loaded, the settings below override webapp.env's.
+services:
+  mailpit:
+    image: axllent/mailpit:${MAILPIT_IMAGE_TAG:-v1.27.10}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    ports:
+      - ${MAILPIT_PUBLISH_IP:-127.0.0.1}:${MAILPIT_PORT:-8025}:8025
+    environment:
+      MP_MAX_MESSAGES: 500
+      # No SMTP AUTH: the webapp always sends an (empty) auth object and fails with
+      # 'Missing credentials for "PLAIN"' against a server that advertises AUTH.
+    networks:
+      - webapp
+
+  webapp:
+    depends_on:
+      - mailpit
+    environment:
+      EMAIL_TRANSPORT: smtp
+      FROM_EMAIL: ${MAILPIT_FROM_EMAIL:-trigger@trigger.localhost}
+      REPLY_TO_EMAIL: ${MAILPIT_FROM_EMAIL:-trigger@trigger.localhost}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_SECURE: "false"
+      # Alert emails (run failures, deployments) use their own settings.
+      ALERT_EMAIL_TRANSPORT: smtp
+      ALERT_FROM_EMAIL: ${MAILPIT_FROM_EMAIL:-trigger@trigger.localhost}
+      ALERT_REPLY_TO_EMAIL: ${MAILPIT_FROM_EMAIL:-trigger@trigger.localhost}
+      ALERT_SMTP_HOST: mailpit
+      ALERT_SMTP_PORT: 1025
+      ALERT_SMTP_SECURE: "false"

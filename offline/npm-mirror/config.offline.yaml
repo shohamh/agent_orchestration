@@ -1,0 +1,17 @@
+# Offline: no uplinks. Everything cached on the connected side is served as-is.
+# Internal packages can be published here too (npm adduser / npm publish).
+storage: /verdaccio/storage
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+    max_users: 100
+packages:
+  "@*/*":
+    access: $all
+    publish: $authenticated
+  "**":
+    access: $all
+    publish: $authenticated
+server:
+  keepAliveTimeout: 60
+log: { type: stdout, format: pretty, level: warn }

@@ -1,0 +1,28 @@
+# Optional shared trace backend for agents running on Hatchet AND Trigger.dev.
+#
+# Both tools already collect traces into their own dashboards. This adds one place to see
+# traces from both (and from anything else that speaks OTLP), e.g. to follow an agent across
+# systems or keep traces longer than the run history.
+#
+#   docker compose up -d                      -> UI http://localhost:16686, OTLP :4317 (gRPC) / :4318 (HTTP)
+#   then enable the overlays: hatchet/docker-compose.otel.yml, trigger.dev/docker-compose.otel.yml
+#
+# Workers/runs reach it as http://jaeger:4318 over the shared `otel` docker network.
+# Storage is in-memory (lost on restart); for retention use a Jaeger config with Badger/Elasticsearch
+# or swap in Grafana Tempo - any OTLP backend works, nothing else changes.
+name: observability
+
+services:
+  jaeger:
+    image: jaegertracing/jaeger:${JAEGER_IMAGE_TAG:-2.11.0}
+    restart: unless-stopped
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    networks:
+      - otel
+
+networks:
+  otel:
+    name: otel

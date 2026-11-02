@@ -1,0 +1,29 @@
+# OPTIONAL: only for Docker hosts that cannot bind-mount host files (e.g. Docker Desktop with
+# no folders under Settings > Resources > File Sharing). Linux servers don't need this file.
+#
+# Instead of mounting ./clickhouse/*.xml and ./registry/auth.htpasswd, bake them into tiny
+# derived images (the upstream image is still the base, chosen by the same *_IMAGE_TAG vars).
+# Rebuild after rotating the registry password: docker compose up -d --build registry
+#
+# Enable by adding this file to COMPOSE_FILE in .env (see .env.example local section).
+
+services:
+  clickhouse:
+    build:
+      context: ../clickhouse
+      dockerfile: ../local/clickhouse.Dockerfile
+      args:
+        CLICKHOUSE_IMAGE_TAG: ${CLICKHOUSE_IMAGE_TAG:-26.2}
+    image: trigger-clickhouse:${CLICKHOUSE_IMAGE_TAG:-26.2}
+    volumes: !override
+      - clickhouse:/var/lib/clickhouse
+
+  registry:
+    build:
+      context: ../registry
+      dockerfile: ../local/registry.Dockerfile
+      args:
+        REGISTRY_IMAGE_TAG: ${REGISTRY_IMAGE_TAG:-2}
+    image: trigger-registry:local
+    volumes: !override
+      - registry:/var/lib/registry

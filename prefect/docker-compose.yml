@@ -1,0 +1,112 @@
+# Prefect 3 self-hosted: API/UI server + Postgres, an example worker that serves the agent
+# flows, and two simulated "PCs with hardware" running process workers on a work pool.
+# Every image is pinned through PREFECT_VERSION; the server phones home (analytics) by default,
+# which is turned off here.
+name: prefect
+
+x-prefect-client: &prefect-client
+  PREFECT_API_URL: http://prefect-server:4200/api
+  # OpenTelemetry: Prefect creates spans for flow/task runs; `opentelemetry-instrument` (see the
+  # worker Dockerfile) exports them over OTLP. Empty endpoint = spans are created but not exported.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+  OTEL_METRICS_EXPORTER: none
+  OTEL_LOGS_EXPORTER: none
+  # Persist flow results to a volume every worker shares, so callers can read any run's result.
+  PREFECT_RESULTS_PERSIST_BY_DEFAULT: "true"
+  PREFECT_LOCAL_STORAGE_PATH: /results
+
+services:
+  postgres:
+    image: postgres:${POSTGRES_IMAGE_TAG:-16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefect}
+      POSTGRES_DB: prefect
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  prefect-server:
+    image: prefecthq/prefect:${PREFECT_VERSION:-3.9.1}-python3.12
+    command: prefect server start --host 0.0.0.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PREFECT_PORT:-4200}:4200"
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:${POSTGRES_PASSWORD:-prefect}@postgres:5432/prefect
+      # What the browser uses to reach the API (set to http://<server>:4200/api on a LAN).
+      PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-http://localhost:4200/api}
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: create the hardware work pool and register the read-sensor deployment on it.
+  setup:
+    build: ./example-worker
+    image: prefect-example-worker:local
+    command: ["sh", "-c", "prefect work-pool create hardware --type process --overwrite && for q in station-a station-b any-station; do prefect work-queue create $$q --pool hardware >/dev/null 2>&1 || true; done && python hardware.py deploy"]
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      <<: *prefect-client
+
+  # Serves the agent flows (uppercase, agent-pipeline, agent-loop, steerable-agent, approval-gate)
+  # as deployments from one long-running process - the same shape as a Hatchet worker.
+  example-worker:
+    build: ./example-worker
+    image: prefect-example-worker:local
+    command: ["opentelemetry-instrument", "python", "-u", "serve.py"]
+    restart: unless-stopped
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    volumes:
+      - results:/results
+    environment:
+      <<: *prefect-client
+      OTEL_SERVICE_NAME: prefect-example-worker
+
+  # Two simulated PCs with a device attached. In real life run `prefect worker start` natively on
+  # each PC (or in Docker with `devices: ["/dev/ttyUSB0:/dev/ttyUSB0"]` + SENSOR_DEVICE).
+  hardware-station-a: &hardware-worker
+    build: ./example-worker
+    image: prefect-example-worker:local
+    command: ["opentelemetry-instrument", "prefect", "worker", "start", "--pool", "hardware",
+              "--work-queue", "station-a", "--work-queue", "any-station", "--limit", "1"]
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    volumes:
+      - results:/results
+    environment: &hardware-env
+      <<: *prefect-client
+      STATION: station-a
+      OTEL_SERVICE_NAME: prefect-hardware-station-a
+
+  hardware-station-b:
+    <<: *hardware-worker
+    command: ["opentelemetry-instrument", "prefect", "worker", "start", "--pool", "hardware",
+              "--work-queue", "station-b", "--work-queue", "any-station", "--limit", "1"]
+    environment:
+      <<: *hardware-env
+      STATION: station-b
+      OTEL_SERVICE_NAME: prefect-hardware-station-b
+
+volumes:
+  postgres:
+  results:

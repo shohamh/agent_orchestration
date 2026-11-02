@@ -1,0 +1,14 @@
+# Optional overlay: let task-run containers reach the shared OTLP backend (../observability).
+# Traces always go to the Trigger.dev dashboard as well. Requires the observability stack to be up.
+# Enable: append :docker-compose.otel.yml to COMPOSE_FILE in .env, then in the project's
+# environment variables (dashboard) set AGENT_TRACES_OTLP_ENDPOINT=http://jaeger:4318
+# (read by trigger.config.ts -> telemetry.exporters).
+services:
+  supervisor:
+    environment:
+      DOCKER_RUNNER_NETWORKS: webapp,supervisor,otel
+
+networks:
+  otel:
+    name: otel
+    external: true

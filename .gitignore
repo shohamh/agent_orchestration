@@ -1,0 +1,28 @@
+# Secrets and machine-local settings (each has a committed *.example next to it)
+.env
+.env.local
+webapp.env
+offline-deploy.env
+trigger.dev/registry/auth.htpasswd
+trigger.dev/certs/*
+!trigger.dev/certs/README.txt
+*.pem
+*.key
+
+# Offline bundle output (offline/bundle.sh) and vendored wheels
+dist/
+wheelhouse/*.whl
+
+# Dependencies and build output
+node_modules/
+.trigger/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

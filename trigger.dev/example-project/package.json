@@ -1,0 +1,19 @@
+{
+  "name": "trigger-example-project",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "trigger dev --profile self-hosted",
+    "deploy": "trigger deploy --profile self-hosted"
+  },
+  "dependencies": {
+    "@opentelemetry/exporter-trace-otlp-http": "0.219.0",
+    "@trigger.dev/sdk": "4.8.3"
+  },
+  "devDependencies": {
+    "@trigger.dev/build": "4.8.3",
+    "trigger.dev": "4.8.3",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

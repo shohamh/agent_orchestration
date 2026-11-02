@@ -1,0 +1,4 @@
+# Keep LF everywhere: the shell scripts and compose files run on Linux servers too.
+* text=auto eol=lf
+*.tar binary
+*.whl binary
