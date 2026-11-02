@@ -7,6 +7,7 @@ runs list already returns, so one request per board refresh covers every card.
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp
 
@@ -51,9 +52,12 @@ def _sequence_edges(children: list[dict[str, Any]]) -> list[dict[str, str]]:
 class TriggerAdapter:
     system = "trigger"
 
-    def __init__(self) -> None:
+    def __init__(self, development: bool = False) -> None:
+        self.development = development
+        self.system = "trigger-dev" if development else "trigger"
         self.base_url = os.environ.get("TRIGGER_API_URL", "http://localhost:8030").rstrip("/")
-        self.headers = {"Authorization": f"Bearer {os.environ['TRIGGER_SECRET_KEY']}"}
+        key = "TRIGGER_DEV_SECRET_KEY" if development else "TRIGGER_SECRET_KEY"
+        self.headers = {"Authorization": f"Bearer {os.environ[key]}"}
         self._session: aiohttp.ClientSession | None = None
         self._outputs: dict[str, Any] = {}  # finished runs' output, fetched once
         self._finished_runs: dict[str, dict[str, Any]] = {}  # finished runs never change
@@ -91,8 +95,11 @@ class TriggerAdapter:
                 started_at=run.get("startedAt"),
                 finished_at=run.get("finishedAt"),
                 progress=list(metadata.get("transcript") or []),
-                steerable=task == AGENT_TASK and not is_final(column),
+                steerable=task in (AGENT_TASK, "agent-session") and not is_final(column),
+                agent=metadata.get("agent"),
             )
+            if task == "agent-session":
+                card.apply_session_events(metadata.get("events") or [])
             queue = queues.get(task, {})
             card.queue = {
                 "name": task,
@@ -164,15 +171,28 @@ class TriggerAdapter:
 
     async def node_logs(self, ref: str) -> list[str]:
         run = await self._retrieve(ref)
+        if run.get("taskIdentifier") == "agent-session":
+            return [str(event) for event in (run.get("metadata") or {}).get("events", [])]
         return list((run.get("metadata") or {}).get("transcript") or [])
 
-    async def create(self, board: str, kind: str, goal: str, turns: int, step_seconds: int) -> str:
-        if kind == "research-report":
+    async def create(self, board: str, kind: str, goal: str, turns: int, step_seconds: int,
+                     session_options: dict[str, Any] | None = None) -> str:
+        if kind == "agent-session":
+            if not self.development:
+                raise ValueError("agent-session requires the Trigger.dev development backend")
+            task, payload = "agent-session", {"goal": goal, "agent": "codex", **(session_options or {})}
+        elif kind == "research-report":
             task, payload = "research-report", {"topic": goal}
         else:
             task, payload = AGENT_TASK, {"goal": goal, "turns": turns, "stepSeconds": step_seconds}
-        body = {"payload": payload, "options": {"tags": [f"board:{board}"], "metadata": {"title": goal}}}
+        initial_metadata = {"title": goal}
+        if kind == "agent-session":
+            initial_metadata = {"title": goal[:512], "agent": payload["agent"]}
+        body = {"payload": payload, "options": {"tags": [f"board:{board}"], "metadata": initial_metadata}}
         return (await self._request("POST", f"/api/v1/tasks/{task}/trigger", json=body))["id"]
+
+    async def input(self, run_id: str, message: dict[str, Any]) -> None:
+        await self._request("POST", f"/realtime/v1/streams/{quote(run_id, safe='')}/input/agent-input", json={"data": message})
 
     async def steer(self, run_id: str, message: dict[str, Any]) -> None:
         await self._request("POST", f"/realtime/v1/streams/{run_id}/input/{STEER_STREAM}", json={"data": message})
@@ -185,7 +205,7 @@ class TriggerAdapter:
 
     async def set_queue_paused(self, queue: str, paused: bool) -> None:
         await self._request(
-            "POST", f"/api/v1/queues/{queue}/pause", json={"action": "pause" if paused else "resume"}
+            "POST", f"/api/v1/queues/{quote(queue, safe='')}/pause", json={"action": "pause" if paused else "resume"}
         )
 
     async def close(self) -> None:

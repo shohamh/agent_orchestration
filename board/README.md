@@ -8,6 +8,11 @@ A small kanban board over **Hatchet** and **Trigger.dev** runs. Each board is a 
 
 http://localhost:8090. There's one UI, with a tab per backend. It has no external assets, so it works offline.
 
+**Coding-agent chat is now available.** Choose Coding agent session for streamed replies, expandable
+tools, permissions, question forms, interruption, Continue, and explicit Mark done. Real sessions use
+a native Hatchet worker or the **Trigger.dev · local** development tab; see
+[local agent setup](../agents/README.md). The production Trigger tab keeps the original examples.
+
 Verified on 2026-11-02 against both stacks:
 - `smoke_test.py` passes on both: create, running with progress, steer, graceful stop, cancel, replay, and the DAG of a research-report run.
 - Queue positions were checked with the Trigger.dev queue paused, and with the Hatchet worker stopped.
@@ -72,6 +77,6 @@ To show other tasks, add their name to `AGENT_TASK` handling in the adapters, or
 - **No authentication.** Anyone who can reach port 8090 can create, steer and cancel cards. Keep it on localhost or put it behind your reverse proxy or SSO.
 - **Polling.** The UI polls every 2 seconds, and the server queries the backend on each poll. That's fine for tens of cards per board. For hundreds, switch Trigger.dev to its Realtime subscriptions (`runs.subscribeToRunsWithTag`) and add a short server-side cache for Hatchet.
 - **Window and size.** Each board shows runs from the last 7 days: up to 200 per board on Hatchet and 100 on Trigger.dev.
-- **One environment per backend.** Trigger.dev uses one environment (the one whose secret key is configured), and Hatchet uses one tenant.
+- **Environments.** Trigger.dev production and local development use separate keys and tabs; Hatchet uses one tenant.
 - **Queue position is computed, not promised.** It's the order of currently queued runs of the same task. Priority, concurrency keys and delays can reorder actual execution, and neither engine exposes an ETA.
 - **Board names live in the browser.** The list of boards is kept in `localStorage`. A board exists as soon as one card is tagged with its name.

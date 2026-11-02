@@ -1,0 +1,4 @@
+agent-client-protocol==0.12.1
+hatchet-sdk==1.44.0
+jsonschema==4.26.0
+python-dotenv==1.2.4

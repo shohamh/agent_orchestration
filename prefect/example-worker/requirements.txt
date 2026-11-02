@@ -1,1 +1,2 @@
-prefect[otel]==3.9.1
+# Version comes from the Docker build argument (PREFECT_VERSION in ../.env).
+prefect[otel]

@@ -24,6 +24,25 @@ class Card:
     error: str | None = None
     queue: dict[str, Any] = field(default_factory=dict)  # {"name", "ahead", "running", "limit", "paused"}
     steerable: bool = False
+    events: list[dict[str, Any]] = field(default_factory=list)
+    session_state: str | None = None
+    agent: str | None = None
+
+    def apply_session_events(self, events: list[dict[str, Any]]) -> None:
+        """Project the session status without hiding an engine failure/cancellation."""
+        self.events = [event for event in events if isinstance(event, dict)]
+        for event in self.events:
+            if event.get("type") == "status":
+                self.session_state = event.get("state")
+        self.progress = [str(e.get("text") or e.get("message") or e.get("state"))[:200]
+                         for e in self.events if e.get("type") in ("agent", "error")][-8:]
+        if self.column == "done":
+            self.session_state = "done"
+        elif self.column == "stopped":
+            self.session_state = "error"
+        elif self.column not in ("queued", "scheduled") and self.session_state:
+            waiting = {"approval", "question", "awaiting_review", "awaiting_input", "stuck"}
+            self.column = "waiting" if self.session_state in waiting else "running"
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

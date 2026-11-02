@@ -1,111 +1,107 @@
-# Hatchet vs Trigger.dev for agent orchestration
+# Hatchet vs Trigger.dev vs Prefect for agent orchestration
 
-This compares Hatchet `v0.114.2` and Trigger.dev `v4.8.3`, both self-hosted with Docker Compose on the same machine on 2026-11-02.
+This compares Hatchet `v0.114.2`, Trigger.dev `v4.8.3` and Prefect `3.9.1`, all self-hosted with Docker Compose on the same machine on 2026-11-02.
 
 - **Tested:** rows marked *tested* were run against this setup with the example code in this repo.
 - **Docs/source:** the rest come from the official docs and the SDK/server source at those versions.
+- **Offline:** Prefect has not been offline-bundled yet.
 
 ## TL;DR
 
-- **Hatchet** is a durable task queue and workflow engine. Your workers are ordinary long-running processes (Python, TypeScript, Go, Ruby) that connect over gRPC.
-  - It's light and simple to self-host.
-  - It's **easy to run offline**.
-  - It's a natural fit for **agents that must run on a specific PC with specific hardware**.
-  - You own packaging and deploying your worker code.
-- **Trigger.dev** is a "serverless background jobs" platform for **TypeScript**. You `deploy` code, and it builds an image and runs **each run in its own container**.
-  - It has a richer developer experience: versioned deployments, a local dev mode, realtime streaming to frontends, input streams for steering, and AI-chat helpers.
-  - It's **heavier to self-host and harder to run offline**.
-  - The self-hosted Docker worker **can't pass devices into run containers**.
-  - The self-hosted version lacks checkpoints, warm starts and autoscaling.
-- **Recommendation:** for agents in an offline network, especially ones that talk to local hardware or are written in Python, **Hatchet is the better fit**. Trigger.dev is attractive for TypeScript-first teams building web-facing agents that stream to a UI, where per-run isolation and deploy versioning matter more than hardware access.
+- **Hatchet** is a durable task queue and workflow engine. Workers are ordinary long-running processes (Python, TypeScript, Go, Ruby) that connect over gRPC.
+  - It's light, starts runs fast and runs **easily offline**.
+  - It has the most complete support for **durable**, steerable agents.
+  - It has a **built-in trace viewer**.
+  - Worker labels route work to **the PC with the hardware**.
+- **Prefect** is a Python workflow orchestrator with a mature UI.
+  - Workers and served flows run as **local processes on the PC**, so hardware access is natural.
+  - Human input is first-class, including **typed forms rendered in the UI**.
+  - It's the lightest server.
+  - Tradeoffs: there is **no trace viewer in the server**, so use the shared Jaeger. A flow that's mid-run doesn't resume after a worker crash unless you design for it (`suspend_flow_run` + explicit task caching). Startup latency and retaining a process during human waits are acceptable for this use case.
+- **Trigger.dev** is a "serverless background jobs" platform for **TypeScript**. `deploy` builds an image, and each run gets its own container.
+  - It has the richest developer and web-UI tooling: versioned deploys, dev mode, realtime streams and AI-chat helpers.
+  - Self-hosted, it **can't pass devices into run containers**.
+  - It's the heaviest to run and the hardest to run offline.
+- **Recommendation for your requirements** (offline network, hardware-bound agents, human steering, traces): **Prefect and Hatchet are both strong fits.** Startup time and keeping a process alive during waits do not decide this comparison, per your clarification.
+  - Choose Prefect for Python workflows, the run graph, and built-in approval forms. Keeping the flow process alive is the straightforward supported way to preserve its live state while a human replies.
+  - Choose Hatchet when durable recovery after worker restarts, multiple worker languages, or its integrated trace viewer matters. Crash recovery is a separate concern from whether a process stays up during a wait.
+  - Trigger.dev fits TypeScript web-facing agents that don't touch local devices.
 
 ## Your three requirements, side by side
 
 ### 1. Agents that talk to hardware attached to the PC they run on
 
-| | Hatchet | Trigger.dev (self-hosted, Docker) |
-|---|---|---|
-| Where agent code runs | **Your worker process, on whatever machine you start it.** Run `hardware_worker.py` natively on the PC, or in Docker with `devices: [/dev/ttyUSB0]`. It has full access to serial, USB, GPIB, cameras, GPUs and drivers. | In a **fresh container per run**, started by the supervisor on its Docker host |
-| Device passthrough | n/a. It's your process, so it's whatever the OS allows. | **None.** The Docker supervisor creates run containers with only network, CPU and RAM settings: no devices, volumes or privileged mode (checked in `apps/supervisor/src/workloadManager/docker.ts`). You'd need to patch the supervisor or use Kubernetes with a device plugin. |
-| Routing a task to "the PC with the device" | ✅ **Worker labels plus `desired_worker_labels`**: `required=True` means only workers with `device=sensor`, or pin a run to `station=station-a` at trigger time. *Tested:* `read-sensor` only ran on labelled workers, and the per-run pin landed on station-a. | ➖ **Regions / worker groups**: run a supervisor on each PC and trigger with `{ region: "..." }`. That picks the machine, but the code still can't reach the device from inside the container. |
-| Serialized access to one device | ✅ `slots=1` on that worker. Concurrency keys are also available. | ✅ a queue with `concurrencyLimit: 1` |
-| Workarounds on Trigger.dev | — | (a) Run a small **hardware bridge service** on each PC (HTTP/gRPC) and have tasks call it. (b) Use `trigger dev` on the PC, where runs execute as local processes with host access. That's dev-mode only, with no deploy versioning. |
-| Verdict | **Natural fit** | **Indirect.** It needs a bridge service or a patched supervisor. |
+| | Hatchet | Prefect | Trigger.dev (self-hosted, Docker) |
+|---|---|---|---|
+| Where agent code runs | Your worker process on that PC (natively, or Docker with `devices:`) | A process worker or a `serve()` process on that PC. Each run is a local subprocess. | A fresh container per run, started by the supervisor |
+| Device access | ✅ Whatever the OS allows | ✅ Whatever the OS allows | ❌ None. Run containers get no devices, volumes or privileged mode (`apps/supervisor/src/workloadManager/docker.ts`). |
+| Routing to "the PC with the device" | ✅ Worker labels + `desired_worker_labels`, with an optional per-run station pin. *Tested.* | ✅ Work pool + one work queue per PC, plus a shared `any-station` queue. Pin with `run_deployment(..., work_queue_name="station-a")`. *Tested.* | ➖ Regions/worker groups pick the machine, but the run still can't reach the device |
+| One operation at a time per device | ✅ `slots=1` | ✅ `--limit 1` on the worker, or a queue concurrency limit | ✅ queue `concurrencyLimit: 1` |
+| Gotcha | — | A worker started with a queue that doesn't exist silently picks up **nothing**. Create queues first. | Workarounds: a hardware bridge service on each PC, or `trigger dev` (dev mode only) |
+| Verdict | **Natural fit** | **Natural fit** | **Indirect** |
 
 ### 2. Human-interruptible and steerable agents
 
-| | Hatchet | Trigger.dev |
-|---|---|---|
-| Hard interrupt (stop now) | ✅ Cancel from the dashboard or `hatchet.runs.cancel(id)`. The task sees `ctx.is_cancelled` / `CancelledError`. Bulk cancel and **replay** are also available. *Tested:* status went to `CANCELLED`. | ✅ Cancel from the dashboard or `runs.cancel(id)`. Also bulk actions and replay. *Tested:* status went to `CANCELED`. |
-| Steer a running agent (new instructions mid-run) | ✅ Push an event scoped to the run (`hatchet.event.push("agent:steer", {...}, scope=run_id)`). The durable task waits with `ctx.aio_wait_for(or_(SleepCondition(2s), UserEventCondition(...)))`. *Tested:* redirected the goal mid-run, then a graceful stop. | ✅ **Input streams**: `steer.send(runId, {...})` from outside, and `steer.once()`, `.on()`, `.peek()` or `.wait()` inside. *Tested:* redirect plus graceful stop. Self-hosted needed `STREAM_ORIGIN=http://webapp:3000` (found while testing), or a real DNS name for the server. |
-| Approve / pause for a human (long waits) | ✅ durable `wait_for` on an event. The wait is durable: it survives worker restarts, and the worker slot is evicted while waiting. | ✅ waitpoint tokens (`wait.forToken`, completed through the API or a callback URL) and `steer.wait()`. **Self-hosted has no checkpoints**, so the run container stays alive and holds its CPU/RAM while it waits. |
-| Live view of what the agent is doing | ✅ `ctx.put_stream(...)` with stream subscriptions, plus logs and the run timeline in the dashboard | ✅ run metadata (live), realtime streams (`streams.pipe`), React hooks, and the trace view |
-| Built-in chat/agent UI helpers | ➖ none; you build the UI | ✅ `chat.*` / AI SDK helpers with steering of in-flight LLM steps (TypeScript) |
-| Verdict | **Strong.** Steering is a durable event wait, and the waits survive restarts. | **Strong and more UI-ready**, but long human waits hold a container when self-hosted. |
+| | Hatchet | Prefect | Trigger.dev |
+|---|---|---|---|
+| Hard interrupt | ✅ Cancel from UI/API. *Tested:* `CANCELLED`. | ✅ Cancel from UI, or set state `Cancelling`. *Tested:* `CANCELLED`. | ✅ Cancel from UI/API. *Tested:* `CANCELED`. |
+| Steer mid-run | ✅ Event scoped to the run, plus a durable `wait_for`. *Tested:* redirect, then stop. | ✅ `send_input(...)` / `receive_input(...)`, which polls (0.5 s here). *Tested:* redirect, then stop. | ✅ Input streams `steer.send()` / `steer.once()`. *Tested:* redirect, then stop. Needed `STREAM_ORIGIN` when self-hosted. |
+| Approval / pause with input | ✅ Durable event wait. You build the form. | ✅ **`pause_flow_run(wait_for_input=Model)`**: the UI renders a typed form with a Resume button. *Tested:* resumed with input. | ✅ Waitpoint tokens / `steer.wait()`. You build the form. |
+| Long human waits | Durable. The worker slot is released, and the wait survives worker restarts. | `pause` keeps the process alive, which is acceptable here. `suspend_flow_run` frees it, but the flow **re-runs from the start** on resume; explicitly cached tasks can reuse results. Persistence alone does not guarantee reuse. | Self-hosted: the container stays alive and holds CPU/RAM |
+| Live view | `put_stream`, logs, run timeline | Logs, run timeline graph, artifacts | Live metadata, realtime streams, React hooks, trace view |
+| Verdict | **Strongest durability** | **Best human-input UX** out of the box; polling and a retained process are acceptable here | **Most UI-ready for web apps** |
 
-### 3. Trace collection from agents (enabled in this setup)
+### 3. Trace collection from agents (enabled for all three)
 
-| | Hatchet | Trigger.dev |
-|---|---|---|
-| Built-in trace store and UI | ✅ The engine has an OTel collector, enabled here with `SERVER_OBSERVABILITY_ENABLED=true`. Workers send spans through `HatchetInstrumentor` (`hatchet-sdk[otel]`). Spans are stored in Postgres and shown per run in the dashboard. | ✅ Always on. Every run has a trace view with spans and logs. Stored in Postgres here; ClickHouse is recommended for scale. |
-| Custom spans (LLM call, tool call, device I/O) | `tracer.start_as_current_span("llm.call")`. *Tested:* `agent.step`, `llm.call`, `device.read` and `hatchet.durable.wait_for` were recorded. | `logger.trace("agent.step", async (span) => ...)`. *Tested:* `agent.step`, `inputStream.once()` and the `human steer` log were recorded. |
-| Export to your own backend (OTLP) | ✅ add any exporter to the tracer provider. Here: `OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318` | ✅ `telemetry.exporters` in `trigger.config.ts`. Here: the `AGENT_TRACES_OTLP_ENDPOINT` project env var |
-| Shared view across both | ✅ *Tested:* both appear in the bundled **Jaeger** (`observability/`, UI on :16686). Services: `hatchet-example-worker`, `hatchet-hardware-station-a`, `trigger.dev`. | ✅ same |
-| Auto-instrumentation | OTel Python instrumentations (httpx, requests, DB...) can be added to the same provider | `telemetry.instrumentations` (OpenAI, Prisma, HTTP...) |
+| | Hatchet | Prefect | Trigger.dev |
+|---|---|---|---|
+| Built-in trace store and viewer | ✅ The engine's OTel collector (`SERVER_OBSERVABILITY_ENABLED=true`). Spans are shown per run. | ❌ None. The server stores logs and run state only. Spans are created by the SDK and must be exported. | ✅ Always on: a trace view per run |
+| Custom spans | OTel `tracer.start_as_current_span` | OTel API (`prefect[otel]`) | `logger.trace(...)` |
+| Export to OTLP backend | ✅ *Tested* (Jaeger) | ✅ via `opentelemetry-instrument`. Covers flow subprocesses too. *Tested* (Jaeger). | ✅ `telemetry.exporters`. *Tested* (Jaeger). |
+| Spans seen in testing | `agent.step`, `llm.call`, `device.read`, durable waits | flow-run spans (named after the run), task spans, `agent.step`, `llm.call`, `device.read` | `agent.step`, `inputStream.once()`, steer logs |
+
+All three report into the bundled Jaeger in `observability/` (http://localhost:16686).
 
 ## Operations (measured here)
 
-| | Hatchet | Trigger.dev |
-|---|---|---|
-| Containers (idle) | 4 running (postgres, engine, dashboard, worker) | 11 running |
-| RAM idle | **~0.7 GB** (incl. example worker) | **~2.0 GB** (webapp 750 MB, ClickHouse 390 MB, supervisor 280 MB, ...) |
-| Upstream sizing advice | none strict (Postgres is the main cost) | 3+ vCPU / 6 GB webapp, 4+ vCPU / 8 GB worker host |
-| Time to first successful run | ~2 min, 4 commands | ~10 min: secrets, magic-link login, org/project, PAT, docker login, image build+deploy |
-| Datastores | Postgres only (RabbitMQ optional) | Postgres, Redis, ClickHouse, MinIO (S3), Docker registry, s2, Electric |
-| Getting code to run | run your worker anywhere (`python worker.py`, a container, k8s) | `trigger deploy` → BuildKit image → registry → supervisor starts a container per run |
-| Offline | easy: `docker save/load` | moderate: also needs the buildkit image, mirrored base images by digest, an npm mirror and `--network host` builds |
-| Upgrades | bump `HATCHET_VERSION`; migrations run on `up` | `scripts/update-upstream.sh <tag>`; keep CLI/SDK version == server version |
-| Gotchas hit while setting up | Git-Bash path rewriting; REST URL inside containers (`HATCHET_CLIENT_SERVER_URL`); trace collector off by default | `API_ORIGIN` and `STREAM_ORIGIN` unreachable from run containers (needed `INTERNAL_API_ORIGIN` and `STREAM_ORIGIN`), bind mounts on Docker Desktop, reserved port 9090, supervisor/bootstrap race, `TASK_DID_CONCURRENT_WAIT` |
-| License | MIT | Apache-2.0 |
+| | Hatchet | Prefect | Trigger.dev |
+|---|---|---|---|
+| Containers (idle) | 4 | 5 (server, postgres, worker, 2 stations) | 11 |
+| RAM idle | ~0.7 GB | **~0.2 GB** | ~2.0 GB |
+| Time to first successful run | ~2 min | ~3 min | ~10 min (login, project, token, image build) |
+| Datastores | Postgres (RabbitMQ optional) | Postgres (Redis for multi-server HA) | Postgres, Redis, ClickHouse, MinIO, registry, s2, Electric |
+| Run start latency | ~1–5 s end-to-end incl. result fetch | **~3–20 s** (worker poll + new Python process per run) | ~0.3–0.4 s queue→start |
+| Getting code to run | Start a worker anywhere | `serve()` or a worker + deployment (code from local path, git or image) | `trigger deploy` builds an image per version |
+| Offline | Easy (done) | Likely easy: images + wheels, same shape as Hatchet. Not done yet. | Moderate (done): base images, npm mirror, builder |
+| Upgrades | Bump `HATCHET_VERSION` | Bump `PREFECT_VERSION` (server and worker SDK follow it) | `scripts/update-upstream.sh <tag>` |
+| Auth on the UI | Built-in users | None by default (basic auth via `PREFECT_SERVER_API_AUTH_STRING`) | Magic link / GitHub, email whitelist |
+| License | MIT | Apache-2.0 | Apache-2.0 |
 
 ## General capabilities
 
-| Capability | Hatchet | Trigger.dev |
-|---|---|---|
-| Languages | Python, TypeScript, Go, Ruby SDKs | TypeScript/JavaScript. Python scripts can run *inside* a TS task via a build extension. |
-| Basic task + retries/backoff/timeouts | ✅ | ✅ |
-| DAG workflows (declared dependencies) | ✅ first-class (`parents=[...]`), shown as a graph in the UI | ➖ written as code: `triggerAndWait` / `batch.triggerByTaskAndWait`, shown as a run tree |
-| Child tasks / fan-out / fan-in | ✅ | ✅ (parallel waits must use `batch.*AndWait`) |
-| Durable execution (survive restarts, long sleeps) | ✅ durable tasks: `sleep_for`, `wait_for` events, durable event log | ✅ on Cloud (checkpoints). **Self-hosted: no checkpoints**, so a waiting run keeps its container alive. |
-| Event-triggered runs | ✅ push events → trigger workflows (with filters) | ➖ trigger via SDK/API; webhooks handled in your code |
-| Cron / scheduled / delayed runs | ✅ | ✅ (declarative and imperative schedules, `delay`, TTL) |
-| Concurrency control | ✅ per-workflow/per-key (group keys, strategies such as cancel-in-progress and round-robin) | ✅ queues + `concurrencyKey` (per-tenant/user queues) |
-| Rate limiting | ✅ static and dynamic (per-key) rate limits | ➖ via queue concurrency, no token-bucket primitive |
-| Priority | ✅ | ✅ |
-| Worker routing (sticky / labels / affinity) | ✅ sticky sessions, worker labels, per-run desired labels | ➖ regions/worker groups (machine-level), machine presets (CPU/RAM size) |
-| Per-run isolation and resource limits | ➖ runs share the worker process (slots) | ✅ container per run with enforced machine presets |
-| Idempotency | ✅ (dedupe keys) | ✅ `idempotencyKey` with TTL |
-| Streaming results / LLM tokens to a UI | ✅ `put_stream` / stream subscriptions | ✅ Realtime API + React hooks + streams v2 (s2), built for AI token streaming |
-| Versioned deployments / rollbacks | ➖ you version your worker images | ✅ atomic versioned deploys, runs pinned to their version, promote/rollback |
-| Local dev loop | run the worker locally against the server | ✅ `trigger dev`: hot reload, runs on your laptop against the server |
-| Preview environments | ➖ (tenants/environments set up by hand) | ✅ dev / staging / prod / preview branches |
-| Alerts | ✅ tenant alerting (email/Slack) | ✅ alerts (email/Slack/webhook) |
-| Multi-tenancy | ✅ tenants, API tokens per tenant | ✅ orgs → projects → environments |
-| Scaling out | run more workers anywhere; the engine scales with Postgres (RabbitMQ optional) | more supervisors/worker groups; **no autoscaling** self-hosted; Kubernetes via Helm for scale |
-| Self-hosted parity with Cloud | close (same engine) | missing warm starts, checkpoints, autoscaling |
+| Capability | Hatchet | Prefect | Trigger.dev |
+|---|---|---|---|
+| Languages | Python, TypeScript, Go, Ruby | Python | TypeScript/JavaScript |
+| DAG / fan-out | ✅ Declared `parents=[...]` | ✅ Tasks + `.submit()` futures (dynamic, in code) | ➖ In code with batch waits |
+| Durable execution | ✅ Durable tasks, event log | ➖ Retries, caching and transactions. No mid-flow resume. | ✅ Cloud only (checkpoints) |
+| Event-triggered runs | ✅ | ✅ Automations and event triggers | ➖ SDK/API |
+| Schedules | ✅ | ✅ (very mature) | ✅ |
+| Concurrency / rate limits | ✅ Keys, strategies, rate limits | ✅ Global and tag concurrency limits, rate limits | ✅ Queues and concurrency keys |
+| Worker routing | ✅ Labels, sticky | ✅ Work pools and queues | ➖ Regions |
+| Per-run isolation | ➖ Shared worker process | ✅ Process per run (Docker/k8s pools for containers) | ✅ Container per run |
+| Streaming to a UI | ✅ | ➖ Logs and artifacts, no token streaming API | ✅ Best in class |
+| Versioned deploys | ➖ Your images | ✅ Deployments with versions | ✅ Atomic versions |
+| UI-driven human input forms | ➖ | ✅ | ➖ |
 
 ## Try it yourself
 
-The same scenarios exist in both example projects:
-
-| Scenario | Hatchet (`hatchet/example-worker/`) | Trigger.dev (`trigger.dev/example-project/`) |
-|---|---|---|
-| Single task with retries | `uppercase` | `uppercase` |
-| Fan-out pipeline | `agent-pipeline` (DAG) | `agent-pipeline` (batch of child runs) |
-| Uneven DAG (fan-out, chain, fan-in) | `research-report` (`research_dag.py`): 5 tasks with `parents=[...]` | `research-report` (`src/trigger/research-dag.ts`): parent awaits children; the entities -> risk chain becomes its own `entity-risk-branch` child so it can run beside `summarize` |
-| Agent loop with waits | `agent-loop` (durable) | `agent-loop` (`wait.for`) |
-| Steerable / interruptible agent | `steerable-agent` (`steering.py`) | `steerable-agent` (`src/trigger/steering.ts`) |
-| Hardware-bound task | `read-sensor` on `hardware-station-a` / `-b` (`hardware_worker.py`) | not possible in-container; see the workarounds in section 1 |
-| Demo script | `docker compose exec example-worker python demo_steer_and_hardware.py` | `npx tsx scripts/demo-steer.ts` (with `TRIGGER_SECRET_KEY`) |
-
-Traces from both appear in each tool's own dashboard and in Jaeger at http://localhost:16686.
+| Scenario | Hatchet (`hatchet/example-worker/`) | Prefect (`prefect/example-worker/`) | Trigger.dev (`trigger.dev/example-project/`) |
+|---|---|---|---|
+| Single task with retries | `uppercase` | `uppercase` | `uppercase` |
+| Fan-out pipeline | `agent-pipeline` (DAG) | `agent-pipeline` (`.submit()`) | `agent-pipeline` (batch of child runs) |
+| Uneven DAG (fan-out, chain, fan-in) | `research-report` (`research_dag.py`): 5 tasks with `parents=[...]` | `research-report/example` (`research_dag.py`): 5 tasks connected by futures, with a run graph in the Prefect UI | `research-report` (`src/trigger/research-dag.ts`): parent awaits children; the entities -> risk chain becomes its own `entity-risk-branch` child so it can run beside `summarize` |
+| Agent loop with waits | `agent-loop` (durable) | `agent-loop` | `agent-loop` (`wait.for`) |
+| Steerable / interruptible agent | `steerable-agent` (`steering.py`) | `steerable-agent` (`flows.py`) | `steerable-agent` (`src/trigger/steering.ts`) |
+| Approval form | — | `approval-gate` (`pause_flow_run`) | — |
+| Hardware-bound task | `read-sensor` on `hardware-station-a` / `-b` | `read-sensor/sensor` on the `hardware` pool, stations a/b | not possible in-container |
+| Demo script | `docker compose exec example-worker python demo_steer_and_hardware.py` | `docker compose exec example-worker python demo.py` | `npx tsx scripts/demo-steer.ts` (with `TRIGGER_SECRET_KEY`) |

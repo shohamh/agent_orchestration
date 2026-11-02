@@ -22,4 +22,5 @@ services:
       HATCHET_CLIENT_TLS_STRATEGY: none
       # Trigger.dev (leave TRIGGER_SECRET_KEY empty to disable): an environment's secret key, e.g. tr_prod_...
       TRIGGER_SECRET_KEY: ${TRIGGER_SECRET_KEY:-}
+      TRIGGER_DEV_SECRET_KEY: ${TRIGGER_DEV_SECRET_KEY:-}
       TRIGGER_API_URL: ${TRIGGER_URL:-http://host.docker.internal:8030}

@@ -80,6 +80,7 @@
   .node-panel h5 { margin: 0; font-size: 14px; }
   @media (max-width: 700px) { main { grid-template-columns: repeat(6, 80vw); } }
 </style>
+<link rel="stylesheet" href="/static/chat.css">
 </head>
 <body>
 <header>
@@ -95,13 +96,14 @@
 
 <main id="columns" aria-live="polite"></main>
 
-<aside id="drawer" aria-hidden="true" aria-labelledby="d-title">
+<aside id="drawer" aria-hidden="true" aria-labelledby="d-title" inert>
   <div class="head">
     <h3 id="d-title"></h3>
     <button class="close" id="d-close" type="button" aria-label="Close">×</button>
   </div>
   <div class="body">
-    <section><dl id="d-facts"></dl></section>
+    <section id="d-facts-section"><dl id="d-facts"></dl></section>
+    <section id="d-chat" class="session-chat" hidden aria-label="Agent session"></section>
     <section id="d-steer-section">
       <h4>Steer</h4>
       <form class="row" id="d-steer">
@@ -124,7 +126,7 @@
       <div class="legend" id="d-legend"></div>
       <div class="node-panel" id="d-node" hidden style="margin-top:10px"></div>
     </section>
-    <section><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
+    <section id="d-progress-section"><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
     <section id="d-output-section"><h4>Output</h4><pre id="d-output"></pre></section>
     <section id="d-replay-section"><button class="secondary" id="d-replay" type="button">Run again (replay)</button></section>
   </div>
@@ -135,23 +137,32 @@
     <strong>New card</strong>
     <label>Type
       <select id="n-kind">
+        <option value="agent-session">Coding agent session (chat)</option>
         <option value="steerable-agent">Steerable agent (long-running, steerable)</option>
         <option value="research-report">Research report (multi-step DAG)</option>
       </select>
     </label>
     <label><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
-    <label class="agent-only">Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
-    <label class="agent-only">Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
+    <div class="session-fields" id="n-session-fields">
+      <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
+      <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
+      <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
+      <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
+    </div>
+    <p class="session-note warning" id="n-production-note" hidden>Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.</p>
+    <label class="agent-only" hidden>Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
+    <label class="agent-only" hidden>Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
     <div class="row" style="justify-content:flex-end">
       <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
-      <button class="primary" value="create" type="submit">Create</button>
+      <button class="primary" id="n-create" value="create" type="submit">Create session</button>
     </div>
   </form>
 </dialog>
 
+<script src="/static/chat.js"></script>
 <script>
 const COLUMN_LABELS = { scheduled: "Scheduled", queued: "Queued", running: "Running", waiting: "Waiting", done: "Done", stopped: "Stopped / failed" };
-const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev" };
+const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev · production", "trigger-dev": "Trigger.dev · local" };
 const $ = (id) => document.getElementById(id);
 const store = {
   get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
@@ -165,6 +176,13 @@ let boards = store.get("boards", ["research", "lab-a"]);
 let board = store.get("board", boards[0]);
 let cards = [];
 let openCardId = null;
+const contextKey = () => `${system}/${board}`;
+const runKey = () => `${contextKey()}/${openCardId}`;
+const chat = AgentChat.mount($("d-chat"), { el, input: async (body) => {
+  const key = runKey(), currentSystem = system, id = openCardId;
+  await api("POST", `/api/cards/${currentSystem}/${encodeURIComponent(id)}/input`, body);
+  if (key === runKey()) await refresh();
+} });
 
 async function api(method, path, body) {
   const response = await fetch(path, {
@@ -205,6 +223,7 @@ function renderHeader() {
   $("systems").replaceChildren(...systems.map((s) =>
     el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; renderBoard(); refresh(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
   $("board").replaceChildren(...boards.map((b) => { const o = el("option", { value: b }, b); if (b === board) o.selected = true; return o; }));
+  updateNewForm();
 }
 
 function renderBoard() {
@@ -217,13 +236,13 @@ function renderBoard() {
 }
 
 function renderCard(card) {
-  const last = card.progress[card.progress.length - 1];
+  const last = card.task === "agent-session" ? (card.events || []).filter(e => ["agent", "user", "error"].includes(e.type)).at(-1)?.text : card.progress?.at(-1);
   const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
     : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
   const q = card.column === "queued" ? queueText(card) : "";
   return el("div", { class: "card", tabindex: "0", role: "button", onclick: () => openCard(card.id), onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); } },
     el("div", { class: "title" }, card.title),
-    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.status), el("span", {}, card.task), el("span", {}, when)),
+    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when)),
     q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
     last ? el("div", { class: "last" }, last) : null);
 }
@@ -236,30 +255,36 @@ function duration(card) {
 
 function openCard(id) {
   if (id !== openCardId) { dag = null; selectedNode = null; nodeLogs = { ref: null, lines: [] }; $("d-dag-section").hidden = true; }
-  openCardId = id; renderDrawer(); refreshDag(); $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false"); $("d-instruction").focus(); }
-function closeDrawer() { openCardId = null; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+  openCardId = id; renderDrawer(); refreshDag(); $("drawer").inert = false; $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false"); if (cards.find(c => c.id === id)?.task === "agent-session") chat.focus(); else $("d-instruction").focus(); }
+function closeDrawer() { openCardId = null; $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
 
 function renderDrawer() {
   const card = cards.find((c) => c.id === openCardId);
   if (!card) return;
+  const session = card.task === "agent-session";
+  $("drawer").classList.toggle("session-drawer", session);
+  $("d-chat").hidden = !session;
+  $("d-facts-section").hidden = session;
+  $("d-progress-section").hidden = session;
+  if (session) chat.render(card, runKey());
   $("d-title").textContent = card.title;
   const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", card.created_at], ["Started", card.started_at], ["Finished", card.finished_at]];
   $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
-  $("d-steer-section").hidden = !card.steerable;
+  $("d-steer-section").hidden = session || !card.steerable;
   $("d-queue").textContent = queueText(card);
   const pause = $("d-pause");
   pause.hidden = system !== "trigger" || !card.queue?.id;
   $("d-queue-section").hidden = !queueText(card) && pause.hidden;
   pause.textContent = card.queue?.paused ? "Resume queue" : "Pause queue";
-  const progress = card.progress.length ? card.progress.map((line) => el("li", {}, line)) : [el("li", {}, "No intermediate results yet")];
+  const progress = card.progress?.length ? card.progress.map((line) => el("li", {}, line)) : [el("li", {}, "No intermediate results yet")];
   const list = $("d-progress");
   const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
   list.replaceChildren(...progress);
   if (atBottom) list.scrollTop = list.scrollHeight;
   const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
-  $("d-output-section").hidden = !output;
+  $("d-output-section").hidden = session || !output;
   $("d-output").textContent = output;
-  $("d-replay-section").hidden = !["done", "stopped"].includes(card.column);
+  $("d-replay-section").hidden = session || !["done", "stopped"].includes(card.column);
 }
 
 // ---------------------------------------------------------------- DAG view
@@ -377,11 +402,13 @@ function selectNode(id) {
 async function refreshNodeLogs() {
   const node = dag?.nodes.find((n) => n.id === selectedNode);
   if (!node?.ref) return;
+  const key = runKey(), nodeId = selectedNode, serial = ++nodeLogSerial;
   try {
     const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(node.ref)}/logs`);
+    if (key !== runKey() || nodeId !== selectedNode || serial !== nodeLogSerial) return;
     nodeLogs = { ref: node.ref, lines: data.lines };
     renderNodePanel();
-  } catch (e) { setStatus(e.message, true); }
+  } catch (e) { if (key === runKey() && nodeId === selectedNode && serial === nodeLogSerial) setStatus(e.message, true); }
 }
 
 function renderNodePanel() {
@@ -402,68 +429,94 @@ function renderNodePanel() {
   ].filter(Boolean));
 }
 
-let dagLoading = false;
+let dagLoading = null;
+let dagSerial = 0, nodeLogSerial = 0;
 async function refreshDag() {
   const card = cards.find((c) => c.id === openCardId);
-  if (!card || dagLoading) return;
+  const key = runKey();
+  if (!card || card.task === "agent-session") { $("d-dag-section").hidden = true; return; }
+  if (dagLoading === key) return;
   // A finished graph doesn't change: fetch it once.
   if (dag && dag.cardId === card.id && dag.final && ["done", "stopped"].includes(card.column)) return;
-  dagLoading = true;
+  dagLoading = key;
+  const serial = ++dagSerial;
   try {
     const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(card.id)}/dag`);
-    if (openCardId !== card.id) return;
+    if (key !== runKey() || serial !== dagSerial) return;
     dag = { ...data, cardId: card.id, final: ["done", "stopped"].includes(card.column) };
     renderDag();
     if (selectedNode) refreshNodeLogs();
-  } catch (e) { setStatus(e.message, true); }
-  finally { dagLoading = false; }
+  } catch (e) { if (key === runKey() && serial === dagSerial) setStatus(e.message, true); }
+  finally { if (serial === dagSerial) dagLoading = null; }
 }
 
 async function act(action, body) {
+  const key = runKey();
   try { setStatus(`${action}…`); await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/${action}`, body); await refresh(); }
-  catch (e) { setStatus(e.message, true); }
+  catch (e) { if (key === runKey()) setStatus(e.message, true); }
 }
 
 function setStatus(text, error = false) { const s = $("status"); s.textContent = text; s.classList.toggle("error", error); }
 
-let refreshing = false;
+let refreshing = null;
+let refreshSerial = 0;
 async function refresh() {
-  if (!system || refreshing) return;
-  refreshing = true;
+  const key = contextKey();
+  if (!system || refreshing === key) return;
+  const serial = ++refreshSerial;
+  refreshing = key;
   try {
     const data = await api("GET", `/api/boards/${system}/${encodeURIComponent(board)}/cards`);
+    if (key !== contextKey() || serial !== refreshSerial) return;
     cards = data.cards;
     renderBoard();
     if (openCardId) { renderDrawer(); refreshDag(); }
     setStatus(`${SYSTEM_LABELS[system]} · ${cards.length} cards · updated ${new Date().toLocaleTimeString()}`);
-  } catch (e) { setStatus(e.message, true); }
-  finally { refreshing = false; }
+  } catch (e) { if (key === contextKey() && serial === refreshSerial) setStatus(e.message, true); }
+  finally { if (serial === refreshSerial) refreshing = null; }
 }
 
-$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); refresh(); });
+$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; renderBoard(); refresh(); });
 $("add-board").addEventListener("click", () => {
   const name = (prompt("Board name (letters, digits, - and _)") || "").trim();
   if (!/^[\w-]+$/.test(name)) return;
   if (!boards.includes(name)) boards.push(name);
-  board = name; store.set("boards", boards); store.set("board", board); renderHeader(); refresh();
+  board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; renderBoard(); renderHeader(); refresh();
 });
-$("new-card").addEventListener("click", () => $("new-dialog").showModal());
-$("n-kind").addEventListener("change", (e) => {
-  const agent = e.target.value === "steerable-agent";
+function updateNewForm() {
+  const kind = $("n-kind").value;
+  const agent = kind === "steerable-agent", session = kind === "agent-session";
   document.querySelectorAll(".agent-only").forEach((n) => { n.hidden = !agent; });
-  $("n-goal-label").textContent = agent ? "Goal" : "Topic";
-});
+  document.querySelectorAll(".agent-only input").forEach((n) => { n.disabled = !agent; });
+  document.querySelectorAll(".session-fields input, .session-fields select").forEach((n) => { n.disabled = !session; });
+  $("n-session-fields").hidden = !session;
+  $("n-goal-label").textContent = session ? "Opening prompt" : agent ? "Goal" : "Topic";
+  $("n-production-note").hidden = !session || system !== "trigger";
+  $("n-create").disabled = session && system === "trigger";
+  $("n-create").textContent = session ? "Create session" : "Create card";
+  $("n-demo-note").hidden = $("n-agent").value !== "demo";
+}
+$("new-card").addEventListener("click", () => { updateNewForm(); $("new-dialog").showModal(); });
+$("n-kind").addEventListener("change", updateNewForm);
+$("n-agent").addEventListener("change", updateNewForm);
 $("new-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "create") return;
   e.preventDefault();
+  const kind = $("n-kind").value, key = contextKey();
+  if (kind === "agent-session" && system === "trigger") { updateNewForm(); return; }
+  const body = kind === "agent-session"
+    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), simulateFailures: Number($("n-failures").value) }
+    : { kind, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) };
+  $("n-create").disabled = true;
   try {
-    await api("POST", `/api/boards/${system}/${encodeURIComponent(board)}/cards`,
-      { kind: $("n-kind").value, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) });
-    $("new-dialog").close(); $("n-goal").value = ""; refresh();
+    const result = await api("POST", `/api/boards/${system}/${encodeURIComponent(board)}/cards`, body);
+    $("new-dialog").close(); $("n-goal").value = "";
+    if (key === contextKey()) { await refresh(); if (kind === "agent-session" && cards.some(c => c.id === result.id)) openCard(result.id); }
   } catch (err) { setStatus(err.message, true); }
+  finally { updateNewForm(); }
 });
 $("d-close").addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
 $("d-stop").addEventListener("click", () => act("stop"));
 $("d-cancel").addEventListener("click", () => act("cancel"));

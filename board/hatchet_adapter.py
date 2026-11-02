@@ -6,6 +6,7 @@ run's persisted logs (ctx.log in the agent), so history survives board restarts.
 """
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
@@ -79,7 +80,8 @@ class HatchetAdapter:
             finished_at=_iso(s.finished_at),
             output=s.output or None,
             error=s.error_message,
-            steerable=task == AGENT_TASK and not is_final(column),
+            steerable=task in (AGENT_TASK, "agent-session") and not is_final(column),
+            agent=run_input.get("agent"),
         )
         if column == "queued":
             ahead = queued.get(task, [])
@@ -101,6 +103,17 @@ class HatchetAdapter:
                 card.progress = self._final_progress[key]
             else:
                 card.progress = await fetch
+        if task == "agent-session":
+            events = []
+            for line in card.progress:
+                if line.startswith("EVT "):
+                    try:
+                        event = json.loads(line[4:])
+                        if isinstance(event, dict):
+                            events.append(event)
+                    except (ValueError, TypeError):
+                        pass
+            card.apply_session_events(events)
         return card
 
     async def _dag_progress(self, run_id: str) -> list[str]:
@@ -108,11 +121,37 @@ class HatchetAdapter:
         return [f"{node.label}: {node.status.lower()}" for node in dag.nodes]
 
     async def _progress(self, task_run_id: str) -> list[str]:
+        # The SDK has no offset/cursor and defaults to 1000 rows. Partition time
+        # windows when a page fills; this works with either server sort order.
+        windows = [(None, datetime.now(timezone.utc), 1000)]
+        logs = {}
         try:
-            logs = await asyncio.to_thread(lambda: self.hatchet.logs.list(task_run_id=task_run_id).rows or [])
+            while windows:
+                since, until, limit = windows.pop()
+                page = await asyncio.to_thread(
+                    lambda: self.hatchet.logs.list(task_run_id=task_run_id, since=since, until=until, limit=limit).rows or []
+                )
+                for line in page:
+                    logs[(line.created_at, line.message)] = line
+                if len(page) < limit:
+                    continue
+                first = min(line.created_at for line in page)
+                last = max(line.created_at for line in page)
+                tick = timedelta(microseconds=1)
+                if since is None or since < first:
+                    windows.append((since, first - tick, 1000))
+                if until > last:
+                    windows.append((last + tick, until, 1000))
+                if first < last:
+                    middle = first + (last - first) // 2
+                    windows.extend([(first, middle, 1000), (middle + tick, last, 1000)])
+                elif limit < 1000000:
+                    windows.append((first, last, limit * 2))
+                else:
+                    raise RuntimeError("Too many Hatchet logs sharing one timestamp; cannot safely paginate")
         except NotFoundException:
             return []
-        lines = sorted(logs, key=lambda line: line.created_at)
+        lines = sorted(logs.values(), key=lambda line: line.created_at)
         # Durable tasks can replay after eviction and re-log a step; keep the first occurrence.
         return list(dict.fromkeys(line.message for line in lines))
 
@@ -158,13 +197,19 @@ class HatchetAdapter:
     async def node_logs(self, ref: str) -> list[str]:
         return await self._progress(ref)
 
-    async def create(self, board: str, kind: str, goal: str, turns: int, step_seconds: int) -> str:
-        if kind == "research-report":
+    async def create(self, board: str, kind: str, goal: str, turns: int, step_seconds: int,
+                     session_options: dict[str, Any] | None = None) -> str:
+        if kind == "agent-session":
+            workflow, run_input = "agent-session", {"goal": goal, **(session_options or {})}
+        elif kind == "research-report":
             workflow, run_input = "research-report", {"topic": goal}
         else:
             workflow, run_input = AGENT_TASK, {"goal": goal, "turns": turns, "step_seconds": step_seconds}
         details = await self.hatchet.runs.aio_create(workflow, run_input, additional_metadata={"board": board})
         return details.run.metadata.id
+
+    async def input(self, run_id: str, message: dict[str, Any]) -> None:
+        await asyncio.to_thread(lambda: self.hatchet.event.push("agent:input", message, scope=run_id))
 
     async def steer(self, run_id: str, message: dict[str, Any]) -> None:
         await asyncio.to_thread(lambda: self.hatchet.event.push(STEER_EVENT, message, scope=run_id))

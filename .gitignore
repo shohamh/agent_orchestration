@@ -18,6 +18,8 @@ node_modules/
 .trigger/
 __pycache__/
 *.pyc
+agents/runtime/
+agents/*.log
 .venv/
 venv/
 

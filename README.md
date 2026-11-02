@@ -7,6 +7,7 @@ Self-hosted Docker Compose setups for running AI-agent workloads on Hatchet and 
 | [hatchet/](hatchet/README.md) | Hatchet v0.114.2: Postgres + engine + dashboard, plus a Python example worker | http://localhost:8080 |
 | [trigger.dev/](trigger.dev/README.md) | Trigger.dev v4.8.3 combined stack, plus a TypeScript example project | http://localhost:8030 |
 | [board/](board/README.md) | Agent Board: kanban view over both systems. Shows queue position and live progress, and can steer, stop, cancel and replay cards. | http://localhost:8090 |
+| [agents/](agents/README.md) | Local ACP coding sessions with a chat UI, permissions, question forms, interrupt, Continue and human completion. | http://localhost:8090 |
 | [prefect/](prefect/README.md) | Prefect 3.9.1 server, served example flows and two hardware-station workers; tested against the same requirements (offline bundle not done yet) | http://localhost:4200 |
 | [observability/](observability/docker-compose.yml) | Optional shared trace backend (Jaeger, OTLP) for agents on all three systems | http://localhost:16686 |
 | [offline/](OFFLINE.md) | `bundle.sh` (connected side) / `load.sh` (offline side), offline npm mirror | — |

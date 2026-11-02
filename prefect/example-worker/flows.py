@@ -105,5 +105,8 @@ class Approval(RunInput):
 def approval_gate(action: str) -> dict:
     """Pauses with a typed form; the Prefect UI shows a "Resume" button that renders it.
     From code: resume_flow_run(flow_run_id, run_input={"approved": True, "comment": "..."})."""
-    approval = pause_flow_run(wait_for_input=Approval, timeout=3600)
+    approval = pause_flow_run(
+        wait_for_input=Approval.with_initial_data(description=f"Review the proposed action: {action}"),
+        timeout=3600,
+    )
     return {"action": action, "approved": approval.approved, "comment": approval.comment}
