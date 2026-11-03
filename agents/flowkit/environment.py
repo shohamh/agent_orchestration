@@ -1,16 +1,14 @@
 """Materialize context on the setup worker, then validate it before dependencies are released."""
 import asyncio
-import hashlib
-import html
 import json
 import os
 import re
 import shutil
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, quote
+from urllib.parse import urlsplit
 
-import aiohttp
 from .artifacts import snapshot, restore, validate, MAX_BYTES
+from .confluence_export import import_confluence, validate_confluence
 from .restart import atomic_json
 from .workers import selector
 
@@ -25,11 +23,13 @@ def configuration(value):
     for kind, allowed, required in (
         ('repositories', {'url','target','ref'}, {'url','target'}),
         ('files', {'source','target'}, {'source','target'}),
-        ('confluence', {'base_url','page_id','target','token_env','username_env'}, {'base_url','page_id','target'})):
+        ('confluence', {'base_url','page_id','target','token_env','username_env','include_descendants','attachments'}, {'base_url','page_id','target'})):
         items=value.get(kind, [])
         if not isinstance(items, list) or len(items)>50: raise ValueError(f'{kind} must be a list of at most 50 sources')
         for item in items:
-            if not isinstance(item,dict) or set(item)-allowed or required-set(item) or any(not isinstance(v,str) or not v or '\x00' in v for v in item.values()):
+            if not isinstance(item,dict) or set(item)-allowed or required-set(item) or any(
+                    type(v) is not bool if k=='include_descendants' else not isinstance(v,str) or not v or '\x00' in v
+                    for k,v in item.items()):
                 raise ValueError(f'Invalid {kind} source')
             target=item['target']
             validate({target:{'data':'', 'mode':420}})
@@ -43,6 +43,7 @@ def configuration(value):
             if parsed.scheme in ('http','https') and (parsed.username or parsed.password): raise ValueError('Use worker credential helpers or token_env, not credentials in URLs')
             if kind=='repositories' and (url.startswith('-') or item.get('ref','').startswith('-')): raise ValueError('Invalid git URL/ref')
             if kind=='confluence':
+                if item.get('attachments','referenced') not in ('referenced','all','disabled'): raise ValueError('Invalid Confluence attachments option')
                 if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.query or parsed.fragment: raise ValueError('Invalid Confluence base_url')
                 if not re.fullmatch(r'[0-9]+', item['page_id']): raise ValueError('Confluence page_id must be numeric')
                 for key in ('token_env','username_env'):
@@ -71,50 +72,6 @@ def target_path(workspace,item):
     return path
 
 
-async def wiki_pages(item):
-    base=item['base_url'].rstrip('/')
-    token=os.environ.get(item.get('token_env',''),'')
-    user=os.environ.get(item.get('username_env',''),'')
-    if item.get('token_env') and not token: raise ValueError(f'Missing worker credential: {item["token_env"]}')
-    if item.get('username_env') and not user: raise ValueError(f'Missing worker credential: {item["username_env"]}')
-    auth=aiohttp.BasicAuth(user,token) if user else None
-    headers={'Authorization':f'Bearer {token}'} if token and not user else {}
-    async with aiohttp.ClientSession(auth=auth,headers=headers,timeout=aiohttp.ClientTimeout(total=30)) as client:
-        async def get(url):
-            if urlsplit(url).netloc != urlsplit(base).netloc or urlsplit(url).scheme != urlsplit(base).scheme: raise ValueError('Confluence pagination left its configured origin')
-            async with client.get(url, allow_redirects=False) as response:
-                if response.status!=200: raise ValueError(f'Confluence returned HTTP {response.status}')
-                body=bytearray()
-                async for chunk in response.content.iter_chunked(65536):
-                    body.extend(chunk)
-                    if len(body)>8*1024*1024: raise ValueError('Confluence API response exceeds 8 MiB')
-                return json.loads(body)
-        path=f'{base}/rest/api/content/{item["page_id"]}'
-        root=await get(path+'?expand=body.storage,version')
-        if str(root.get('id'))!=item['page_id']: raise ValueError('Confluence returned the wrong root page')
-        pages={str(root['id']):root}
-        url=path+'/descendant/page?expand=body.storage,version&limit=25&start=0'
-        visited=set()
-        while url:
-            if url in visited: raise ValueError('Confluence pagination did not advance')
-            visited.add(url)
-            result=await get(url)
-            for page in result['results']:
-                pid=str(page['id'])
-                if not re.fullmatch(r'[0-9]+',pid): raise ValueError('Invalid Confluence page id')
-                if 'storage' not in page.get('body',{}): page=await get(f'{base}/rest/api/content/{pid}?expand=body.storage,version')
-                pages[pid]=page
-                if len(pages)>2000: raise ValueError('Confluence tree exceeds 2000 pages')
-            next_link=(result.get('_links') or {}).get('next')
-            url=urljoin(base+'/', next_link) if next_link else None
-        return pages
-
-
-def wiki_content(page):
-    body=page['body']['storage']['value']
-    return ('<!doctype html><meta charset="utf-8"><title>'+html.escape(page.get('title',''))+'</title>\n'+body).encode('utf-8')
-
-
 async def prepare_sources(config, workspace):
     configuration(config)
     report=[]
@@ -136,14 +93,7 @@ async def prepare_sources(config, workspace):
                         if source.stat().st_size>MAX_BYTES: raise ValueError('Context file exceeds transfer limit')
                         await asyncio.to_thread(shutil.copy2,source,target)
                 else:
-                    pages=await wiki_pages(item)
-                    target.mkdir(parents=True,exist_ok=True)
-                    total=0
-                    for pid,page in pages.items():
-                        content=wiki_content(page); total+=len(content)
-                        if total>MAX_BYTES: raise ValueError('Confluence export exceeds transfer limit')
-                        (target/f'{pid}.html').write_bytes(content)
-                    atomic_json(target/'index.json',[{'id':pid,'title':page.get('title',''),'file':f'{pid}.html'} for pid,page in pages.items()])
+                    await import_confluence(item,target)
                 report.append({'source':item['target'],'kind':kind,'ok':True})
             except Exception as exc:
                 # Do not echo response headers or credentials from APIs.
@@ -175,11 +125,7 @@ async def validate_sources(config,workspace):
                         if await asyncio.to_thread(snapshot,source) != await asyncio.to_thread(snapshot,target): raise ValueError('Copied directory is incomplete or differs from source')
                     elif not target.is_file() or source.read_bytes()!=target.read_bytes(): raise ValueError('Copied file is missing or differs from source')
                 else:
-                    pages=await wiki_pages(item)
-                    index=json.loads((target/'index.json').read_text(encoding='utf-8'))
-                    if {p['id'] for p in index}!=set(pages): raise ValueError('Confluence index is incomplete')
-                    for pid,page in pages.items():
-                        if (target/f'{pid}.html').read_bytes()!=wiki_content(page): raise ValueError(f'Confluence page {pid} is missing or incomplete')
+                    await validate_confluence(item,target)
             except Exception as exc: errors.append(f'{item["target"]}: {str(exc)[:2000]}')
     return errors
 

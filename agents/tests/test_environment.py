@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestServer
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flowkit.definition import parse, FlowError
 from flowkit.environment import prepare_sources, validate_sources
+from confluence_fixture import confluence_app
 
 
 class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
@@ -25,12 +26,7 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
             parse({'name': 'bad', 'environment': {'files': [{'source': 'x', 'target': '../escape'}]}, 'steps': {'x': {'kind': 'program', 'run': 'x'}}})
 
     async def test_git_files_paginated_confluence_and_incomplete_export(self):
-        def page(pid): return {'id': pid, 'title': f'Page {pid}', 'body': {'storage': {'value': f'<p>content {pid}</p>'}}}
-        async def content(request):
-            if request.match_info['tail'] == '1': return web.json_response(page('1'))
-            start = int(request.query.get('start', '0'))
-            return web.json_response({'results': [page('2' if start == 0 else '3')], '_links': {'next': '/rest/api/content/1/descendant/page?start=1'} if start == 0 else {}})
-        app = web.Application(); app.router.add_get('/rest/api/content/{tail:.*}', content)
+        app = confluence_app()
         async with TestServer(app) as server:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); repo = root/'source'; repo.mkdir()
@@ -50,7 +46,11 @@ class EnvironmentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await validate_sources(config,workspace), 'Missing tracked files must block setup completion')
                 subprocess.run(['git','-C',str(workspace/'repos/sample'),'restore','.'],check=True,capture_output=True)
                 self.assertEqual(len(json.loads((workspace/'context/wiki/index.json').read_text())), 3)
-                (workspace/'context/wiki/3.html').unlink()
+                index=json.loads((workspace/'context/wiki/index.json').read_text())
+                page3=workspace/'context/wiki'/next(p['file'] for p in index if p['id']=='3')
+                self.assertEqual(page3.suffix,'.md')
+                self.assertIn('**content 3**',page3.read_text())
+                page3.unlink()
                 self.assertTrue(await validate_sources(config, workspace))
                 await prepare_sources(config, workspace)
                 self.assertEqual(await validate_sources(config, workspace), [])

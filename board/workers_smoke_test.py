@@ -22,6 +22,8 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'agents'))
 from flowkit.worker_service import make_app
 from flowkit.restart import workspace_path
+sys.path.insert(0,str(ROOT/'agents/tests'))
+from confluence_fixture import confluence_app
 
 
 async def main(args):
@@ -31,11 +33,7 @@ async def main(args):
         for command in (['init'],['add','.'],['-c','user.name=Smoke','-c','user.email=smoke@example.invalid','commit','-m','seed']):
             subprocess.run(['git','-C',str(repo),*command],check=True,capture_output=True)
         note=root/'notes.txt'; note.write_text('file context')
-        async def wiki(request):
-            pid='1' if request.match_info['tail']=='1' else '2'
-            page={'id':pid,'title':'Fixture page '+pid,'body':{'storage':{'value':'<p>Confluence context '+pid+'</p>'}}}
-            return web.json_response(page if pid=='1' else {'results':[page],'_links':{}})
-        wiki_app=web.Application(); wiki_app.router.add_get('/rest/api/content/{tail:.*}',wiki)
+        wiki_app=confluence_app()
         services=[TestServer(make_app(worker_id=name,root=root/name,pool='smoke',tags=['test'],slots=2)) for name in ('smoke-a','smoke-b')]
         services.append(TestServer(wiki_app))
         for service in services: await service.start_server()
@@ -44,13 +42,22 @@ async def main(args):
         previous=yaml.safe_load(original) if original else {'workers':[{'id':'local','url':'http://127.0.0.1:8096','pool':'default','tags':[],'token_env':'FLOW_WORKER_TOKEN'}]}
         previous['workers'] += [{'id':name,'url':str(service.make_url('')).rstrip('/'),'pool':'smoke','tags':['test']} for name,service in zip(('smoke-a','smoke-b'),services)]
         registry.write_text(yaml.safe_dump(previous),encoding='utf-8')
+        wiki=({'base_url':'https://shibboleth.atlassian.net/wiki','page_id':'2067399657','target':'context/wiki'}
+              if args.public_confluence else
+              {'base_url':str(services[2].make_url('')).rstrip('/'),'page_id':'1','target':'context/wiki'})
+        wiki_check=("assert 'SystemRequirements' in Path('context/wiki/2067399657.md').read_text(encoding='utf-8')"
+                    if args.public_confluence else
+                    "assert '**content 2**' in Path('context/wiki/2.md').read_text(); assert Path('context/wiki/attachments/1/att10.png').is_file()")
+        verify_command=("python -c \"from pathlib import Path; assert Path('repos/demo/seed.txt').read_text()=='repository context'; "
+                        "assert Path('context/notes.txt').read_text()=='file context'; "+wiki_check+"; "
+                        "Path('result.txt').write_text('cross-worker verified'); print('all context arrived')\"")
         flow={'name':'workers-context-smoke','description':'Disposable native worker/context verification',
               'environment':{'agent':'demo','worker':{'id':'smoke-a'},
                   'repositories':[{'url':str(repo),'target':'repos/demo'}],
                   'files':[{'source':str(note),'target':'context/notes.txt'}],
-                  'confluence':[{'base_url':str(services[2].make_url('')).rstrip('/'),'page_id':'1','target':'context/wiki'}]},
+                  'confluence':[wiki]},
               'steps':{
-                  'verify':{'kind':'program','worker':{'id':'smoke-b'},'run':'''python -c "from pathlib import Path; assert Path('repos/demo/seed.txt').read_text()=='repository context'; assert Path('context/notes.txt').read_text()=='file context'; assert 'Confluence context 2' in Path('context/wiki/2.html').read_text(); Path('result.txt').write_text('cross-worker verified'); print('all context arrived')"'''},
+                  'verify':{'kind':'program','worker':{'id':'smoke-b'},'run':verify_command},
                   'finish':{'kind':'program','needs':['verify'],'worker':{'id':'smoke-a'},'run':'''python -c "from pathlib import Path; print(Path('result.txt').read_text())"'''}}}
         runs=[]
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client:
@@ -131,4 +138,5 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--base',default='http://127.0.0.1:8092')
     parser.add_argument('--systems',nargs='+',default=['hatchet','prefect','trigger-dev'])
+    parser.add_argument('--public-confluence',action='store_true',help='Use the public Shibboleth Cloud page instead of a local Confluence fixture')
     asyncio.run(main(parser.parse_args()))

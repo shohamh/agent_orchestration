@@ -25,6 +25,10 @@ only `agent-session`; the Docker example workers continue serving the original e
 Hatchet SDK 1.44.0 has two Unix signal assumptions; `hatchet_windows.py` adapts this worker only.
 The shim checks the exact SDK version and must be reviewed when upgrading it.
 
+If this virtualenv was created without pip, install the same worker requirements with
+`uv pip install --python agents/.venv/Scripts/python.exe -r agents/requirements.txt` instead.
+The requirements include the pinned Confluence Markdown Exporter used by environment setup.
+
 For Prefect, in another terminal (serves `agent-session/local`; PREFECT_API_URL defaults to localhost:4200):
 
 ```powershell
