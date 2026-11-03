@@ -65,6 +65,21 @@ docker compose up -d --build
 
 Select **Hatchet** or **Trigger.dev · local**. The existing production tab retains the original examples.
 
+## Portable flows (flow host)
+
+Flows in [`../flows`](../flows/README.md) run natively on all three backends. Start the flow host in
+another terminal; it runs the Hatchet and Prefect flow workers, regenerates the Trigger.dev flow tasks
+(picked up by the `trigger dev` worker above), and serves the board's Flows API on 127.0.0.1:8095:
+
+```powershell
+agents/.venv/Scripts/python.exe -u agents/flow_host.py
+```
+
+The board reaches it at `FLOW_HOST_URL` (default `http://host.docker.internal:8095`, which Docker
+Desktop forwards to this PC's loopback). On Linux, bind it with `FLOW_HOST_BIND`, set
+`FLOW_HOST_TOKEN` on both sides, and point `FLOW_HOST_URL` at it. `FLOW_BACKENDS` (default
+`hatchet,prefect,trigger`) picks which backends to keep in sync.
+
 ## Chat controls
 
 - **Send message** while busy queues the message for the next turn. **Interrupt turn** cancels

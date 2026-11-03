@@ -1,0 +1,13 @@
+name: hello-flow
+description: Two-step smoke test
+input:
+  who: world
+steps:
+  greet:
+    kind: program
+    run: python -c "print('hello {{ input.who }}')"
+  reply:
+    kind: agent
+    needs: [greet]
+    prompt: |
+      Reply to this greeting: {{ steps.greet.output.stdout }}

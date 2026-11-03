@@ -45,7 +45,9 @@ class Session:
     def _engine_factory(self):
         from .acp_engine import AcpEngine, DemoEngine
 
-        return DemoEngine(self) if self.config.get("agent") == "demo" else AcpEngine(self)
+        if self.config.get("agent") == "demo":
+            return DemoEngine(self, quiet=bool(self.config.get("quietDemo")))
+        return AcpEngine(self)
 
     async def status(self, state: str, **fields):
         self.state = state
@@ -221,6 +223,9 @@ class Session:
                         await self.interrupt_done.wait()
                         if self.interrupted or reason == "cancelled":
                             await self.status("awaiting_input", reason="Interrupted. Send an instruction to continue.")
+                        elif reason == "end_turn" and self.config.get("autoDone") and self.messages.empty():
+                            # Flow steps without review: a finished turn finishes the step.
+                            self.finishing = True
                         elif reason == "end_turn":
                             await self.status("awaiting_review", reason="Turn finished. Review the result, continue, or mark done.")
                         else:
@@ -251,8 +256,10 @@ class Session:
                                 pass
                     finally:
                         self.active = None
-            await self.status("done", reason="Marked done by you")
-            return {"state": "done", "agent": self.config.get("agent"), "workspace": self.config.get("workspace")}
+            await self.status("done", reason="Finished" if self.config.get("autoDone") else "Marked done by you")
+            final = next((h["text"] for h in reversed(self.history) if h["role"] == "agent"), "")
+            return {"state": "done", "agent": self.config.get("agent"), "workspace": self.config.get("workspace"),
+                    "text": final}
         finally:
             pump.cancel()
             await asyncio.gather(pump, return_exceptions=True)

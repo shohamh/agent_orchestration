@@ -209,18 +209,46 @@ class AcpEngine:
 
 
 class DemoEngine:
-    """Explicitly simulated interactions, useful offline and without CLI logins."""
-    def __init__(self, session):
+    """Explicitly simulated interactions, useful offline and without CLI logins.
+
+    quiet=True (flow steps): no permission or question; it "reads" its prompt and answers from it,
+    so a flow can run unattended while still showing a live transcript.
+    """
+    def __init__(self, session, quiet=False):
         self.session = session
         self.cancelled = False
         self.turn = 0
+        self.quiet = quiet
 
     async def start(self):
         pass
 
+    async def _quiet_prompt(self, text):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        tool_id = uuid.uuid4().hex
+        await self.session.emit("tool", id=tool_id, name="read", summary=f"Read the step input ({len(text)} chars, simulated)", status="running")
+        await asyncio.sleep(.5)
+        if self.cancelled:
+            return "cancelled"
+        await self.session.emit("tool", id=tool_id, status="ok", output="\n".join(lines[:12]))
+        if self.turn == 1:
+            reply = [f"Simulated agent, no model is called. The task: {lines[0] if lines else '(empty)'}",
+                     "Key points from the input:"] + [f"- {line[:160]}" for line in lines[1:6]]
+        else:
+            reply = [f"Noted: {text.strip()[:300]}", "I would apply that instruction here (simulated)."]
+        message_id = uuid.uuid4().hex
+        for line in reply:
+            await asyncio.sleep(.3)
+            if self.cancelled:
+                return "cancelled"
+            await self.session.emit("agent", message_id=message_id, text=line + "\n")
+        return "end_turn"
+
     async def prompt(self, text):
         self.cancelled = False
         self.turn += 1
+        if self.quiet:
+            return await self._quiet_prompt(text)
         message_id = uuid.uuid4().hex
         await self.session.emit("agent", message_id=message_id,
             text="This is the simulated UI demo. No model is being called. I'll show a permission request and a question.")

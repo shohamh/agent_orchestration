@@ -1,0 +1,33 @@
+name: research-flow
+description: Research a topic from several sources and write a short report.
+input:
+  topic: edge caching
+  sources: internal-wiki,incident-db,news-feed
+steps:
+  fetch_sources:
+    kind: program
+    run: python {flow_dir}/steps/fetch_sources.py {{ input.topic }} {{ input.sources }}
+  extract_entities:
+    kind: program
+    needs: [fetch_sources]
+    run: python {flow_dir}/steps/extract_entities.py
+  summarize:
+    kind: agent
+    needs: [fetch_sources]
+    agent: demo
+    prompt: |
+      Summarize what these sources say about {{ input.topic }}.
+      {{ steps.fetch_sources.output.docs }}
+  assess_risk:
+    kind: program
+    needs: [fetch_sources, extract_entities]
+    run: python {flow_dir}/steps/assess_risk.py
+  write_report:
+    kind: agent
+    needs: [summarize, extract_entities, assess_risk]
+    agent: demo
+    prompt: |
+      Write a short research report on {{ input.topic }}.
+      Summary: {{ steps.summarize.output }}
+      Entities: {{ steps.extract_entities.output.entities }}
+      Risk: {{ steps.assess_risk.output }}

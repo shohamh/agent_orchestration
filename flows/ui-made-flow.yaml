@@ -1,0 +1,16 @@
+name: ui-made-flow
+description: What this flow does
+input:
+  topic: something
+steps:
+  gather:
+    kind: program
+    run: python -c "print('gathering {{ input.topic }}')"
+  think:
+    kind: agent
+    needs: [gather]
+    agent: demo        # demo | codex | claude | opencode | opencode2 | omp | pi
+    review: false      # true: wait for "Mark done" before the flow continues
+    prompt: |
+      Work on {{ input.topic }} using:
+      {{ steps.gather.output.stdout }}

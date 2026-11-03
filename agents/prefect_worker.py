@@ -20,14 +20,14 @@ INPUT_PREFIX = "agentinput-auto"
 class InputInbox:
     """Poll a flow run's inputs with our key prefix, oldest first, delivering each once."""
 
-    def __init__(self, client: Any, flow_run_id: Any) -> None:
-        self.client, self.flow_run_id = client, flow_run_id
+    def __init__(self, client: Any, flow_run_id: Any, key_prefix: str = INPUT_PREFIX) -> None:
+        self.client, self.flow_run_id, self.key_prefix = client, flow_run_id, key_prefix
         self.queue: asyncio.Queue[dict] = asyncio.Queue()
         self.seen: set[str] = set()
 
     async def poll(self) -> None:
         rows = await self.client.filter_flow_run_input(
-            flow_run_id=self.flow_run_id, key_prefix=INPUT_PREFIX, limit=100, exclude_keys=self.seen)
+            flow_run_id=self.flow_run_id, key_prefix=self.key_prefix, limit=100, exclude_keys=self.seen)
         for row in sorted(rows, key=lambda r: (r.created or 0, r.key)):
             self.seen.add(row.key)
             try:
