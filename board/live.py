@@ -112,11 +112,18 @@ class BoardWatcher:
     async def run(self) -> None:
         feed = asyncio.create_task(self.run_feed())
         last_list = float("-inf")
+        list_task: asyncio.Task | None = None
+        list_pending = True
         try:
             while True:
                 now = time.monotonic()
                 timeout = LIST_EVERY - (now - last_list)
-                if any(sub.card for sub in self.subscribers):
+                watching_card = any(sub.card for sub in self.subscribers)
+                if list_task is not None and not list_task.done():
+                    # The next list refresh cannot start yet; avoid a 50 ms polling loop
+                    # once the normal listing interval has elapsed.
+                    timeout = DETAIL_EVERY if watching_card else LIST_EVERY
+                if watching_card:
                     timeout = min(timeout, DETAIL_EVERY)
                 try:
                     await asyncio.wait_for(self.event.wait(), max(0.05, timeout))
@@ -130,9 +137,25 @@ class BoardWatcher:
                         return
                     continue
                 try:
-                    if woke or time.monotonic() - last_list >= LIST_EVERY or self.cards is None:
+                    list_pending |= woke or time.monotonic() - last_list >= LIST_EVERY or self.cards is None
+                    if list_task is not None and list_task.done():
+                        try:
+                            list_task.result()
+                        except Exception as exc:
+                            log.exception("%s/%s refresh failed", self.system, self.board)
+                            self.broadcast({"type": "error", "message": str(exc)})
+                        list_task = None
+                    if list_pending and list_task is None:
                         last_list = time.monotonic()
-                        await self.refresh_cards()
+                        list_pending = False
+                        if self.cards is None:
+                            # Publish the cheap snapshot first, so open-card details can be sent
+                            # while the full list fetches other runs' logs in the background.
+                            try:
+                                await self.publish(await self.adapter.list_cards(self.board, light=True))
+                            except TypeError:  # an adapter without a light listing
+                                pass
+                        list_task = asyncio.create_task(self.refresh_cards())
                     self.details = {}  # each open run/step is read once per shared watcher pass
                     for sub in list(self.subscribers):
                         if sub.card:
@@ -148,19 +171,15 @@ class BoardWatcher:
                     await asyncio.sleep(2)
         finally:
             feed.cancel()
+            if list_task is not None:
+                list_task.cancel()
+                await asyncio.gather(list_task, return_exceptions=True)
             if self.hub.watchers.get((self.system, self.board)) is self:
                 del self.hub.watchers[(self.system, self.board)]
             for sub in list(self.subscribers):
                 sub.send({"type": "error", "message": "live updates stopped"})
 
     async def refresh_cards(self) -> None:
-        if self.cards is None:
-            # First paint: the cards straight from the engine's run list, before any log is read
-            # (a cold board reads every run's log once). Last lines and session states follow.
-            try:
-                await self.publish(await self.adapter.list_cards(self.board, light=True))
-            except TypeError:  # an adapter without a light listing
-                pass
         await self.publish(await self.adapter.list_cards(self.board))
 
     async def publish(self, listed: list[Any]) -> None:

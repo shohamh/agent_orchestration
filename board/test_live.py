@@ -109,6 +109,76 @@ async def next_message(sub, kind):
 
 
 class Hub(unittest.IsolatedAsyncioTestCase):
+    async def test_open_card_logs_do_not_wait_for_other_cards_to_load(self):
+        """An open card's results should arrive while the board's full refresh is slow."""
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_listing(board, light=False):
+            if not light:
+                started.set()
+                await release.wait()
+            return self.adapter.cards()
+
+        self.adapter.list_cards = slow_listing
+        _, sub = self.hub.subscribe('fake', 'b', 'p1')
+        try:
+            await next_message(sub, 'cards')
+            await asyncio.wait_for(started.wait(), 2)
+            lines = await asyncio.wait_for(next_message(sub, 'lines'), 1)
+            self.assertEqual(lines['lines'][-1], 'line 1499')
+            self.assertFalse(release.is_set())
+        finally:
+            release.set()
+
+    async def test_opening_card_during_board_refresh_delivers_its_results(self):
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_listing(board, light=False):
+            if not light:
+                started.set()
+                await release.wait()
+            return self.adapter.cards()
+
+        self.adapter.list_cards = slow_listing
+        watcher, board_sub = self.hub.subscribe('fake', 'b', None)
+        try:
+            await next_message(board_sub, 'cards')
+            await asyncio.wait_for(started.wait(), 2)
+            _, card_sub = self.hub.subscribe('fake', 'b', 'p1')
+            lines = await asyncio.wait_for(next_message(card_sub, 'lines'), 1)
+            self.assertEqual(lines['lines'][-1], 'line 1499')
+            self.assertFalse(release.is_set())
+        finally:
+            release.set()
+            watcher.unsubscribe(board_sub)
+
+    async def test_slow_board_refresh_does_not_cause_a_tight_detail_poll_loop(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        reads = 0
+
+        async def slow_listing(board, light=False):
+            if not light:
+                started.set()
+                await release.wait()
+            return self.adapter.cards()
+
+        async def count_reads(run_id):
+            nonlocal reads
+            reads += 1
+            return self.adapter.lines
+
+        self.adapter.list_cards = slow_listing
+        self.adapter.run_lines = count_reads
+        with patch.object(live, 'LIST_EVERY', 0.05), patch.object(live, 'DETAIL_EVERY', 0.2):
+            _, sub = self.hub.subscribe('fake', 'b', 'p1')
+            try:
+                await asyncio.wait_for(started.wait(), 2)
+                await next_message(sub, 'lines')
+                await asyncio.sleep(0.55)
+                self.assertLessEqual(reads, 5, f'open-card details were read {reads} times')
+            finally:
+                release.set()
+
     async def test_paged_older_rows_receive_patches_without_appending_unloaded_history(self):
         self.adapter.events_list.insert(0, {'type': 'tool', 'id': 'old-tool', 'status': 'running'})
         _, sub = self.hub.subscribe('fake', 'b', 's1')
@@ -139,10 +209,16 @@ class Hub(unittest.IsolatedAsyncioTestCase):
         self.adapter.events_list += [{'type': 'agent', 'message_id': 'm149', 'text': '!'},
                                      {'type': 'user', 'text': 'next'}]
         self.adapter.feed_wake()
-        update = await next_message(sub, 'cards')
+        # The detail and board refresh run independently, so either update may arrive first.
+        received = {}
+        while 'cards' not in received or 'rows' not in received:
+            message = await asyncio.wait_for(sub.queue.get(), 5)
+            if message['type'] in ('cards', 'rows'):
+                received[message['type']] = message
+        update = received['cards']
         self.assertEqual([c['id'] for c in update['upsert']], ['s1'])
         self.assertEqual(update['upsert'][0]['last'], 'next')
-        rows = await next_message(sub, 'rows')
+        rows = received['rows']
         self.assertEqual([(r['key'], r['text']) for r in rows['rows']], [('m:m149', 'msg 149!'), ('e:151', 'next')])
 
     async def test_lines_start_with_the_newest_page_and_then_append(self):

@@ -70,14 +70,40 @@ instead (tailnet only; the phone needs the Tailscale app).
 | Replay | Re-runs **the same run**. A durable task replays from its recorded event history, so it can finish again almost instantly. | Creates **a new run** on the same board | Creates **a new run** with the same parameters and tags |
 | Pause a queue | Not available. Hold work with concurrency limits or by stopping the worker. | **Pause / Resume queue** button | Not for served deployments (work-pool queues can be paused in Prefect's UI) |
 
+## Live updates
+
+The browser holds one server-sent event stream per tab (`GET /api/live?system=&board=&card=`) and
+never polls. On the server, one shared watcher per board (`live.py`) listens to the engine's own
+live feed. When something changes, it refreshes the board once and pushes only the cards that
+changed to every viewer. A viewer with a card open also gets that card's new transcript rows or
+log lines.
+
+| | Live feed the board listens to | Notes |
+|---|---|---|
+| Hatchet | Run events by additional metadata `board` (`SubscribeToWorkflowEvents`): started, stream data, finished | The agent worker sends one `put_stream` marker per transcript event, so new messages wake the board too. The SDK marks this subscription deprecated, but the engine here serves it. |
+| Trigger.dev | Realtime (Electric shape) of runs tagged `board:<name>`, long-polled | Needs the header `x-trigger-electric-version: 1.0.0-beta.1`; without it the webapp keeps answering `must-refetch`. |
+| Prefect | Websockets `/api/events/out` (flow run state events, matched by the `board:<name>` tag) and `/api/logs/out` (new log lines, matched by flow run) | Log streaming must be enabled on the server: `PREFECT_SERVER_LOGS_STREAM_OUT_ENABLED` and `PREFECT_SERVER_LOGS_STREAM_PUBLISHING_ENABLED` (set in `prefect/docker-compose.yml`). |
+
+- **Fallbacks.** If a feed is quiet or down, the watcher still refreshes the board every 5 s and
+  the open card every 2 s. The status line says `live` or `polling`.
+- **Board actions.** A new card, an input or an action refreshes that backend's watched boards right away.
+- **First paint.** The first refresh sends cards straight from the engine's run list, then fills in
+  last lines and session states. A cold board otherwise reads every run's log once before
+  showing anything.
+- **Lightweight cards.** Cards carry their latest line (`last`) and a `version`, not transcripts or logs.
+- **Paging.** A session opens on its newest 100 messages, and scrolling to the top loads 100 more
+  (`/transcript?before=<row key>`). An ordinary log opens on its newest 1000 lines, and scrolling
+  up loads 1000 more (`/logs?before=<index>`; DAG node logs page the same way). A spinner shows
+  while a page loads, and the rows on screen stay in place.
+- **Reads.** Engine logs are read incrementally: only lines newer than the last one seen. A
+  finished run's log is frozen once its last batch has landed.
+- **Hidden tabs.** They close their stream, and coming back reconnects from a fresh snapshot.
+- **Scripts.** Use `GET /api/cards/{system}/{id}/events` for a session's raw events.
+
 ## DAG / run graph view
 
 Click a card to get a live graph of its run in the drawer. Click any node to see its status, timing,
-output, error and logs. Engine feeds wake a shared watcher, which pushes changes over one SSE
-connection per browser tab. The open run has a one-second fallback; board lists have a five-second
-fallback. Hidden tabs disconnect. First paint uses lightweight cards; transcripts load only for
-the open session/agent step (latest 100 messages), with older pages on scroll-up. Logs start at
-1000 lines and page similarly. Cold engine logs are read once, then incrementally cached.
+output, error and logs. Updates arrive live; see [Live updates](#live-updates).
 
 Portable flow nodes open agent chat or a scrolling program log, with **Restart step** and backend
 links. Restart uses native Hatchet dependency replay and a flow-host runtime extension for
@@ -121,8 +147,10 @@ To show other tasks, add their name to `AGENT_TASK` handling in the adapters, or
 
 ## Limits of this prototype
 
-- **No authentication.** Anyone who can reach port 8090 can create, steer and cancel cards. Keep it on localhost or put it behind your reverse proxy or SSO.
-- **Polling.** The UI polls every 2 seconds, and the server queries the backend on each poll. That's fine for tens of cards per board. For hundreds, switch Trigger.dev to its Realtime subscriptions (`runs.subscribeToRunsWithTag`) and add a short server-side cache for Hatchet.
+- **One shared password.** With `BOARD_PASSWORD` unset there is no login at all, so keep such a board on localhost. There are no per-user accounts.
+- **Board refreshes are still full listings.** A feed event triggers one listing of the board's runs (up to 200), shared by every viewer. Logs are read incrementally, but the run list itself is not.
+- **Connections per tab.** Each open board tab holds one stream. Over plain HTTP (`http://localhost:8090`), browsers allow six connections per site, so more than about five visible board tabs can stall other requests. The Funnel's HTTPS address doesn't have this limit.
+- **Trigger.dev latency comes from Trigger.dev.** The feed wakes the board within about half a second of a run's metadata changing. Delivering an input to a dev-mode run and seeing its new metadata can take several seconds on this setup.
 - **Window and size.** Each board shows runs from the last 7 days: up to 200 per board on Hatchet and 100 on Trigger.dev.
 - **Environments.** Trigger.dev production and local development use separate keys and tabs; Hatchet uses one tenant.
 - **Queue position is computed, not promised.** It's the order of currently queued runs of the same task. Priority, concurrency keys and delays can reorder actual execution, and neither engine exposes an ETA.

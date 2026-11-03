@@ -39,6 +39,9 @@ by `demo.py` using `send_input`; the stock UI's Resume form applies to paused ru
 The Agent Board (port 8090, `../board`) also supports Prefect. Cards are flow runs tagged `board:<name>`; its graph shows
 task runs with the data dependencies Prefect recorded; steering uses flow run inputs; and coding-agent
 sessions run in `../agents/prefect_worker.py` on this PC. Prefect's own UI stays on port 4200.
+The board updates live from Prefect's event and log websockets. The server's log stream is off by
+default upstream; `docker-compose.yml` turns it on with `PREFECT_SERVER_LOGS_STREAM_OUT_ENABLED` and
+`PREFECT_SERVER_LOGS_STREAM_PUBLISHING_ENABLED`.
 
 ## The requirements
 
