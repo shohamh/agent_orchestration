@@ -89,7 +89,9 @@ async def restart_node(system, run_id, ref):
         selected = next((sid for sid, node in nodes.items() if node['ref'] == ref), None)
         if selected is None: raise ValueError('Step does not belong to the source run')
         plan = build_plan(flow, selected, nodes, run_id)
+        execution = params.get('flowExecution')
         params = {key: params.get(key, default) for key, default in flow.input.items()}
+        if execution is not None: params['flowExecution'] = execution
         params['flowRestart'] = plan
         if system == 'prefect':
             deployment = await call('GET', f'/deployments/name/{name}/flows')

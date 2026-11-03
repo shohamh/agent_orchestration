@@ -48,7 +48,7 @@ export function defineFlow(def: FlowDef) {
     maxDuration: 86400,
     retry: { maxAttempts: 1 },
     run: async (params: Record<string, Json>, { ctx }) => {
-      const { flowRestart: _flow_restart, ...userInput } = params ?? {};
+      const { flowRestart: _flow_restart, flowExecution: _flow_execution, ...userInput } = params ?? {};
       const input = { ...def.input, ...userInput };
       metadata.set("title", String(input.topic ?? input.goal ?? def.name).slice(0, 512));
       metadata.set("flow", def.name);
@@ -59,7 +59,7 @@ export function defineFlow(def: FlowDef) {
         for (const id of ids) {
           const step = def.steps[id];
           if (runIds[id] || !step.needs.every((need) => need in outputs)) continue;
-          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])), _flow_restart };
+          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])), _flow_restart, _flow_execution };
           const handle = await steps[id].trigger({ flowRunId: ctx.run.id, context }, { tags: [`flowrun:${ctx.run.id}`] });
           runIds[id] = handle.id;
           metadata.set("steps", runIds);

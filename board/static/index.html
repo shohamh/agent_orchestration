@@ -169,6 +169,7 @@
     </label>
     <p class="status" id="n-flow-desc" hidden></p>
     <div id="n-flow-fields" hidden></div>
+    <div id="n-worker-fields" hidden></div>
     <label id="n-goal-wrap"><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
     <div class="session-fields" id="n-session-fields">
       <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
@@ -241,6 +242,26 @@ let boards = store.get("boards", ["research", "lab-a"]);
 let board = store.get("board", boards[0]);
 let cards = [];
 let flows = [];          // portable flows from the flow host: [{name, description, input, steps, yaml}]
+let executionWorkers = [];
+const restartWorkers = new Map();
+
+function workerPicker(label, selected, changed) {
+  const select = el('select', { 'aria-label': label });
+  const choices = [['Use flow selection', {}], ...[...new Set(executionWorkers.map(w => w.pool))].map(pool => [`Pool: ${pool}`, {pool}]),
+    ...executionWorkers.map(w => [`Worker: ${w.id} · ${w.pool} · ${(w.tags || []).join(', ')}${w.online ? '' : ' (offline)'}`, {id:w.id}])];
+  const route = selected || {};
+  for (const [text, value] of choices) select.append(el('option', {value: JSON.stringify(value)}, text));
+  const base = route.id ? {id:route.id} : route.pool ? {pool:route.pool} : {};
+  if (![...select.options].some(o => o.value === JSON.stringify(base))) select.append(el('option', {value:JSON.stringify(base)}, JSON.stringify(base)));
+  select.value = JSON.stringify(base);
+  const tags = el('input', {placeholder:'Required tags, separated by commas', value:(route.tags || []).join(', '), 'aria-label': `${label} tags`});
+  const read = () => ({...JSON.parse(select.value), ...(tags.value.trim() ? {tags:tags.value.split(',').map(t=>t.trim()).filter(Boolean)} : {})});
+  select.addEventListener('change', () => changed(read()));
+  tags.addEventListener('input', () => changed(read()));
+  return el('label', {}, label, select, tags);
+}
+
+let launchExecution = {default:{}, steps:{}};
 let openCardId = null;
 const contextKey = () => `${system}/${board}`;
 const runKey = () => `${contextKey()}/${openCardId}`;
@@ -636,7 +657,8 @@ function renderFlowNode(panel, node) {
     const current = runKey(), ref = node.ref;
     restart.disabled = true;
     try {
-      const data = await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(ref)}/restart`, {});
+      const wanted = restartWorkers.get(key);
+      const data = await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(ref)}/restart`, wanted ? {worker:wanted} : {});
       if (current !== runKey()) return;
       if (data.replayed) { dag.final = false; refreshDag(); setStatus("Engine accepted step replay; watching the run…"); }
       else { pendingOpen = data.id; setStatus("Restart created; waiting for the new run…"); }
@@ -649,6 +671,10 @@ function renderFlowNode(panel, node) {
     : node.restart_mode === 'runtime' ? "Start a new run from this step and its descendants, reusing other results and workspace files"
     : "Replay this step; the engine restarts its dependent descendants";
   const header = el("div", { class: "row" }, el("h5", {}, `${node.label} · ${node.kind}`), backendLink(node.backend_url), restart);
+  const actual = node.execution?.worker;
+  header.append(el('span', {class:'status'}, actual ? `Executed by ${actual.id} on ${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}`
+    : node.execution ? `Execution ${node.execution.state}; worker has not started` : 'Execution worker not reported'));
+  if (['done','stopped'].includes(card?.column)) header.append(workerPicker('Worker for step restart', restartWorkers.get(key), value => restartWorkers.set(key,value)));
   if (!node.restart_supported && node.restart_reason) header.append(el("p", { class: "status" }, node.restart_reason));
   if (node.kind === "agent") {
     // Keep the mounted chat and its focused composer in place across graph refreshes.
@@ -678,12 +704,13 @@ function readableLine(line) {
 }
 
 let dagLoading = null;
+let dagAgain = null;
 let dagSerial = 0, nodeLogSerial = 0;
 async function refreshDag() {
   const card = cards.find((c) => c.id === openCardId);
   const key = runKey();
   if (!card || card.task === "agent-session") { $("d-dag-section").hidden = true; return; }
-  if (dagLoading === key) return;
+  if (dagLoading === key) { dagAgain = key; return; }
   // A finished graph doesn't change: fetch it once.
   if (dag && dag.cardId === card.id && dag.final && dag.finishedAt === card.finished_at && ["done", "stopped"].includes(card.column)) return;
   dagLoading = key;
@@ -696,7 +723,16 @@ async function refreshDag() {
     if (selectedNode) refreshNodeLogs();
     refresh(); // a previously pending step may now have its own run id
   } catch (e) { if (key === runKey() && serial === dagSerial) setStatus(e.message, true); }
-  finally { if (serial === dagSerial) dagLoading = null; }
+  finally {
+    if (serial === dagSerial) {
+      dagLoading = null;
+      if (dagAgain === key && key === runKey()) {
+        dagAgain = null;
+        if (dag) dag.final = false;
+        queueMicrotask(refreshDag);
+      }
+    }
+  }
 }
 
 async function act(action, body) {
@@ -798,6 +834,7 @@ function renderKindOptions() {
 async function loadFlows() {
   try { flows = (await api("GET", "/api/flows")).flows; } catch (e) { flows = []; setStatus(e.message, true); }
   renderKindOptions();
+  try { executionWorkers = (await api('GET', '/api/workers')).workers; } catch (_) { executionWorkers = []; }
 }
 
 function updateNewForm() {
@@ -805,6 +842,7 @@ function updateNewForm() {
   const flow = kind.startsWith("flow:") ? flows.find((f) => f.name === kind.slice(5)) : null;
   $("n-goal-wrap").hidden = !!flow; $("n-goal").disabled = !!flow;
   $("n-flow-fields").hidden = !flow; $("n-flow-desc").hidden = !flow;
+  $('n-worker-fields').hidden = !flow;
   if (flow && $("n-flow-fields").dataset.flow !== flow.name) {
     $("n-flow-fields").dataset.flow = flow.name;
     $("n-flow-desc").textContent = `${Object.keys(flow.steps).length} steps: ${Object.entries(flow.steps).map(([id, s]) => `${id} (${s.kind})`).join(" → ")}`;
@@ -812,6 +850,18 @@ function updateNewForm() {
       typeof value === "boolean" ? el("select", { "data-key": key }, el("option", { value: "true" }, "true"), el("option", { value: "false" }, "false"))
         : el("input", { "data-key": key, value: value ?? "", type: typeof value === "number" ? "number" : "text" }))));
     for (const [key, value] of Object.entries(flow.input)) if (typeof value === "boolean") $("n-flow-fields").querySelector(`[data-key="${key}"]`).value = String(value);
+    launchExecution = {default:{}, steps:{}};
+  }
+  const workerKey = flow ? flow.name + JSON.stringify(executionWorkers) : '';
+  if (flow && $('n-worker-fields').dataset.key !== workerKey) {
+    $('n-worker-fields').dataset.key = workerKey;
+    $('n-worker-fields').replaceChildren(el('strong', {}, 'Execution workers'),
+      workerPicker('Default worker / pool', launchExecution.default, value => launchExecution.default=value),
+      el('details', {}, el('summary', {}, 'Choose workers for individual steps'),
+        ...Object.keys(flow.steps).map(sid => workerPicker(sid, launchExecution.steps[sid], value => {
+          if (Object.keys(value).length) launchExecution.steps[sid]=value; else delete launchExecution.steps[sid];
+        }))),
+      el('small', {}, flow.environment ? 'Environment context is prepared in setup_environment. File source paths refer to that worker PC.' : 'Steps receive files from their dependencies, including across worker PCs.'));
   }
   const agent = kind === "steerable-agent", session = kind === "agent-session";
   document.querySelectorAll(".agent-only").forEach((n) => { n.hidden = !agent; });
@@ -842,7 +892,7 @@ $("new-form").addEventListener("submit", async (e) => {
   const kind = $("n-kind").value, key = contextKey();
   if ((kind === "agent-session" || kind.startsWith("flow:")) && system === "trigger") { updateNewForm(); return; }
   const body = kind.startsWith("flow:")
-    ? { kind: "flow", flow: kind.slice(5), input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
+    ? { kind: "flow", flow: kind.slice(5), execution: launchExecution, input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
         n.tagName === "SELECT" ? n.value === "true" : n.type === "number" ? Number(n.value) : n.value])) }
     : kind === "agent-session"
     ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), simulateFailures: Number($("n-failures").value) }

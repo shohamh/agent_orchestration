@@ -27,13 +27,15 @@ def input_model(flow: Flow) -> Any:
     from pydantic import create_model
 
     fields = {key: (type(value) if value is not None else str | None, value) for key, value in flow.input.items()}
+    fields['flowExecution'] = (dict | None, None)
     return create_model(f"Input_{flow.name.replace('-', '_')}", **fields)
 
 
 def build_workflow(hatchet: Any, flow: Flow) -> Any:
     from hatchet_sdk import Context
 
-    from flowkit.executor import run_step, step_context
+    from flowkit.executor import step_context
+    from flowkit.distributed import execute_step as run_step
 
     workflow = hatchet.workflow(name=flow.name, description=flow.description or None, input_validator=input_model(flow))
     tasks: dict[str, Any] = {}

@@ -19,6 +19,8 @@ node_modules/
 __pycache__/
 *.pyc
 agents/runtime/
+workers.local.yaml
+workers.local.env
 agents/*.log
 .venv/
 venv/

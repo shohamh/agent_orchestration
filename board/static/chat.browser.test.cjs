@@ -96,7 +96,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       }
       if (url.pathname === '/api/systems') { response.end(JSON.stringify({ systems: ['hatchet', 'trigger-dev', 'trigger'], columns: ['scheduled', 'queued', 'running', 'waiting', 'done', 'stopped'] })); return; }
       if (url.pathname.endsWith('/dag')) { response.end(JSON.stringify({ model: 'declared', nodes: url.pathname.includes('flow1') ? flowNodes : [], edges: [] })); return; }
-      if (url.pathname === '/api/flows') { response.end(JSON.stringify({ flows: [], broken: {} })); return; }
+      if (url.pathname === '/api/flows') { response.end(JSON.stringify({ flows: [{name:'worker-flow',input:{topic:'test'},steps:{build:{kind:'program',needs:[]},review:{kind:'agent',needs:['build']}}}], broken: {} })); return; }
+      if (url.pathname === '/api/workers') { response.end(JSON.stringify({workers:[{id:'pc-a',pool:'builds',tags:['linux'],online:true},{id:'pc-b',pool:'review',tags:[],online:true}]})); return; }
       const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
       if (!['index.html', 'chat.js', 'chat.css'].includes(file)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
@@ -256,7 +257,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     flowNodes[1].restart_supported = false;
     flowNodes[1].restart_reason = 'This engine cannot invalidate descendants';
     await evaluate('dag.final = false; refreshDag()');
-    await waitFor('document.querySelector("#d-node .restart-step").disabled');
+    await waitFor('document.querySelector("#d-node").textContent.includes("cannot invalidate descendants")');
+    assert.equal(await evaluate('document.querySelector("#d-node .restart-step").disabled'),true);
     assert.match(await evaluate('document.querySelector("#d-node").textContent'), /cannot invalidate descendants/);
     // A fast native replay can complete between board snapshots: terminal -> terminal still
     // needs a new DAG when the engine reports a new finished_at.
@@ -271,6 +273,20 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       const screenshot = await call('Page.captureScreenshot', { format: 'png' });
       fs.writeFileSync(process.env.CHAT_NODE_SCREENSHOT, Buffer.from(screenshot.data, 'base64'));
     }
+    // Worker selection changes the launch payload for individual steps, including tag filters.
+    await evaluate('closeDrawer(); document.querySelector("#new-card").click()');
+    await waitFor(`document.querySelector('#n-kind option[value="flow:worker-flow"]')`);
+    await evaluate(`document.querySelector('#n-kind').value='flow:worker-flow'; document.querySelector('#n-kind').dispatchEvent(new Event('change'))`);
+    await waitFor(`document.querySelector('select[aria-label="build"]')`);
+    await evaluate(`document.querySelector('select[aria-label="Default worker / pool"]').value=JSON.stringify({pool:'builds'});
+      document.querySelector('select[aria-label="Default worker / pool"]').dispatchEvent(new Event('change'));
+      document.querySelector('select[aria-label="review"]').value=JSON.stringify({id:'pc-b'});
+      document.querySelector('select[aria-label="review"]').dispatchEvent(new Event('change'));
+      document.querySelector('input[aria-label="build tags"]').value='linux, gpu';
+      document.querySelector('input[aria-label="build tags"]').dispatchEvent(new Event('input'));
+      document.querySelector('#new-form').requestSubmit(document.querySelector('#n-create'))`);
+    await waitFor('!document.querySelector("#new-dialog").open');
+    assert.deepEqual(posts.at(-1).body.execution, {default:{pool:'builds'},steps:{review:{id:'pc-b'},build:{tags:['linux','gpu']}}});
     assert.deepEqual(errors, []);
   } finally {
     if (socket) socket.close();

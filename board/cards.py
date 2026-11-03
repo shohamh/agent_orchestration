@@ -75,6 +75,7 @@ class DagNode:
     restart_supported: bool = False
     restart_reason: str | None = None
     restart_mode: str | None = None
+    execution: dict | None = None
 
 
 @dataclass

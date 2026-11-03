@@ -15,7 +15,7 @@ import traceback
 from acp.stdio import stdio_streams
 
 from .definition import parse
-from .executor import run_step
+from .distributed import execute_step as run_step
 
 
 async def main() -> None:

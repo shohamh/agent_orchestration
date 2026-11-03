@@ -36,7 +36,7 @@ sys.path.insert(0, str(HERE))
 from flowkit import trigger_codegen  # noqa: E402
 from flowkit.definition import FLOWS_DIR, FLOW_NAME, FlowError, load_all, parse_text  # noqa: E402
 
-WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py"}
+WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py", 'execution': 'flow_execution_worker.py'}
 lock = threading.Lock()
 
 
@@ -122,7 +122,7 @@ def watch_files(supervisor: Supervisor, trigger: bool) -> None:
 
 def flow_summary(name: str, text: str) -> dict:
     flow = parse_text(text)
-    return {**flow.to_json(), "yaml": text}
+    return {**flow.to_json(), 'environment': flow.environment, "yaml": text}
 
 
 class Api(BaseHTTPRequestHandler):
@@ -147,12 +147,17 @@ class Api(BaseHTTPRequestHandler):
         self._send(401, {"error": "unauthorized"})
         return False
 
-    def _body(self) -> dict:
+    def _json_body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if length > 256 * 1024:
             raise ValueError("request too large")
         body = json.loads(self.rfile.read(length) or b"{}")
-        if not isinstance(body, dict) or not isinstance(body.get("yaml"), str):
+        if not isinstance(body, dict): raise ValueError('body must be an object')
+        return body
+
+    def _body(self) -> dict:
+        body = self._json_body()
+        if not isinstance(body.get("yaml"), str):
             raise ValueError("body must be {\"yaml\": \"...\"}")
         return body
 
@@ -165,6 +170,14 @@ class Api(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if not self._authorized():
             return
+        if self.path == '/workers':
+            from flowkit.workers import catalog
+            try: return self._send(200, {'workers': asyncio.run(catalog())})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
+        match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)', self.path)
+        if match:
+            from flowkit.distributed import execution_info
+            return self._send(200, {'steps': execution_info(match[1])})
         if self.path != "/flows":
             return self._send(404, {"error": "not found"})
         flows, broken = load_all()
@@ -174,6 +187,22 @@ class Api(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._authorized():
             return
+        if self.path == '/workers/validate':
+            from flowkit.workers import routing
+            try:
+                body = self._json_body()
+                return self._send(200, routing(body['execution'], body['steps']))
+            except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
+        match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/selection', self.path)
+        if match:
+            from flowkit.distributed import set_selection
+            from flowkit.workers import choose
+            try:
+                body = self._json_body()
+                asyncio.run(choose(body['worker']))
+                set_selection(match[1], body['step'], body['worker'])
+                return self._send(200, {'ok': True})
+            except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/runs/(prefect|trigger-dev)/([A-Za-z0-9_-]+)/nodes/([A-Za-z0-9_-]+)/restart', self.path)
         if match:
             from flowkit.restart_service import restart_node
@@ -228,11 +257,18 @@ class Api(BaseHTTPRequestHandler):
 def main() -> None:
     backends = [b.strip() for b in os.environ.get("FLOW_BACKENDS", "hatchet,prefect,trigger").split(",") if b.strip()]
     supervisor = Supervisor(backends)
+    execution = Supervisor(['execution'] if os.environ.get('FLOW_EXECUTION_SERVICE', '1') != '0' else [])
+    execution.restart()
+    threading.Thread(target=execution.watch, daemon=True).start()
     with lock:
         sync(supervisor, "trigger" in backends)
     threading.Thread(target=supervisor.watch, daemon=True).start()
     threading.Thread(target=watch_files, args=(supervisor, "trigger" in backends), daemon=True).start()
     bind, port = os.environ.get("FLOW_HOST_BIND", "127.0.0.1"), int(os.environ.get("FLOW_HOST_PORT", "8095"))
+    if bind not in ('127.0.0.1','localhost','::1') and not os.environ.get('FLOW_HOST_TOKEN'):
+        execution.stop()
+        supervisor.stop()
+        raise SystemExit('FLOW_HOST_TOKEN is required for a network flow host')
     server = ThreadingHTTPServer((bind, port), Api)
     log(f"API on http://{bind}:{port} - flows in {FLOWS_DIR} - backends {', '.join(backends)}")
     try:
@@ -241,6 +277,7 @@ def main() -> None:
         pass
     finally:
         supervisor.stop()
+        execution.stop()
 
 
 if __name__ == "__main__":

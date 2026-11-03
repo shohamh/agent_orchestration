@@ -220,6 +220,8 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
         params[key] = value
     first = next((v for v in params.values() if isinstance(v, str) and v.strip()), "")
     title = str(body.get("title") or (f"{name}: {first}" if first else name))[:200]
+    if 'execution' in body:
+        params['flowExecution'] = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
     run_id = await adapter_for(request).create_flow(request.match_info["board"], name, params, title)
     return web.json_response({"id": run_id}, status=201)
 
@@ -282,6 +284,10 @@ async def card_dag(request: web.Request) -> web.Response:
     name = flow_for_task(request.query.get("task", ""), flows)
     if name:
         dag = fit_flow_dag(dag, name, flows[name])
+        try:
+            execution = await request.app['flow_host'].execution(request.match_info['run_id'])
+            for node in dag.nodes: node.execution = execution.get(node.step)
+        except (RuntimeError, ValueError): pass
     for node in dag.nodes:
         node.restart_supported = hasattr(adapter_for(request), "restart_node") or request.match_info['system'] in ('prefect', 'trigger-dev')
         node.restart_mode = 'native' if hasattr(adapter_for(request), 'restart_node') else 'runtime'
@@ -354,6 +360,9 @@ async def node_restart(request: web.Request) -> web.Response:
     adapter = adapter_for(request)
     if info["column"] not in ("done", "stopped"):
         raise web.HTTPConflict(text="Stop or finish the flow before restarting a step")
+    body = await json_object(request)
+    if 'worker' in body:
+        await request.app['flow_host'].set_selection(request.match_info['run_id'], node.step, body['worker'])
     if not hasattr(adapter, 'restart_node'):
         if request.match_info['system'] not in ('prefect', 'trigger-dev'):
             raise NotImplementedError('This backend has no step restart support')
@@ -364,6 +373,10 @@ async def node_restart(request: web.Request) -> web.Response:
 
 async def flows_list(request: web.Request) -> web.Response:
     return web.json_response(await request.app["flow_host"].catalog(fresh=True))
+
+
+async def workers_list(request: web.Request) -> web.Response:
+    return web.json_response(await request.app['flow_host'].workers())
 
 
 async def flows_validate(request: web.Request) -> web.Response:
@@ -460,6 +473,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/transcript", node_transcript)
     app.router.add_post("/api/cards/{system}/{run_id}/nodes/{ref}/restart", node_restart)
     app.router.add_get("/api/flows", flows_list)
+    app.router.add_get('/api/workers', workers_list)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)
     app.router.add_delete("/api/flows/{name}", flows_delete)

@@ -41,7 +41,8 @@ def step_context(flow: Flow, step: Step, params: dict[str, Any], outputs: dict[s
     """What a step may reference: the flow input and the outputs of the steps it needs."""
     params = dict(params or {})
     plan = params.pop('flowRestart', None)
-    return {"input": {**flow.input, **params}, "_flow_restart": plan,
+    execution = params.pop('flowExecution', None)
+    return {"input": {**flow.input, **params}, "_flow_restart": plan, '_flow_execution': execution,
             "steps": {need: {"output": outputs.get(need)} for need in step.needs}}
 
 
@@ -57,7 +58,11 @@ async def run_step(flow: Flow, step_id: str, context: dict[str, Any], run_id: st
         return output
     if step.kind == "agent":
         try:
-            output = await _agent(step, context, workspace, receive, sink)
+            if step.setup is not None:
+                from .environment import setup_environment
+                output = await setup_environment(step.setup, workspace, receive, sink)
+            else:
+                output = await _agent(step, context, workspace, receive, sink)
         except Exception as exc:
             await emit("step", state="failed", kind="agent", error=str(exc)[:2000])
             raise
@@ -78,26 +83,27 @@ def _bounded(output: Any, limit: int = 60000) -> Any:
 async def _agent(step: Step, context: dict, workspace: Path, receive, sink) -> str:
     from agentdriver.session import run_session
 
-    config = {"goal": render(step.prompt, context, str(FLOWS_DIR)), "agent": step.agent, "workspace": str(workspace),
+    config = {"goal": render(step.prompt, context, os.environ.get('FLOW_ASSETS_DIR', str(FLOWS_DIR))), "agent": step.agent, "workspace": str(workspace),
               "autoDone": not step.review, "quietDemo": step.agent == "demo" and not step.review}
     result = await run_session(config, receive, sink)
     return result.get("text") or ""
 
 
 async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) -> Any:
-    command = render(step.run, context, str(FLOWS_DIR), shell=True)
+    flow_dir = os.environ.get('FLOW_ASSETS_DIR', str(FLOWS_DIR))
+    command = render(step.run, context, flow_dir, shell=True)
     output_file = workspace / f".flow-output-{step.id}.json"
     output_file.unlink(missing_ok=True)
     context_json = json.dumps(context, ensure_ascii=False)
     env = {**os.environ, "FLOW_CONTEXT": context_json, "FLOW_OUTPUT": str(output_file), "FLOW_STEP": step.id,
-           "FLOW_DIR": str(FLOWS_DIR), "FLOW_PYTHON": sys.executable, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
+           "FLOW_DIR": flow_dir, "FLOW_PYTHON": sys.executable, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
     # `python` in a command means this worker's interpreter, so steps don't depend on PATH.
     if command.startswith("python "):
         command = f'"{sys.executable}" ' + command[len("python "):]
     await emit("step", state="running", kind="program", command=command)
     process = await asyncio.create_subprocess_shell(
         command, cwd=workspace, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt")
+        stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt" and not os.environ.get('FLOW_MANAGED_JOB'))
     tree = _own(process.pid)
     tail: list[str] = []
 
@@ -140,10 +146,12 @@ def _own(pid: int):
 
 
 def _kill(process, tree) -> None:
-    if process.returncode is not None:
-        return
     if tree:
         tree.close()  # kills the whole Windows job
+    elif os.name == 'nt' or os.environ.get('FLOW_MANAGED_JOB'):
+        if process.returncode is None:
+            try: process.kill()
+            except ProcessLookupError: pass
     else:
         import signal
 

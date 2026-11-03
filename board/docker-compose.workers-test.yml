@@ -1,0 +1,7 @@
+# Dedicated execution-worker integration copy, isolated from other board tests.
+services:
+  board:
+    ports: !override
+      - "127.0.0.1:8093:8090"
+    environment:
+      BOARD_PASSWORD: ""

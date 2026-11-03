@@ -67,6 +67,18 @@ class FlowHost:
     async def restart_node(self, system: str, run_id: str, ref: str) -> dict:
         return await self._request('POST', f'/runs/{quote(system, safe="")}/{quote(run_id, safe="")}/nodes/{quote(ref, safe="")}/restart', timeout=90)
 
+    async def workers(self):
+        return await self._request('GET', '/workers')
+
+    async def validate_routing(self, execution, steps):
+        return await self._request('POST', '/workers/validate', {'execution': execution, 'steps': list(steps)})
+
+    async def execution(self, run_id):
+        return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']
+
+    async def set_selection(self, run_id, step, worker):
+        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', {'step': step, 'worker': worker})
+
     async def close(self) -> None:
         if self._session:
             await self._session.close()

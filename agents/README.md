@@ -1,5 +1,8 @@
 # Local coding sessions
 
+For per-step execution on different PCs, worker pools/tags, transferred workspaces and an
+interactive context setup agent, see [Workers and environment context](../docs/workers-and-context.md).
+
 The [Agent Board](http://localhost:8090) can now run coding agents through ACP on this PC.
 Choose **Coding agent session**, an agent, and a prompt. Leave Workspace blank to create a separate
 temporary Python project with a failing test, or enter an existing absolute directory on the worker PC.

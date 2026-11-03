@@ -55,6 +55,20 @@ class Adapter:
 
 
 class StepAPI(unittest.IsolatedAsyncioTestCase):
+    async def test_launch_forwards_validated_routing_to_runtime(self):
+        self.app['flow_host'].validate_routing = AsyncMock(return_value={'default': {'pool': 'gpu'}, 'steps': {'talk': {'id': 'pc-b'}}})
+        response = await self.client.post('/api/boards/fake/demo/cards', json={
+            'kind': 'flow', 'flow': 'demo-flow', 'execution': {'default': {'pool': 'gpu'}, 'steps': {'talk': {'id': 'pc-b'}}}})
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual(self.adapter.calls[0][2]['flowExecution']['steps']['talk'], {'id': 'pc-b'})
+
+    async def test_restart_override_forwarded_without_descendant_logic(self):
+        self.app['flow_host'].set_selection = AsyncMock()
+        response = await self.client.post('/api/cards/fake/run/nodes/talk/restart', json={'worker': {'id': 'pc-b'}})
+        self.assertEqual(response.status, 200, await response.text())
+        self.app['flow_host'].set_selection.assert_awaited_once_with('run', 'talk', {'id': 'pc-b'})
+        self.assertEqual(self.adapter.calls, [('native-replay', 'run', 'talk')])
+
     async def test_logical_step_identity_survives_pending_to_started(self):
         pending = server.fit_flow_dag(Dag('declared'), 'demo-flow', FLOW)
         started = server.fit_flow_dag(await Adapter().dag('run'), 'demo-flow', FLOW)

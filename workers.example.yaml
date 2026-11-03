@@ -1,0 +1,13 @@
+# Copy to ignored workers.local.yaml on the coordinator PC. Start a service on each execution PC.
+# Tags/pool must match that service's FLOW_WORKER_POOL and FLOW_WORKER_TAGS exactly.
+workers:
+  - id: local
+    url: http://127.0.0.1:8096
+    pool: default
+    tags: []
+    token_env: FLOW_WORKER_TOKEN
+  # - id: linux-build
+  #   url: https://worker-pc.example.internal:8096
+  #   pool: builds
+  #   tags: [linux, gpu]
+  #   token_env: LINUX_BUILD_WORKER_TOKEN

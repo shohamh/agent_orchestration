@@ -41,6 +41,8 @@ class Step:
     review: bool = False  # agent: wait for "Mark done" before the flow continues
     retries: int = 0
     timeout_minutes: int = 60
+    worker: dict = field(default_factory=dict)
+    setup: dict | None = None
 
     def to_json(self) -> dict[str, Any]:
         data = {"kind": self.kind, "needs": self.needs, "retries": self.retries, "timeout_minutes": self.timeout_minutes}
@@ -48,6 +50,8 @@ class Step:
             data["run"] = self.run
         else:
             data.update(agent=self.agent, prompt=self.prompt, review=self.review)
+        if self.worker: data['worker'] = self.worker
+        if self.setup is not None: data['setup'] = self.setup
         return data
 
 
@@ -57,10 +61,17 @@ class Flow:
     description: str
     input: dict[str, Any]
     steps: dict[str, Step]  # in dependency order
+    worker: dict = field(default_factory=dict)
+
+    @property
+    def environment(self):
+        return next((s.setup for s in self.steps.values() if s.setup is not None), None)
 
     def to_json(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description, "input": self.input,
-                "steps": {sid: step.to_json() for sid, step in self.steps.items()}}
+        result = {"name": self.name, "description": self.description, "input": self.input,
+                  "steps": {sid: step.to_json() for sid, step in self.steps.items()}}
+        if self.worker: result['worker'] = self.worker
+        return result
 
     def children(self, step_id: str) -> list[str]:
         return [s.id for s in self.steps.values() if step_id in s.needs]
@@ -71,7 +82,7 @@ def parse(data: Any) -> Flow:
     errors: list[str] = []
     if not isinstance(data, dict):
         raise FlowError("A flow must be a mapping with name, input and steps")
-    unknown = set(data) - {"name", "description", "input", "steps"}
+    unknown = set(data) - {"name", "description", "input", "steps", "worker", "environment"}
     if unknown:
         errors.append(f"unknown top-level keys: {', '.join(sorted(unknown))}")
     name = data.get("name")
@@ -95,6 +106,17 @@ def parse(data: Any) -> Flow:
     if not isinstance(raw_steps, dict) or not raw_steps:
         errors.append("steps must be a non-empty mapping of step ids to steps")
         raw_steps = {}
+    if 'environment' in data:
+        from .environment import configuration
+        try:
+            environment = configuration(data['environment'])
+            if 'setup_environment' in raw_steps: raise ValueError('setup_environment is reserved when environment is configured')
+            raw_steps = {'setup_environment': {'kind':'agent','agent':environment.get('agent','codex'),
+                'prompt':'Prepare the environment and wait for review.', 'review':True,'setup':environment,
+                'worker':environment.get('worker',{})}, **{
+                    sid:{**raw, 'needs':['setup_environment']} if isinstance(raw,dict) and not raw.get('needs') else raw
+                    for sid,raw in raw_steps.items()}}
+        except ValueError as exc: errors.append(str(exc))
     steps: dict[str, Step] = {}
     for sid, raw in raw_steps.items():
         where = f"step {sid!r}"
@@ -105,8 +127,8 @@ def parse(data: Any) -> Flow:
             errors.append(f"{where}: must be a mapping")
             continue
         kind = raw.get("kind")
-        allowed = {"kind", "needs", "retries", "timeout_minutes", "description"} | (
-            {"run"} if kind == "program" else {"agent", "prompt", "review"})
+        allowed = {"kind", "needs", "retries", "timeout_minutes", "description", "worker"} | (
+            {"run"} if kind == "program" else {"agent", "prompt", "review", "setup"})
         extra = set(raw) - allowed
         if kind not in ("program", "agent"):
             errors.append(f"{where}: kind must be program or agent")
@@ -126,6 +148,9 @@ def parse(data: Any) -> Flow:
             errors.append(f"{where}: timeout_minutes must be from 1 to 1440")
         step = Step(sid, kind, list(dict.fromkeys(needs)), retries=retries if type(retries) is int else 0,
                     timeout_minutes=timeout if type(timeout) is int else 60)
+        from .workers import selector
+        try: step.worker = selector(raw.get('worker'))
+        except ValueError as exc: errors.append(f'{where}: {exc}')
         if kind == "program":
             step.run = raw.get("run")
             if not isinstance(step.run, str) or not step.run.strip():
@@ -138,6 +163,10 @@ def parse(data: Any) -> Flow:
                 errors.append(f"{where}: an agent step needs a prompt")
             if not isinstance(step.review, bool):
                 errors.append(f"{where}: review must be true or false")
+            if 'setup' in raw:
+                from .environment import configuration
+                try: step.setup = configuration(raw['setup'])
+                except ValueError as exc: errors.append(str(exc))
         steps[sid] = step
     for step in steps.values():
         for need in step.needs:
@@ -146,9 +175,14 @@ def parse(data: Any) -> Flow:
             elif need == step.id:
                 errors.append(f"step {step.id!r}: cannot need itself")
     ordered = _dependency_order(steps, errors)
+    from .workers import selector
+    try: default_worker = selector(data.get('worker'))
+    except ValueError as exc:
+        default_worker = {}
+        errors.append(str(exc))
     if errors:
         raise FlowError("\n".join(errors))
-    return Flow(name, description or "", dict(params), ordered)
+    return Flow(name, description or "", dict(params), ordered, worker=default_worker)
 
 
 def _dependency_order(steps: dict[str, Step], errors: list[str]) -> dict[str, Step]:
