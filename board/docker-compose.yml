@@ -29,3 +29,12 @@ services:
       TRIGGER_API_URL: ${TRIGGER_URL:-http://host.docker.internal:8030}
       # Prefect (leave empty to disable): the server's REST API
       PREFECT_API_URL: ${PREFECT_API_URL-http://host.docker.internal:4200/api}
+      # Portable flows: the flow host on the worker PC (agents/flow_host.py)
+      FLOW_HOST_URL: ${FLOW_HOST_URL:-http://host.docker.internal:8095}
+      FLOW_HOST_TOKEN: ${FLOW_HOST_TOKEN:-}
+      # Browser-visible engine dashboards (use reachable hostnames when opening from a phone).
+      HATCHET_DASHBOARD_URL: ${HATCHET_DASHBOARD_URL:-http://localhost:8080}
+      TRIGGER_DASHBOARD_URL: ${TRIGGER_DASHBOARD_URL:-http://localhost:8030}
+      TRIGGER_DASHBOARD_PATH: ${TRIGGER_DASHBOARD_PATH:-}
+      TRIGGER_DEV_DASHBOARD_PATH: ${TRIGGER_DEV_DASHBOARD_PATH:-}
+      PREFECT_DASHBOARD_URL: ${PREFECT_DASHBOARD_URL:-http://localhost:4200}

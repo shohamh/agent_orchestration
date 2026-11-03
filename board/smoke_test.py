@@ -34,6 +34,9 @@ def wait_for(system: str, board: str, run_id: str, check: Any, what: str, timeou
     while time.time() < deadline:
         cards = {c["id"]: c for c in call("GET", f"/api/boards/{system}/{board}/cards")["cards"]}
         card = cards.get(run_id)
+        if card:
+            # Cards carry only their latest line; the log itself is paged separately.
+            card["progress"] = call("GET", f"/api/cards/{system}/{run_id}/logs?limit=5000")["lines"]
         if card and check(card):
             return card
         time.sleep(1.5)

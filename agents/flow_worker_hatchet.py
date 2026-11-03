@@ -46,6 +46,7 @@ def build_workflow(hatchet: Any, flow: Flow) -> Any:
 
                 async def sink(event: dict) -> None:
                     await ctx.aio_log("EVT " + json.dumps(event, ensure_ascii=False), raise_on_error=True)
+                    await ctx.aio_put_stream(event.get("type") or "event")
 
                 context = step_context(flow, step, payload.model_dump(), outputs)
                 return {"output": await run_step(flow, step.id, context, ctx.workflow_run_id, inbox.receive, sink)}

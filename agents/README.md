@@ -80,6 +80,15 @@ Desktop forwards to this PC's loopback). On Linux, bind it with `FLOW_HOST_BIND`
 `FLOW_HOST_TOKEN` on both sides, and point `FLOW_HOST_URL` at it. `FLOW_BACKENDS` (default
 `hatchet,prefect,trigger`) picks which backends to keep in sync.
 
+The flow host also provides step-restart support for Prefect and local Trigger.dev, where native
+dependent-step replay is absent. Its engine endpoints default to this PC's localhost ports.
+`FLOW_PREFECT_API_URL` overrides `PREFECT_API_URL`/localhost:4200/api;
+`FLOW_TRIGGER_API_URL` overrides `TRIGGER_API_URL`/localhost:8030. Set these in the host's
+environment or `board/.env`. The Trigger extension reads `TRIGGER_DEV_SECRET_KEY` from that file
+or the host's environment. The board only forwards backend/run/step IDs to this control plane.
+Exact outputs and definition fingerprints live in the worker's run workspace; see
+[restart behavior and limits](../flows/README.md#watching-and-restarting-steps).
+
 ## Chat controls
 
 - **Send message** while busy queues the message for the next turn. **Interrupt turn** cancels

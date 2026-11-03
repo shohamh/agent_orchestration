@@ -78,6 +78,18 @@
   .legend svg { vertical-align: middle; margin-right: 4px; }
   .node-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .node-panel h5 { margin: 0; font-size: 14px; }
+  .dag-node text.kind { fill: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+  .dag-node.agent rect.box { stroke-dasharray: 4 3; }
+  dialog.wide { width: min(860px, 96vw); }
+  .flow-editor { display: grid; grid-template-columns: 200px 1fr; gap: 12px; min-height: 420px; }
+  .flow-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 60vh; }
+  .flow-list button { text-align: left; font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  .flow-list button[aria-pressed="true"] { border-color: var(--accent); font-weight: 600; }
+  .flow-editor textarea { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; width: 100%; min-height: 380px; resize: vertical; tab-size: 2; }
+  .flow-check { font-size: 12px; white-space: pre-wrap; padding: 6px 8px; border-radius: 6px; background: var(--chip); }
+  .flow-check.bad { color: var(--danger); } .flow-check.good { color: var(--ok); }
+  #n-flow-fields { display: flex; flex-direction: column; gap: 10px; }
+  @media (max-width: 700px) { .flow-editor { grid-template-columns: 1fr; } .flow-list { flex-direction: row; overflow-x: auto; } }
   /* Phones: one scrollable row of backend tabs, and the columns stacked top to bottom with empty
      ones collapsed to their header, so cards that need you are visible without sideways swiping. */
   @media (max-width: 700px) {
@@ -100,6 +112,7 @@
   <label class="status" for="board">Board</label>
   <select id="board" aria-label="Board"></select>
   <button class="secondary" id="add-board" type="button">+ Board</button>
+  <button class="secondary" id="flows-btn" type="button" title="Create and edit flows that run on every backend">Flows</button>
   <button class="primary" id="new-card" type="button">New card</button>
   <span class="spacer"></span>
   <span class="status" id="status" role="status">Loading…</span>
@@ -110,6 +123,7 @@
 <aside id="drawer" aria-hidden="true" aria-labelledby="d-title" inert>
   <div class="head">
     <h3 id="d-title"></h3>
+    <span id="d-backend"></span>
     <button class="close" id="d-close" type="button" aria-label="Close">×</button>
   </div>
   <div class="body">
@@ -153,7 +167,9 @@
         <option value="research-report">Research report (multi-step DAG)</option>
       </select>
     </label>
-    <label><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
+    <p class="status" id="n-flow-desc" hidden></p>
+    <div id="n-flow-fields" hidden></div>
+    <label id="n-goal-wrap"><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
     <div class="session-fields" id="n-session-fields">
       <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
       <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
@@ -166,6 +182,28 @@
     <div class="row" style="justify-content:flex-end">
       <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
       <button class="primary" id="n-create" value="create" type="submit">Create session</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="flows-dialog" class="wide">
+  <form id="flows-form" method="dialog">
+    <strong>Flows</strong>
+    <p class="status" style="margin:0">A flow runs on every backend as a native workflow: a Hatchet DAG workflow, a Prefect deployment,
+      and Trigger.dev tasks. Saving re-registers it on all three; steps running on the flow workers at that moment are interrupted.</p>
+    <div class="flow-editor">
+      <div class="flow-list" id="f-list"></div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <textarea id="f-yaml" spellcheck="false" aria-label="Flow YAML"></textarea>
+        <div class="flow-check" id="f-check" role="status">Pick a flow or start a new one.</div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:space-between">
+      <button class="danger" id="f-delete" type="button">Delete</button>
+      <span class="row">
+        <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
+        <button class="primary" id="f-save" type="button">Save</button>
+      </span>
     </div>
   </form>
 </dialog>
@@ -202,13 +240,17 @@ let system = null;
 let boards = store.get("boards", ["research", "lab-a"]);
 let board = store.get("board", boards[0]);
 let cards = [];
+let flows = [];          // portable flows from the flow host: [{name, description, input, steps, yaml}]
 let openCardId = null;
 const contextKey = () => `${system}/${board}`;
 const runKey = () => `${contextKey()}/${openCardId}`;
 const chat = AgentChat.mount($("d-chat"), { el, input: async (body) => {
   const key = runKey(), currentSystem = system, id = openCardId;
   await api("POST", `/api/cards/${currentSystem}/${encodeURIComponent(id)}/input`, body);
-  if (key === runKey()) await refresh();
+}, loadOlder: async (before) => {
+  // Bound now: by the time the page arrives the user may be on another card.
+  const path = `/api/cards/${system}/${encodeURIComponent(openCardId)}/transcript?limit=100&before=${encodeURIComponent(before)}`;
+  return api("GET", path);
 } });
 
 async function api(method, path, body) {
@@ -263,15 +305,25 @@ function renderBoard() {
 }
 
 function renderCard(card) {
-  const last = card.task === "agent-session" ? (card.events || []).filter(e => ["agent", "user", "error"].includes(e.type)).at(-1)?.text : card.progress?.at(-1);
+  const last = card.last;
   const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
     : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
   const q = card.column === "queued" ? queueText(card) : "";
   return el("div", { class: "card", tabindex: "0", role: "button", onclick: () => openCard(card.id), onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); } },
     el("div", { class: "title" }, card.title),
-    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when)),
+    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when)),
     q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
-    last ? el("div", { class: "last" }, last) : null);
+    last ? el("div", { class: "last" }, last) : null,
+    backendLink(card.backend_url));
+}
+
+function backendLink(url) {
+  if (!url || !/^https?:\/\//.test(url)) return null;
+  return el("a", { class: "backend-link", href: url, target: "_blank", rel: "noopener noreferrer",
+    onclick: (e) => e.stopPropagation(), onkeydown: (e) => e.stopPropagation() },
+    `Open in ${SYSTEM_LABELS[system].split(" · ")[0]} `,
+    svg("svg", { width: 14, height: 14, viewBox: "0 0 24 24", "aria-hidden": "true", fill: "none", stroke: "currentColor", "stroke-width": 1.7 },
+      svg("path", { d: "M14 3h7v7m0-7L10 14M10 3H3v18h18v-7" })));
 }
 
 function duration(card) {
@@ -280,10 +332,65 @@ function duration(card) {
   return s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m`;
 }
 
+// ---- Back gesture / Back button closes the open overlay instead of leaving the board.
+// Each overlay that opens pushes one history entry; Back (Android gesture, iOS edge swipe, the
+// browser button) pops it and closes the overlay. Closing with ✕/Escape removes that entry
+// again, so the next Back press never lands on a stale "closed overlay" state.
+const overlays = [];        // open overlays, innermost last: { name, close }
+let ignoredPops = 0;        // history traversals we started ourselves
+let popsSettled = [];       // resolvers waiting for those traversals to finish
+let historyChain = Promise.resolve();
+function pushOverlay(name, close) {
+  if (overlays.some(o => o.name === name)) return;
+  const entry = { name, close, pushed: false };
+  overlays.push(entry);
+  historyChain = historyChain.then(() => {
+    if (!overlays.includes(entry)) return;
+    history.pushState({ overlay: name }, ""); entry.pushed = true;
+  });
+}
+// Returns once the browser has finished going back, so a following pushOverlay can't race it.
+function dropOverlay(name) {
+  const index = overlays.findIndex(o => o.name === name);
+  if (index === -1) return Promise.resolve();
+  const removed = overlays.splice(index);
+  historyChain = historyChain.then(() => {
+    const extra = removed.filter(entry => entry.pushed).length;
+    if (!extra) return;
+    // history.go(-N) emits ONE popstate, even when it crosses several overlay entries.
+    ignoredPops++;
+    return new Promise(resolve => { popsSettled.push(resolve); history.go(-extra); });
+  });
+  return historyChain;
+}
+// A reload keeps the previous page's overlay entries in history; nothing is open now.
+if (history.state?.overlay) history.replaceState(null, "");
+window.addEventListener("popstate", () => {
+  if (ignoredPops > 0) {
+    if (--ignoredPops === 0) { popsSettled.forEach(resolve => resolve()); popsSettled = []; }
+    return;
+  }
+  overlays.pop()?.close();
+});
+
+// On phones, focusing the composer would pop the keyboard over the conversation on every open.
+const touchScreen = matchMedia("(pointer: coarse)").matches;
+
 function openCard(id) {
-  if (id !== openCardId) { dag = null; selectedNode = null; nodeLogs = { ref: null, lines: [] }; $("d-dag-section").hidden = true; }
-  openCardId = id; renderDrawer(); refreshDag(); $("drawer").inert = false; $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false"); if (cards.find(c => c.id === id)?.task === "agent-session") chat.focus(); else $("d-instruction").focus(); }
-function closeDrawer() { openCardId = null; $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+  if (id !== openCardId) {
+    dag = null; selectedNode = null; nodeLog.reset(null); $("d-dag-section").hidden = true;
+    const at = system;
+    cardLog.reset(id, (before) => api("GET", `/api/cards/${at}/${encodeURIComponent(id)}/logs?limit=1000&before=${before}`));
+  }
+  openCardId = id; renderDrawer(); refreshDag(); refresh(); $("drawer").inert = false; $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false");
+  pushOverlay("drawer", () => hideDrawer());
+  if (touchScreen) return;
+  if (cards.find(c => c.id === id)?.task === "agent-session") chat.focus(); else $("d-instruction").focus(); }
+function hideDrawer() { openCardId = null; $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+function closeDrawer() { const wasOpen = openCardId !== null; hideDrawer(); if (wasOpen) dropOverlay("drawer"); }
+// Hidden by Back as well as by ✕: either way, stop streaming the card's transcript.
+new MutationObserver(() => { if (!$("drawer").classList.contains("open")) refresh(); })
+  .observe($("drawer"), { attributes: true, attributeFilter: ["class"] });
 
 function renderDrawer() {
   const card = cards.find((c) => c.id === openCardId);
@@ -295,19 +402,15 @@ function renderDrawer() {
   $("d-progress-section").hidden = session;
   if (session) chat.render(card, runKey());
   $("d-title").textContent = card.title;
+  $("d-backend").replaceChildren(...[backendLink(card.backend_url)].filter(Boolean));
   const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", card.created_at], ["Started", card.started_at], ["Finished", card.finished_at]];
   $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
   $("d-steer-section").hidden = session || !card.steerable;
-  $("d-queue").textContent = queueText(card);
+  $("d-queue").replaceChildren(queueText(card), ...[backendLink(card.queue?.backend_url)].filter(Boolean));
   const pause = $("d-pause");
   pause.hidden = system !== "trigger" || !card.queue?.id;
   $("d-queue-section").hidden = session || (!queueText(card) && pause.hidden);
   pause.textContent = card.queue?.paused ? "Resume queue" : "Pause queue";
-  const progress = card.progress?.length ? card.progress.map((line) => el("li", {}, line)) : [el("li", {}, "No intermediate results yet")];
-  const list = $("d-progress");
-  const atBottom = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
-  list.replaceChildren(...progress);
-  if (atBottom) list.scrollTop = list.scrollHeight;
   const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
   $("d-output-section").hidden = session || !output;
   $("d-output").textContent = output;
@@ -319,7 +422,70 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const NODE_W = 150, NODE_H = 44, GAP_X = 24, GAP_Y = 44, PAD = 12;
 let dag = null;          // {model, nodes, edges} for the open card
 let selectedNode = null; // node id
-let nodeLogs = { ref: null, lines: [] };
+
+// A log list that starts at the newest lines and loads older pages when scrolled to the top.
+// The server pushes new lines for the open card; node logs catch up with `?after=`.
+function pagedLines(list, options) {
+  const state = { id: null, start: 0, lines: [], more: false, loaded: false, loading: false, error: null, older: null,
+    stick: true, top: 0 };
+  list.addEventListener("scroll", () => {
+    state.stick = list.scrollTop + list.clientHeight >= list.scrollHeight - 4; state.top = list.scrollTop;
+    if (list.scrollTop < 60) loadOlder();
+  });
+  function render(shift = 0) {
+    const shown = state.lines.map(options.map || ((line) => line)).filter((line) => line != null && line !== "");
+    const head = state.loading ? el("li", { class: "log-older", role: "status" }, el("span", { class: "spinner", "aria-hidden": "true" }), "Loading earlier lines…")
+      : state.error ? el("li", { class: "log-older" }, `Couldn't load earlier lines: ${state.error}`, el("button", { type: "button", class: "secondary", onclick: loadOlder }, "Retry"))
+      : state.more ? el("li", { class: "log-older" }, el("button", { type: "button", class: "secondary", onclick: loadOlder }, "Load earlier lines")) : null;
+    const height = list.scrollHeight;
+    list.replaceChildren(...[head, ...(shown.length ? shown.map((line) => el("li", {}, line))
+      : [el("li", { class: "status" }, state.loaded ? options.empty() : "Loading…")])].filter(Boolean));
+    // Re-attached lists start at the top, so restore from the tracked position, not the DOM.
+    list.scrollTop = state.stick ? list.scrollHeight : state.top + (shift ? list.scrollHeight - height : 0);
+    state.top = list.scrollTop;
+  }
+  async function loadOlder() {
+    if (!state.loaded || !state.more || state.loading || !state.older) return;
+    const id = state.id, before = state.start;
+    state.loading = true; state.error = null; state.stick = false; render(1);
+    try {
+      const page = await state.older(before);
+      if (id !== state.id || before !== state.start) return;
+      state.lines = [...page.lines, ...state.lines]; state.start = page.start; state.more = page.more;
+    } catch (e) { if (id === state.id) state.error = e.message; }
+    finally { if (id === state.id) { state.loading = false; render(1); } }
+  }
+  return {
+    state, render,
+    reset(id, older) { Object.assign(state, { id, older, start: 0, lines: [], more: false, loaded: false, loading: false, error: null, stick: true, top: 0 }); },
+    // A page from the server: {reset, start, lines, more}. A reset on reconnect keeps older lines already loaded.
+    apply(page) {
+      const end = state.start + state.lines.length;
+      if (page.reset && !(state.loaded && page.start >= state.start && page.start <= end)) {
+        Object.assign(state, { start: page.start, lines: page.lines, more: page.more });
+      } else if (page.start >= state.start && page.start <= end) {
+        state.lines = [...state.lines.slice(0, page.start - state.start), ...page.lines];
+      } else return;
+      state.loaded = true;
+      render();
+    },
+  };
+}
+const cardLog = pagedLines($("d-progress"), { empty: () => "No intermediate results yet" });
+const nodeLogList = el("ol", { class: "progress" });
+const nodeLog = pagedLines(nodeLogList, { map: readableLine, empty: () => (dag?.nodes.find((n) => n.id === selectedNode)?.ref ? "None" : "Not started yet") });
+const nodeChatRoot = el("div", { class: "session-chat node-chat" });
+const nodeStates = new Map();
+const selectedStep = () => dag?.nodes.find(n => n.id === selectedNode);
+const nodeKey = (ref = selectedStep()?.ref) => `${runKey()}/node/${ref}`;
+const nodeChat = AgentChat.mount(nodeChatRoot, { el,
+  input: async (body) => {
+    const node = selectedStep();
+    if (!node?.ref) throw new Error("This step has not started");
+    await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(node.ref)}/input`, body);
+  },
+  loadOlder: (before) => api("GET", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(selectedStep().ref)}/transcript?limit=100&before=${encodeURIComponent(before)}`),
+});
 
 function svg(tag, attrs = {}, ...children) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -359,7 +525,7 @@ function layoutDag(graph) {
 
 function renderDag() {
   const section = $("d-dag-section");
-  if (!dag || dag.nodes.length < 2) { section.hidden = true; return; }
+  if (!dag || !dag.nodes.length || (dag.nodes.length < 2 && !dag.nodes[0].kind)) { section.hidden = true; return; }
   section.hidden = false;
   $("d-dag-title").textContent = { declared: "DAG (declared dependencies)", dataflow: "Task graph (data dependencies)" }[dag.model] || "Run graph (child runs)";
   const { pos, width, height } = layoutDag(dag);
@@ -388,14 +554,15 @@ function renderDag() {
     const p = pos[n.id];
     const label = n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label;
     const time = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
-    return svg("g", { class: `dag-node${n.id === selectedNode ? " selected" : ""}`, transform: `translate(${p.x},${p.y})`,
+    return svg("g", { class: `dag-node${n.kind ? " " + n.kind : ""}${n.id === selectedNode ? " selected" : ""}`, transform: `translate(${p.x},${p.y})`,
       tabindex: "0", role: "button", "aria-label": `${n.label}: ${n.status}`,
       onclick: () => selectNode(n.id), onkeydown: (ev) => { if (ev.key === "Enter") selectNode(n.id); } },
       svg("title", {}, `${n.label} — ${n.status}`),
       svg("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 8 }),
       svg("rect", { class: `bar-${n.column}`, width: 5, height: NODE_H - 8, x: 4, y: 4, rx: 2 }),
       svg("text", { x: 16, y: 18 }, label),
-      svg("text", { class: "st", x: 16, y: 34 }, n.status.toLowerCase() + time));
+      svg("text", { class: "st", x: 16, y: 34 }, n.status.toLowerCase() + time),
+      n.kind ? svg("text", { class: "kind", x: NODE_W - 8, y: 13, "text-anchor": "end" }, n.kind) : null);
   });
   const markers = ["depends", "calls", "then"].map((kind) =>
     svg("marker", { id: `arrow-${kind}`, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
@@ -413,6 +580,7 @@ function renderLegend() {
     : dag.model === "dataflow"
       ? [[line("depends"), "passed its result to (recorded by Prefect)"]]
       : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]];
+  if (dag.nodes.some((n) => n.kind)) items.push([svg("svg", { width: 26, height: 12 }, svg("rect", { x: 1, y: 1, width: 24, height: 10, rx: 3, class: "box", style: "fill:none;stroke:var(--muted);stroke-dasharray:4 3" })), "agent step (dashed) / program step"]);
   $("d-legend").replaceChildren(...items.map(([icon, text]) => el("span", {}, icon, text)),
     el("span", {}, "Click a node for its output and logs"));
 }
@@ -426,17 +594,21 @@ function selectNode(id) {
   selectedNode = selectedNode === id ? null : id;
   renderDag();
   refreshNodeLogs();
+  refresh();
 }
 
+// The newest page when a node is selected, then only lines added since (`after`).
 async function refreshNodeLogs() {
   const node = dag?.nodes.find((n) => n.id === selectedNode);
-  if (!node?.ref) return;
-  const key = runKey(), nodeId = selectedNode, serial = ++nodeLogSerial;
+  if (!node?.ref) { nodeLog.reset(null); nodeLog.state.loaded = true; nodeLog.render(); return; }
+  const base = `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(node.ref)}/logs?limit=1000`;
+  if (nodeLog.state.id !== node.ref) nodeLog.reset(node.ref, (before) => api("GET", `${base}&before=${before}`));
+  if (node.kind) return; // Portable steps stream on the existing SSE connection.
+  const { state } = nodeLog, key = runKey(), nodeId = selectedNode, serial = ++nodeLogSerial;
   try {
-    const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(node.ref)}/logs`);
-    if (key !== runKey() || nodeId !== selectedNode || serial !== nodeLogSerial) return;
-    nodeLogs = { ref: node.ref, lines: data.lines };
-    renderNodePanel();
+    const data = await api("GET", state.loaded ? `${base}&after=${state.start + state.lines.length}` : base);
+    if (key !== runKey() || nodeId !== selectedNode || serial !== nodeLogSerial || state.id !== node.ref) return;
+    nodeLog.apply(data);
   } catch (e) { if (key === runKey() && nodeId === selectedNode && serial === nodeLogSerial) setStatus(e.message, true); }
 }
 
@@ -445,17 +617,64 @@ function renderNodePanel() {
   const node = dag?.nodes.find((n) => n.id === selectedNode);
   if (!node) { panel.hidden = true; return; }
   panel.hidden = false;
+  if (node.kind) { renderFlowNode(panel, node); return; }
   const facts = [["Status", node.status], ["Started", node.started_at], ["Finished", node.finished_at],
     ["Took", node.started_at && node.finished_at ? secs(node.started_at, node.finished_at) : null], ["Run id", node.ref]];
-  const lines = nodeLogs.ref === node.ref ? nodeLogs.lines : [];
   panel.replaceChildren(...[
     el("h5", {}, node.label),
     el("dl", {}, ...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
     node.error ? el("pre", {}, node.error) : null,
     node.output != null ? el("div", {}, el("h4", {}, "Output"), el("pre", {}, JSON.stringify(node.output, null, 2))) : null,
-    el("div", {}, el("h4", {}, "Logs / intermediate results"),
-      lines.length ? el("ol", { class: "progress" }, ...lines.map((l) => el("li", {}, l))) : el("span", { class: "status" }, node.ref ? "None" : "Not started yet")),
+    el("div", {}, el("h4", {}, "Logs / intermediate results"), nodeLogList),
   ].filter(Boolean));
+  nodeLog.render();
+}
+
+function renderFlowNode(panel, node) {
+  const card = cards.find(c => c.id === openCardId), key = nodeKey(node.ref);
+  const restart = el("button", { class: "secondary restart-step", type: "button", onclick: async () => {
+    const current = runKey(), ref = node.ref;
+    restart.disabled = true;
+    try {
+      const data = await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(ref)}/restart`, {});
+      if (current !== runKey()) return;
+      if (data.replayed) { dag.final = false; refreshDag(); setStatus("Engine accepted step replay; watching the run…"); }
+      else { pendingOpen = data.id; setStatus("Restart created; waiting for the new run…"); }
+      refresh();
+    } catch (e) { if (current === runKey()) { setStatus(e.message, true); restart.disabled = false; } }
+  } }, "Restart step");
+  restart.disabled = !node.restart_supported || !node.ref || !["done", "stopped"].includes(card?.column);
+  restart.title = !node.restart_supported ? node.restart_reason || "This engine has no native dependent-step replay"
+    : restart.disabled ? "Stop or finish the flow before restarting a step"
+    : node.restart_mode === 'runtime' ? "Start a new run from this step and its descendants, reusing other results and workspace files"
+    : "Replay this step; the engine restarts its dependent descendants";
+  const header = el("div", { class: "row" }, el("h5", {}, `${node.label} · ${node.kind}`), backendLink(node.backend_url), restart);
+  if (!node.restart_supported && node.restart_reason) header.append(el("p", { class: "status" }, node.restart_reason));
+  if (node.kind === "agent") {
+    // Keep the mounted chat and its focused composer in place across graph refreshes.
+    if (panel.dataset.nodeKey !== key) panel.replaceChildren(header, nodeChatRoot);
+    else panel.firstChild.replaceWith(header);
+    nodeChat.render({ ...node, agent: node.agent, session_state: nodeStates.get(key) || (node.column === "pending" ? "starting" : "working") }, key);
+  } else {
+    panel.replaceChildren(...[header, node.error ? el("pre", {}, node.error) : null,
+      node.output != null ? AgentChat.jsonView(node.output, el) : null, nodeLogList].filter(Boolean));
+    nodeLog.render();
+  }
+  panel.dataset.nodeKey = key;
+}
+
+// Flow steps and agent sessions log `EVT <json>` events; show them as text until a richer view exists.
+function readableLine(line) {
+  if (!line.startsWith("EVT ")) return line;
+  let e; try { e = JSON.parse(line.slice(4)); } catch { return line; }
+  if (e.type === "log") return (e.stream === "stderr" ? "! " : "") + e.text;
+  if (e.type === "agent") return e.text.trim() ? `agent: ${e.text.trim()}` : null;
+  if (e.type === "user") return `you: ${e.text}`;
+  if (e.type === "tool") return e.status === "running" ? `tool ${e.name || ""}: ${e.summary || ""}` : null;
+  if (e.type === "status") return `[${e.state}${e.reason ? ": " + e.reason : ""}]`;
+  if (e.type === "step") return `[step ${e.state}${e.exit_code != null ? ", exit " + e.exit_code : ""}]`;
+  if (e.type === "error") return `error: ${e.message}`;
+  return null;
 }
 
 let dagLoading = null;
@@ -466,43 +685,99 @@ async function refreshDag() {
   if (!card || card.task === "agent-session") { $("d-dag-section").hidden = true; return; }
   if (dagLoading === key) return;
   // A finished graph doesn't change: fetch it once.
-  if (dag && dag.cardId === card.id && dag.final && ["done", "stopped"].includes(card.column)) return;
+  if (dag && dag.cardId === card.id && dag.final && dag.finishedAt === card.finished_at && ["done", "stopped"].includes(card.column)) return;
   dagLoading = key;
   const serial = ++dagSerial;
   try {
-    const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(card.id)}/dag`);
+    const data = await api("GET", `/api/cards/${system}/${encodeURIComponent(card.id)}/dag?task=${encodeURIComponent(card.task)}`);
     if (key !== runKey() || serial !== dagSerial) return;
-    dag = { ...data, cardId: card.id, final: ["done", "stopped"].includes(card.column) };
+    dag = { ...data, cardId: card.id, final: ["done", "stopped"].includes(card.column), finishedAt: card.finished_at };
     renderDag();
     if (selectedNode) refreshNodeLogs();
+    refresh(); // a previously pending step may now have its own run id
   } catch (e) { if (key === runKey() && serial === dagSerial) setStatus(e.message, true); }
   finally { if (serial === dagSerial) dagLoading = null; }
 }
 
 async function act(action, body) {
   const key = runKey();
-  try { setStatus(`${action}…`); await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/${action}`, body); await refresh(); }
+  // The board pushes the result: the server refreshes watched boards right after any action.
+  try { setStatus(`${action}…`); await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/${action}`, body); }
   catch (e) { if (key === runKey()) setStatus(e.message, true); }
 }
 
 function setStatus(text, error = false) { const s = $("status"); s.textContent = text; s.classList.toggle("error", error); }
 
-let refreshing = null;
-let refreshSerial = 0;
-async function refresh() {
-  const key = contextKey();
-  if (!system || refreshing === key) return;
-  const serial = ++refreshSerial;
-  refreshing = key;
-  try {
-    const data = await api("GET", `/api/boards/${system}/${encodeURIComponent(board)}/cards`);
-    if (key !== contextKey() || serial !== refreshSerial) return;
-    cards = data.cards;
-    renderBoard();
-    if (openCardId) { renderDrawer(); refreshDag(); }
-    setStatus(`${SYSTEM_LABELS[system]} · ${cards.length} cards · updated ${new Date().toLocaleTimeString()}`);
-  } catch (e) { if (key === contextKey() && serial === refreshSerial) setStatus(e.message, true); }
-  finally { if (serial === refreshSerial) refreshing = null; }
+// ---------------------------------------------------------------- Live updates
+// One server-sent event stream per (backend, board, open card). The server watches the engine's
+// live feed and pushes only what changed: card patches, plus the open card's new transcript rows
+// or log lines. refresh() (re)connects only when that context changed, so it is cheap to call.
+let live = null;      // { key, source }
+let feedLive = false; // the engine feed is up (otherwise the server polls every few seconds)
+let pendingOpen = null; // a card just created here: open it once it shows up
+let retryTimer = null;
+const liveKey = () => `${contextKey()}/${openCardId ?? ""}/${selectedStep()?.ref ?? ""}`;
+function refresh() {
+  if (!system || document.hidden || live?.key === liveKey()) return;
+  live?.source.close();
+  clearTimeout(retryTimer);
+  const card = openCardId, context = contextKey();
+  const params = new URLSearchParams({ system, board });
+  if (card) params.set("card", card);
+  const node = selectedStep();
+  if (card && node?.ref && node.kind) { params.set("node", node.ref); params.set("kind", node.kind); }
+  const source = new EventSource(`/api/live?${params}`);
+  live = { key: liveKey(), source };
+  source.onmessage = (event) => { if (live?.source === source && context === contextKey()) onLive(JSON.parse(event.data)); };
+  source.onerror = async () => {
+    if (live?.source !== source) return;
+    setStatus(`${SYSTEM_LABELS[system]} · reconnecting…`, true);
+    if (source.readyState !== EventSource.CLOSED) return; // the browser retries by itself
+    // A refused stream (e.g. the sign-in expired) is not retried by the browser: find out why.
+    live = null;
+    try { await api("GET", "/api/systems"); retryTimer = setTimeout(refresh, 3000); }
+    catch (e) { setStatus(e.message === "Sign in required" ? "Signed out · reload the page to sign in" : e.message, true); }
+  };
+}
+function closeLive() { live?.source.close(); live = null; }
+// A hidden tab streams nothing; coming back reconnects and catches up from a fresh snapshot.
+document.addEventListener("visibilitychange", () => { if (document.hidden) closeLive(); else refresh(); });
+
+function liveStatus() {
+  setStatus(`${SYSTEM_LABELS[system]} · ${cards.length} cards · ${feedLive ? "live" : "polling"} · updated ${new Date().toLocaleTimeString()}`);
+}
+
+function onLive(message) {
+  if (message.type === "feed") { feedLive = message.live; if (columns.length) liveStatus(); return; }
+  if (message.type === "error") { setStatus(message.message, true); return; }
+  if (message.type === "graph") { if (message.card === openCardId) { if (dag) dag.final = false; refreshDag(); } return; }
+  if (message.type === "node-rows") {
+    if (message.card !== openCardId || message.node !== selectedStep()?.ref) return;
+    const key = nodeKey(message.node); nodeStates.set(key, message.state);
+    renderNodePanel(); nodeChat.rows(key, message); refreshDag(); return;
+  }
+  if (message.type === "node-lines") {
+    if (message.card === openCardId && message.node === selectedStep()?.ref && nodeLog.state.id === message.node) nodeLog.apply(message);
+    refreshDag(); return;
+  }
+  if (message.type === "rows") { chat.rows(`${contextKey()}/${message.card}`, message); return; }
+  if (message.type === "lines") { if (message.card === openCardId && cardLog.state.id === message.card) cardLog.apply(message); return; }
+  if (message.type !== "cards") return;
+  const before = cards.find((c) => c.id === openCardId);
+  if (message.reset) cards = message.cards;
+  else {
+    const changed = new Map(message.upsert.map((c) => [c.id, c]));
+    cards = [...cards.filter((c) => !changed.has(c.id) && !message.remove.includes(c.id)), ...changed.values()];
+  }
+  cards.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+  renderBoard();
+  if (pendingOpen && cards.some((c) => c.id === pendingOpen)) { const id = pendingOpen; pendingOpen = null; openCard(id); }
+  else if (openCardId) {
+    const after = cards.find((c) => c.id === openCardId);
+    renderDrawer();
+    if (after && JSON.stringify(after) !== JSON.stringify(before)) refreshDag();
+  }
+  liveStatus();
 }
 
 $("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; renderBoard(); refresh(); });
@@ -512,8 +787,32 @@ $("add-board").addEventListener("click", () => {
   if (!boards.includes(name)) boards.push(name);
   board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; renderBoard(); renderHeader(); refresh();
 });
+function renderKindOptions() {
+  const select = $("n-kind"), current = select.value;
+  select.querySelector("optgroup")?.remove();
+  if (flows.length) select.append(el("optgroup", { label: "Flows (run on every backend)" },
+    ...flows.map((f) => el("option", { value: `flow:${f.name}` }, `${f.name}${f.description ? " — " + f.description : ""}`))));
+  if ([...select.options].some((o) => o.value === current)) select.value = current;
+}
+
+async function loadFlows() {
+  try { flows = (await api("GET", "/api/flows")).flows; } catch (e) { flows = []; setStatus(e.message, true); }
+  renderKindOptions();
+}
+
 function updateNewForm() {
   const kind = $("n-kind").value;
+  const flow = kind.startsWith("flow:") ? flows.find((f) => f.name === kind.slice(5)) : null;
+  $("n-goal-wrap").hidden = !!flow; $("n-goal").disabled = !!flow;
+  $("n-flow-fields").hidden = !flow; $("n-flow-desc").hidden = !flow;
+  if (flow && $("n-flow-fields").dataset.flow !== flow.name) {
+    $("n-flow-fields").dataset.flow = flow.name;
+    $("n-flow-desc").textContent = `${Object.keys(flow.steps).length} steps: ${Object.entries(flow.steps).map(([id, s]) => `${id} (${s.kind})`).join(" → ")}`;
+    $("n-flow-fields").replaceChildren(...Object.entries(flow.input).map(([key, value]) => el("label", {}, key,
+      typeof value === "boolean" ? el("select", { "data-key": key }, el("option", { value: "true" }, "true"), el("option", { value: "false" }, "false"))
+        : el("input", { "data-key": key, value: value ?? "", type: typeof value === "number" ? "number" : "text" }))));
+    for (const [key, value] of Object.entries(flow.input)) if (typeof value === "boolean") $("n-flow-fields").querySelector(`[data-key="${key}"]`).value = String(value);
+  }
   const agent = kind === "steerable-agent", session = kind === "agent-session";
   document.querySelectorAll(".agent-only").forEach((n) => { n.hidden = !agent; });
   document.querySelectorAll(".agent-only input").forEach((n) => { n.disabled = !agent; });
@@ -521,29 +820,115 @@ function updateNewForm() {
   $("n-session-fields").hidden = !session;
   $("n-goal-label").textContent = session ? "Opening prompt" : agent ? "Goal" : "Topic";
   $("n-production-note").hidden = !session || system !== "trigger";
-  $("n-create").disabled = session && system === "trigger";
-  $("n-create").textContent = session ? "Create session" : "Create card";
+  $("n-create").disabled = (session || !!flow) && system === "trigger";
+  $("n-create").textContent = session ? "Create session" : flow ? "Start flow" : "Create card";
+  if (flow && system === "trigger") { $("n-production-note").hidden = false; $("n-production-note").textContent = "Flows run on the local development worker. Choose the Trigger.dev · local tab, Hatchet or Prefect."; }
+  else $("n-production-note").textContent = "Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.";
   $("n-demo-note").hidden = $("n-agent").value !== "demo";
 }
-$("new-card").addEventListener("click", () => { updateNewForm(); $("new-dialog").showModal(); });
+$("new-card").addEventListener("click", () => { updateNewForm(); loadFlows().then(updateNewForm); $("new-dialog").showModal(); pushOverlay("dialog", () => $("new-dialog").close()); });
+// Escape and the dialog's Close button close it natively; drop its history entry too. When Back
+// closed it, its entry is already gone and this is a no-op. Watching the `open` attribute (removed
+// synchronously on every close path) is more dependable than the "close" event, which a
+// background tab may deliver late.
+new MutationObserver(() => { if (!$("new-dialog").open) dropOverlay("dialog"); })
+  .observe($("new-dialog"), { attributes: true, attributeFilter: ["open"] });
+function closeNewDialog() { $("new-dialog").close(); return dropOverlay("dialog"); }
 $("n-kind").addEventListener("change", updateNewForm);
 $("n-agent").addEventListener("change", updateNewForm);
 $("new-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "create") return;
   e.preventDefault();
   const kind = $("n-kind").value, key = contextKey();
-  if (kind === "agent-session" && system === "trigger") { updateNewForm(); return; }
-  const body = kind === "agent-session"
+  if ((kind === "agent-session" || kind.startsWith("flow:")) && system === "trigger") { updateNewForm(); return; }
+  const body = kind.startsWith("flow:")
+    ? { kind: "flow", flow: kind.slice(5), input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
+        n.tagName === "SELECT" ? n.value === "true" : n.type === "number" ? Number(n.value) : n.value])) }
+    : kind === "agent-session"
     ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), simulateFailures: Number($("n-failures").value) }
     : { kind, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) };
   $("n-create").disabled = true;
   try {
     const result = await api("POST", `/api/boards/${system}/${encodeURIComponent(board)}/cards`, body);
-    $("new-dialog").close(); $("n-goal").value = "";
-    if (key === contextKey()) { await refresh(); if (kind === "agent-session" && cards.some(c => c.id === result.id)) openCard(result.id); }
+    await closeNewDialog(); $("n-goal").value = "";
+    // The new card arrives on the live stream; sessions and flows open as soon as it does.
+    if (key === contextKey() && (kind === "agent-session" || kind.startsWith("flow:"))) {
+      if (cards.some(c => c.id === result.id)) openCard(result.id); else pendingOpen = result.id;
+    }
   } catch (err) { setStatus(err.message, true); }
   finally { updateNewForm(); }
 });
+// ---------------------------------------------------------------- Flows editor
+const NEW_FLOW = `name: my-flow
+description: What this flow does
+input:
+  topic: something
+steps:
+  gather:
+    kind: program
+    run: python -c "print('gathering {{ input.topic }}')"
+  think:
+    kind: agent
+    needs: [gather]
+    agent: demo        # demo | codex | claude | opencode | opencode2 | omp | pi
+    review: false      # true: wait for "Mark done" before the flow continues
+    prompt: |
+      Work on {{ input.topic }} using:
+      {{ steps.gather.output.stdout }}
+`;
+let editing = null; // flow name being edited, or null for a new one
+let checkSerial = 0, checkTimer = null;
+
+function renderFlowList() {
+  $("f-list").replaceChildren(
+    el("button", { type: "button", "aria-pressed": String(editing === null), onclick: () => editFlow(null) }, "+ New flow"),
+    ...flows.map((f) => el("button", { type: "button", "aria-pressed": String(editing === f.name), onclick: () => editFlow(f.name) }, f.name)));
+  $("f-delete").hidden = editing === null;
+}
+
+function editFlow(name) {
+  editing = name;
+  $("f-yaml").value = name ? flows.find((f) => f.name === name).yaml : NEW_FLOW;
+  renderFlowList(); checkFlow();
+}
+
+async function checkFlow() {
+  const serial = ++checkSerial;
+  try {
+    const result = await api("POST", "/api/flows/validate", { yaml: $("f-yaml").value });
+    if (serial !== checkSerial) return null;
+    const check = $("f-check");
+    check.className = `flow-check ${result.ok ? "good" : "bad"}`;
+    check.textContent = result.ok
+      ? `Valid: ${result.flow.name} · ${Object.entries(result.flow.steps).map(([id, s]) => `${id} (${s.kind}${s.needs.length ? " ← " + s.needs.join(", ") : ""})`).join(" · ")}`
+      : result.error;
+    return result;
+  } catch (e) { if (serial === checkSerial) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; } return null; }
+}
+
+$("flows-btn").addEventListener("click", async () => { $("flows-dialog").showModal(); await loadFlows(); editFlow(flows[0]?.name ?? null); });
+$("f-yaml").addEventListener("input", () => { clearTimeout(checkTimer); checkTimer = setTimeout(checkFlow, 300); });
+$("f-yaml").addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return; e.preventDefault();
+  const t = e.target, at = t.selectionStart; t.setRangeText("  ", at, t.selectionEnd, "end");
+});
+$("f-save").addEventListener("click", async () => {
+  const result = await checkFlow();
+  if (!result?.ok) return;
+  try {
+    await api("PUT", `/api/flows/${encodeURIComponent(result.flow.name)}`, { yaml: $("f-yaml").value });
+    if (editing && editing !== result.flow.name && confirm(`Saved as ${result.flow.name}. Delete the old flow ${editing}?`))
+      await api("DELETE", `/api/flows/${encodeURIComponent(editing)}`);
+    await loadFlows(); editing = result.flow.name; renderFlowList();
+    $("f-check").textContent = `Saved ${result.flow.name}. The flow workers re-register it on every backend within a few seconds.`;
+  } catch (e) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; }
+});
+$("f-delete").addEventListener("click", async () => {
+  if (!editing || !confirm(`Delete flow ${editing}? Its past runs stay in each backend.`)) return;
+  try { await api("DELETE", `/api/flows/${encodeURIComponent(editing)}`); await loadFlows(); editFlow(flows[0]?.name ?? null); }
+  catch (e) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; }
+});
+
 $("d-close").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
@@ -563,8 +948,8 @@ $("d-pause").addEventListener("click", async () => {
     if (!systems.length) { setStatus("No backend configured (set HATCHET_CLIENT_TOKEN and/or TRIGGER_SECRET_KEY)", true); return; }
     system = systems.includes(store.get("system")) ? store.get("system") : systems[0];
     if (!boards.includes(board)) board = boards[0];
-    renderHeader(); await refresh();
-    setInterval(refresh, 2000);
+    setStatus(`${SYSTEM_LABELS[system] || system} · connecting…`);
+    renderHeader(); refresh(); loadFlows();
   } catch (e) { setStatus(e.message, true); }
 })();
 </script>

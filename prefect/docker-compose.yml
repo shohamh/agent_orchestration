@@ -52,6 +52,9 @@ services:
       # What the browser uses to reach the API (set to http://<server>:4200/api on a LAN).
       PREFECT_UI_API_URL: ${PREFECT_UI_API_URL:-http://localhost:4200/api}
       PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+      # Stream new log lines over the /api/logs/out websocket; the agent board pushes them live.
+      PREFECT_SERVER_LOGS_STREAM_OUT_ENABLED: "true"
+      PREFECT_SERVER_LOGS_STREAM_PUBLISHING_ENABLED: "true"
       # Upstream's 5s database-connect deadline caused HTTP 500s on this busy Docker host.
       # Allow slower connections; this remains bounded and configurable.
       PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT: ${PREFECT_DATABASE_CONNECTION_TIMEOUT:-30}

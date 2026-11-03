@@ -1,0 +1,162 @@
+"""Step-view contracts without running orchestration engines."""
+import asyncio
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch, AsyncMock
+
+sys.path.insert(0, str(Path(__file__).parent))
+from aiohttp.test_utils import TestClient, TestServer
+from cards import Card, Dag, DagNode
+import server
+from live import Hub
+
+
+FLOW = {'name': 'demo-flow', 'input': {'topic': 'hello'}, 'steps': {
+    'first': {'kind': 'program', 'needs': []},
+    'talk': {'kind': 'agent', 'needs': ['first'], 'agent': 'demo'},
+    'last': {'kind': 'program', 'needs': ['talk']}}}
+
+
+class Adapter:
+    def __init__(self):
+        self.column = 'done'
+        self.calls = []
+        self.rows = [{'type': 'agent', 'message_id': str(i), 'text': str(i)} for i in range(250)]
+
+    async def list_cards(self, board, light=False):
+        return [Card('run', 'fake', board, 'Flow', 'demo-flow', self.column, 'RUNNING')]
+
+    async def run_info(self, run_id):
+        return {'task': 'demo-flow', 'column': self.column, 'params': {'topic': 'original'},
+                'board': 'demo', 'title': 'Original flow'}
+
+    async def dag(self, run_id):
+        return Dag('declared', [DagNode(s, s, 'done', 'COMPLETED', ref=s) for s in FLOW['steps']])
+
+    async def run_lines(self, run_id):
+        return []
+
+    async def node_lines(self, ref):
+        events = self.rows if ref == 'talk' else []
+        return ['EVT ' + json.dumps(e) for e in [*events,
+            {'type': 'step', 'state': 'done', 'output': None if ref == 'first' else 'result'}]]
+
+    async def node_input(self, run_id, ref, body):
+        self.calls.append((run_id, ref, body))
+
+    async def create_flow(self, *args):
+        self.calls.append(args)
+        return 'new-run'
+
+    async def restart_node(self, run_id, ref):
+        self.calls.append(('native-replay', run_id, ref))
+
+
+class StepAPI(unittest.IsolatedAsyncioTestCase):
+    async def test_logical_step_identity_survives_pending_to_started(self):
+        pending = server.fit_flow_dag(Dag('declared'), 'demo-flow', FLOW)
+        started = server.fit_flow_dag(await Adapter().dag('run'), 'demo-flow', FLOW)
+        self.assertEqual([n.id for n in pending.nodes], [n.id for n in started.nodes])
+        self.assertEqual(started.nodes[1].ref, 'talk')
+    async def asyncSetUp(self):
+        self.adapter = Adapter()
+        with patch.object(server, 'load_adapters', return_value={'fake': self.adapter}):
+            self.app = server.make_app()
+        async def flows(): return {'demo-flow': FLOW}
+        self.app['flow_host'].flows = flows
+        self.client = TestClient(TestServer(self.app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+
+    async def test_node_transcript_pages_by_coalesced_rows(self):
+        url = '/api/cards/fake/run/nodes/talk/transcript'
+        response = await self.client.get(url)
+        self.assertEqual(response.status, 200)
+        data = await response.json()
+        self.assertEqual((len(data['rows']), data['rows'][0]['text'], data['more']), (100, '150', True))
+        data = await (await self.client.get(url + '?before=m:150')).json()
+        self.assertEqual((len(data['rows']), data['rows'][0]['text']), (100, '50'))
+
+    async def test_input_rejects_unrelated_and_program_nodes(self):
+        for ref in ['other-run', 'first']:
+            response = await self.client.post(f'/api/cards/fake/run/nodes/{ref}/input', json={'type': 'done'})
+            self.assertIn(response.status, (400, 404))
+        response = await self.client.post('/api/cards/fake/run/nodes/talk/input', json={'type': 'message', 'text': 'hello'})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.adapter.calls, [('run', 'talk', {'type': 'message', 'text': 'hello'})])
+
+    async def test_restart_delegates_selected_node_without_calculating_descendants(self):
+        response = await self.client.post('/api/cards/fake/run/nodes/talk/restart', json={})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(await response.json(), {'id': 'run', 'replayed': True})
+        self.assertEqual(self.adapter.calls, [('native-replay', 'run', 'talk')])
+
+    async def test_unsupported_engine_never_emulates_dependency_restart(self):
+        from prefect_adapter import PrefectAdapter
+        from trigger_adapter import TriggerAdapter
+        self.assertFalse(hasattr(PrefectAdapter, 'restart_node'))
+        self.assertFalse(hasattr(TriggerAdapter, 'restart_node'))
+        original = Adapter.restart_node
+        del Adapter.restart_node
+        try:
+            response = await self.client.post('/api/cards/fake/run/nodes/talk/restart', json={})
+            self.assertEqual(response.status, 501)
+            self.assertEqual(self.adapter.calls, [])
+        finally:
+            Adapter.restart_node = original
+
+    async def test_restart_rejects_active_run_without_starting_work(self):
+        self.adapter.column = 'running'
+        response = await self.client.post('/api/cards/fake/run/nodes/talk/restart', json={})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.adapter.calls, [])
+
+    async def test_prefect_restart_forwards_ids_to_runtime_without_reading_results(self):
+        from types import SimpleNamespace
+        self.app['adapters']['prefect'] = SimpleNamespace(run_info=self.adapter.run_info, dag=self.adapter.dag)
+        self.app['flow_host'].restart_node = AsyncMock(return_value={'id': 'new-run', 'mode': 'runtime'})
+        response = await self.client.post('/api/cards/prefect/run/nodes/talk/restart', json={})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())['id'], 'new-run')
+        self.app['flow_host'].restart_node.assert_awaited_once_with('prefect', 'run', 'talk')
+        self.assertEqual(self.adapter.calls, [])
+
+
+    async def test_step_stream_uses_shared_board_watcher_and_sends_latest_rows(self):
+        hub = self.app['hub']
+        watcher, a = hub.subscribe('fake', 'demo', 'run', node='talk', kind='agent')
+        other, b = hub.subscribe('fake', 'demo', 'run', node='talk', kind='agent')
+        self.assertIs(watcher, other)
+        messages = []
+        while not any(m.get('type') == 'node-rows' for m in messages):
+            messages.append(await asyncio.wait_for(a.queue.get(), 3))
+        data = next(m for m in messages if m['type'] == 'node-rows')
+        self.assertEqual((data['node'], len(data['rows']), data['more']), ('talk', 100, True))
+        watcher.unsubscribe(a); watcher.unsubscribe(b)
+
+
+class PrefectFeeds(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_log_socket_cancels_event_socket_before_retry(self):
+        from prefect_adapter import PrefectAdapter
+        adapter = PrefectAdapter()
+        opened, closed = asyncio.Event(), asyncio.Event()
+        async def listen(path, *args):
+            if path == '/events/out':
+                opened.set()
+                try: await asyncio.Event().wait()
+                finally: closed.set()
+            else:
+                await opened.wait()
+                raise RuntimeError('socket failed')
+        adapter._listen = listen
+        with self.assertRaises(Exception):
+            await adapter.feed('board', lambda: None)
+        self.assertTrue(closed.is_set())
+
+
+if __name__ == '__main__':
+    unittest.main()

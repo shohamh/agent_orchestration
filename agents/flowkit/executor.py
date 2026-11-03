@@ -3,7 +3,11 @@
 Events go to `sink` using the session schema (agentdriver/events.py) plus:
 
   log    {stream: stdout|stderr, text}          one line of a program step's output
-  step   {state: running|done|failed, kind, output?, error?, exit_code?}
+  step   {state: running|done|failed, kind, output?, error?, exit_code?}   the last event of a
+         finished step is {state: done, output}
+
+A program step's events go through their own Emitter, an agent step's through the session's, so
+`seq` restarts with the final step event; order them by position, not seq.
 
 Agent steps receive the human's input through `receive` (same messages as agent sessions).
 """
@@ -20,6 +24,7 @@ from typing import Any
 from agentdriver.events import Emitter, Sink
 from .definition import FLOWS_DIR, Flow, Step
 from .template import render
+from .restart import prepare_workspace, save_result, read_result, descendants
 
 STDOUT_TAIL = 40
 
@@ -34,17 +39,40 @@ def workspace_for(run_id: str) -> Path:
 
 def step_context(flow: Flow, step: Step, params: dict[str, Any], outputs: dict[str, Any]) -> dict[str, Any]:
     """What a step may reference: the flow input and the outputs of the steps it needs."""
-    return {"input": {**flow.input, **(params or {})},
+    params = dict(params or {})
+    plan = params.pop('flowRestart', None)
+    return {"input": {**flow.input, **params}, "_flow_restart": plan,
             "steps": {need: {"output": outputs.get(need)} for need in step.needs}}
 
 
 async def run_step(flow: Flow, step_id: str, context: dict[str, Any], run_id: str,
                    receive: Callable[[], Awaitable[dict]], sink: Sink) -> Any:
     step = flow.steps[step_id]
-    workspace = workspace_for(run_id)
+    plan = context.get('_flow_restart')
+    workspace = prepare_workspace(flow, run_id, plan)
+    emit = Emitter(sink)
+    if plan and step_id not in descendants(flow, plan['step']):
+        output = read_result(workspace, step_id)
+        await emit('step', state='done', kind=step.kind, reused=True, output=_bounded(output))
+        return output
     if step.kind == "agent":
-        return await _agent(step, context, workspace, receive, sink)
-    return await _program(step, context, workspace, Emitter(sink))
+        try:
+            output = await _agent(step, context, workspace, receive, sink)
+        except Exception as exc:
+            await emit("step", state="failed", kind="agent", error=str(exc)[:2000])
+            raise
+    else:
+        output = await _program(step, context, workspace, emit)
+    # The last event carries the output, so a restart can reuse it on any backend (Prefect doesn't
+    # persist task results here) and the board can show it.
+    save_result(flow, run_id, step_id, output)
+    await emit("step", state="done", kind=step.kind, output=_bounded(output))
+    return output
+
+
+def _bounded(output: Any, limit: int = 60000) -> Any:
+    text = json.dumps(output, ensure_ascii=False, default=str)
+    return output if len(text) <= limit else {"truncated": True, "preview": text[:2000]}
 
 
 async def _agent(step: Step, context: dict, workspace: Path, receive, sink) -> str:
@@ -100,7 +128,6 @@ async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) ->
         output = json.loads(output_file.read_text(encoding="utf-8")) if output_file.exists() else {"stdout": "\n".join(tail)}
     except ValueError as exc:
         raise RuntimeError(f"step {step.id!r} wrote invalid JSON to FLOW_OUTPUT: {exc}") from None
-    await emit("step", state="done", kind="program", exit_code=0)
     return output
 
 

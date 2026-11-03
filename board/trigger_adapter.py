@@ -5,13 +5,17 @@ Intermediate results are the run's live `metadata.transcript` (set by the agent)
 runs list already returns, so one request per board refresh covers every card.
 """
 
+import json
+import asyncio
 import os
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import aiohttp
 
 from cards import Card, Dag, DagNode, is_final
+from transcript import Memo, Session, digest
+from backend_links import trigger_queue_url
 
 MAX_DAG_NODES = 60
 MAX_DAG_DEPTH = 4
@@ -61,6 +65,8 @@ class TriggerAdapter:
         self._session: aiohttp.ClientSession | None = None
         self._outputs: dict[str, Any] = {}  # finished runs' output, fetched once
         self._finished_runs: dict[str, dict[str, Any]] = {}  # finished runs never change
+        self._metadata: dict[str, dict[str, Any]] = {}  # run id -> metadata from the latest list
+        self.sessions = Memo()
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         if self._session is None:
@@ -71,7 +77,8 @@ class TriggerAdapter:
                 raise RuntimeError(f"Trigger.dev {method} {path} -> {response.status}: {body}")
             return body
 
-    async def list_cards(self, board: str) -> list[Card]:
+    async def list_cards(self, board: str, light: bool = False) -> list[Card]:
+        """light: skip fetching finished runs' outputs (one request each) for a fast first paint."""
         runs = await self._list_runs({"filter[tag]": f"board:{board}", "filter[createdAt][period]": "7d"})
         queues = {q["name"]: q for q in (await self._request("GET", "/api/v1/queues?perPage=100"))["data"]}
         queued_by_task: dict[str, list[str]] = {}
@@ -94,12 +101,14 @@ class TriggerAdapter:
                 created_at=run.get("createdAt"),
                 started_at=run.get("startedAt"),
                 finished_at=run.get("finishedAt"),
-                progress=list(metadata.get("transcript") or []),
                 steerable=task in (AGENT_TASK, "agent-session") and not is_final(column),
                 agent=metadata.get("agent"),
             )
+            self._metadata[run["id"]] = metadata
             if task == "agent-session":
-                card.apply_session_events(metadata.get("events") or [])
+                card.apply_session(self._session_view(run["id"], metadata))
+            else:
+                card.apply_lines(list(metadata.get("transcript") or []))
             queue = queues.get(task, {})
             card.queue = {
                 "name": task,
@@ -108,11 +117,12 @@ class TriggerAdapter:
                 "limit": queue.get("concurrencyLimit"),
                 "paused": queue.get("paused", False),
                 "id": queue.get("id"),
+                "backend_url": trigger_queue_url(self.system, queue.get('id')),
             }
             if column == "queued":
                 ahead = queued_by_task.get(task, [])
                 card.queue["ahead"] = ahead.index(run["id"]) if run["id"] in ahead else None
-            if is_final(column):
+            if is_final(column) and (not light or run["id"] in self._outputs):
                 card.output, card.error = await self._result(run["id"])
             cards.append(card)
         return sorted(cards, key=lambda c: c.created_at or "")
@@ -169,11 +179,69 @@ class TriggerAdapter:
             error=(run.get("error") or {}).get("message"),
         )
 
-    async def node_logs(self, ref: str) -> list[str]:
+    async def node_lines(self, ref: str) -> list[str]:
         run = await self._retrieve(ref)
-        if run.get("taskIdentifier") == "agent-session":
-            return [str(event) for event in (run.get("metadata") or {}).get("events", [])]
+        events = (run.get("metadata") or {}).get("events")
+        if events is not None:  # agent sessions and flow steps: same `EVT <json>` lines as the other backends
+            return ["EVT " + json.dumps(event, ensure_ascii=False) for event in events]
         return list((run.get("metadata") or {}).get("transcript") or [])
+
+    async def node_events(self, ref: str) -> tuple[int, list[dict]]:
+        metadata = (await self._retrieve(ref)).get("metadata") or {}
+        return int(metadata.get("eventsDropped") or 0), metadata.get("events") or []
+
+    async def run_info(self, run_id: str) -> dict:
+        run = await self._retrieve(run_id)
+        return {"task": run["taskIdentifier"], "params": run.get("payload") or {},
+                "board": next((t[6:] for t in run.get("tags", []) if t.startswith("board:")), "research"),
+                "title": (run.get("metadata") or {}).get("title") or run["taskIdentifier"],
+                "column": _COLUMN.get(run["status"], "stopped")}
+
+    async def _run_metadata(self, run_id: str) -> dict[str, Any]:
+        if run_id not in self._metadata:
+            self._metadata[run_id] = (await self._retrieve(run_id)).get("metadata") or {}
+        return self._metadata[run_id]
+
+    def _session_view(self, run_id: str, metadata: dict[str, Any]) -> Session:
+        events, dropped = metadata.get("events") or [], int(metadata.get("eventsDropped") or 0)
+        return self.sessions.get(run_id, digest([dropped, events]), lambda: Session(events, dropped))
+
+    async def run_lines(self, run_id: str) -> list[str]:
+        return list((await self._run_metadata(run_id)).get("transcript") or [])
+
+    async def events(self, run_id: str) -> tuple[int, list[dict[str, Any]]]:
+        metadata = await self._run_metadata(run_id)
+        return int(metadata.get("eventsDropped") or 0), list(metadata.get("events") or [])
+
+    async def session(self, run_id: str) -> Session:
+        return self._session_view(run_id, await self._run_metadata(run_id))
+
+    async def feed(self, board: str, wake: Callable[[], None]) -> None:
+        """Trigger.dev Realtime (an Electric shape of this board's runs): a long poll that returns
+        as soon as a run's status or metadata (the session transcript) changes."""
+        if self._session is None:
+            self._session = aiohttp.ClientSession(headers=self.headers)
+        # Without this header the webapp speaks an older protocol that keeps answering must-refetch.
+        headers = {"x-trigger-electric-version": "1.0.0-beta.1"}
+        url = f"{self.base_url}/realtime/v1/runs"
+        params: dict[str, str] = {"tags": f"board:{board}", "offset": "-1"}
+        while True:
+            timeout = aiohttp.ClientTimeout(total=90)
+            async with self._session.get(url, params=params, headers=headers, timeout=timeout) as response:
+                if response.status == 409:  # the shape was rotated: start again from a snapshot
+                    params = {"tags": f"board:{board}", "offset": "-1"}
+                    continue
+                if response.status >= 400:
+                    raise RuntimeError(f"Trigger.dev realtime -> {response.status}: {await response.text()}")
+                messages = await response.json(content_type=None) or []
+                live = params.get("live") == "true"
+                params = {"tags": f"board:{board}", "live": "true",
+                          "handle": response.headers.get("electric-handle", params.get("handle", "")),
+                          "offset": response.headers.get("electric-offset", params.get("offset", "-1"))}
+                if response.headers.get("electric-cursor"):
+                    params["cursor"] = response.headers["electric-cursor"]
+            if live and any("value" in m or (m.get("headers") or {}).get("operation") for m in messages):
+                wake()
 
     async def create(self, board: str, kind: str, goal: str, turns: int, step_seconds: int,
                      session_options: dict[str, Any] | None = None) -> str:
@@ -190,6 +258,17 @@ class TriggerAdapter:
             initial_metadata = {"title": goal[:512], "agent": payload["agent"]}
         body = {"payload": payload, "options": {"tags": [f"board:{board}"], "metadata": initial_metadata}}
         return (await self._request("POST", f"/api/v1/tasks/{task}/trigger", json=body))["id"]
+
+    async def create_flow(self, board: str, flow: str, params: dict[str, Any], title: str) -> str:
+        # A portable flow is the generated parent task flow-<flow> (src/trigger/flows.generated.ts).
+        if not self.development:
+            raise ValueError("Portable flows run on the Trigger.dev local (development) worker; use that tab")
+        body = {"payload": params, "options": {"tags": [f"board:{board}"], "metadata": {"title": title[:512]}}}
+        return (await self._request("POST", f"/api/v1/tasks/flow-{flow}/trigger", json=body))["id"]
+
+    async def node_input(self, run_id: str, ref: str, message: dict[str, Any]) -> None:
+        # Each flow step is its own run with the agent-input stream.
+        await self.input(ref, message)
 
     async def input(self, run_id: str, message: dict[str, Any]) -> None:
         await self._request("POST", f"/realtime/v1/streams/{quote(run_id, safe='')}/input/agent-input", json={"data": message})

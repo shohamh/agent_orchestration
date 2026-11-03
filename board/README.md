@@ -10,7 +10,7 @@ http://localhost:8090. There's one UI, with a tab per backend. It has no externa
 
 **Coding-agent chat is now available.** Choose Coding agent session for streamed replies, expandable
 tools, permissions, question forms, interruption, Continue, and explicit Mark done. Real sessions use
-a native Hatchet worker or the **Trigger.dev · local** development tab; see
+a native Hatchet or Prefect worker, or the **Trigger.dev · local** development tab; see
 [local agent setup](../agents/README.md). The production Trigger tab keeps the original examples.
 
 Verified on 2026-11-02 against both stacks:
@@ -72,7 +72,27 @@ instead (tailnet only; the phone needs the Tailscale app).
 
 ## DAG / run graph view
 
-Click a card to get a live graph of its run in the drawer. Click any node to see its status, timing, output, error and logs. The graph refreshes every 2 seconds while the run is active. Create a **Research report (multi-step DAG)** card to try it.
+Click a card to get a live graph of its run in the drawer. Click any node to see its status, timing,
+output, error and logs. Engine feeds wake a shared watcher, which pushes changes over one SSE
+connection per browser tab. The open run has a one-second fallback; board lists have a five-second
+fallback. Hidden tabs disconnect. First paint uses lightweight cards; transcripts load only for
+the open session/agent step (latest 100 messages), with older pages on scroll-up. Logs start at
+1000 lines and page similarly. Cold engine logs are read once, then incrementally cached.
+
+Portable flow nodes open agent chat or a scrolling program log, with **Restart step** and backend
+links. Restart uses native Hatchet dependency replay and a flow-host runtime extension for
+Prefect/Trigger.dev; see [step restart behavior](../flows/README.md#watching-and-restarting-steps).
+**Open in…** links open a separate tab. Set `HATCHET_DASHBOARD_URL`, `TRIGGER_DASHBOARD_URL` and
+`PREFECT_DASHBOARD_URL` to roots reachable by the browser (especially when using a phone),
+independently of Docker-internal API URLs.
+For Trigger queue links, also set `TRIGGER_DASHBOARD_PATH` / `TRIGGER_DEV_DASHBOARD_PATH` to the
+environment path copied from its dashboard (`/orgs/.../projects/.../env/prod` or `/env/dev`).
+
+Verified on 2026-11-03: shared watchers and incremental updates, 100-message/1000-line paging,
+per-step chat controls on all three local backends, native Hatchet descendant replay with
+unchanged outputs, and Prefect/Trigger runtime restart with prerequisite result/workspace reuse.
+`step_smoke_test.py` uses simulated agents and a disposable flow; run it only while portable-flow
+workers are idle because saving/deleting that fixture re-registers them.
 
 Each system produces a different kind of graph:
 

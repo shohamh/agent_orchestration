@@ -20,6 +20,8 @@ Env: FLOW_HOST_BIND (127.0.0.1), FLOW_HOST_PORT (8095), FLOW_HOST_TOKEN, FLOW_BA
 """
 
 import hmac
+import asyncio
+import re
 import json
 import os
 import subprocess
@@ -171,6 +173,17 @@ class Api(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._authorized():
+            return
+        match = re.fullmatch(r'/runs/(prefect|trigger-dev)/([A-Za-z0-9_-]+)/nodes/([A-Za-z0-9_-]+)/restart', self.path)
+        if match:
+            from flowkit.restart_service import restart_node
+            try:
+                self._send(200, asyncio.run(restart_node(*match.groups())))
+            except ValueError as exc:
+                self._send(400, {'error': str(exc)})
+            except Exception as exc:
+                log(f'restart failed: {type(exc).__name__}: {exc}')
+                self._send(502, {'error': str(exc)})
             return
         if self.path != "/validate":
             return self._send(404, {"error": "not found"})

@@ -46,6 +46,30 @@ steps:
   output is the agent's final message. The `demo` agent is simulated (no model) and, without
   `review`, answers from its prompt without asking anything.
 
+## Watching and restarting steps
+
+Click an agent block in the board's DAG to use its live chat, permissions, questions, Interrupt,
+Continue and Mark done. Set `review: true` to hold the flow until you mark that agent step done.
+Program blocks show a scrolling log window. Conversations open on the latest 100 messages and
+logs on the latest 1000 lines; scrolling up loads earlier pages.
+
+**Restart step** reruns that step and its dependent descendants. Prerequisites and independent
+branches keep their results. Finish or stop the source flow first.
+
+- **Hatchet:** the board sends the selected task ID to Hatchet's native replay API. Hatchet walks
+  its persisted dependency edges and reruns the subtree in the same workflow run, even when
+  the selected step's output is unchanged.
+- **Prefect and local Trigger.dev:** these engines have no equivalent native subtree invalidation.
+  The flow host's orchestration extension creates a new native flow run from the selected step.
+  The runtime owns dependency selection and reuse; the board forwards only backend/run/step IDs.
+  Engine tasks use their normal dependencies and return saved results for unaffected steps.
+  The original workspace is copied before execution; the new run records its source.
+
+The extension saves exact outputs in `<FLOW_WORKSPACES>/<run>/.flow-results/`, separately from
+clipped UI log previews. Restart requires those files on the flow-host PC, an unchanged definition,
+and no active source child tasks. Historical runs made before result persistence must be replayed
+in full first. Internal `flowRestart` cannot collide with lowercase user input names.
+
 ## Limits
 
 - Steps run on the PC running the flow host and the native workers (they need the agent CLIs and

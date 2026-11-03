@@ -109,7 +109,8 @@ pre.diff-view { padding: 6px 0; } .diff-view > div { padding: 0 10px; }
 .diff-ctx { color: var(--muted); }
 .approval-card > pre.diff-view { margin: 10px 0 4px; border-radius: 8px; }
 .tool-full-summary { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
-.tool-section { margin-top: 8px; } .tool-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+.tool-section { margin-top: 10px; }
+.tool-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 12px 6px; }
 
 /* ---- Phones: keep the conversation large and the composer compact ---- */
 aside { top: var(--vv-top, 0); height: var(--vv-height, 100dvh); }
@@ -124,3 +125,15 @@ aside { top: var(--vv-top, 0); height: var(--vv-height, 100dvh); }
   .composer-hint { display: none; }
   .session-actions { grid-column: 1; grid-row: 3; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; }
 }
+
+/* Paging: earlier messages / log lines load when scrolled to the top. */
+.chat-older, .log-older { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px; color: var(--muted); font-size: 12px; list-style: none; }
+.spinner { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; flex: none; }
+.spinner.large { width: 22px; height: 22px; margin-bottom: 8px; color: var(--accent, var(--muted)); }
+.chat-empty .spinner.large { display: block; margin: 0 auto 10px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.backend-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 12px; margin-top: 4px; }
+.node-chat { height: min(620px, calc(var(--vv-height, 100dvh) - 140px)); min-height: 220px; overflow: hidden; }
+.node-chat .chat-log { padding: 14px 8px; }
+.node-panel:has(.node-chat) { position: sticky; bottom: 0; background: var(--panel); }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }

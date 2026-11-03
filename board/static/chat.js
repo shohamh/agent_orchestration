@@ -244,6 +244,45 @@
     text.addEventListener('focus', () => setTimeout(() => { log.scrollTop = log.scrollHeight; }, 300));
     text.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); } });
     container.append(banner, log, form);
+    // Scrolling near the top of the conversation loads the previous page of rows.
+    log.addEventListener('scroll', () => { if (log.scrollTop < 120) loadOlder(); });
+
+    function newSession() {
+      return { draft: '', scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false,
+        rows: [], loaded: false, more: false, truncated: false, loading: false, olderError: null, version: 0 };
+    }
+
+    async function loadOlder() {
+      const key = currentKey, session = key && sessions.get(key);
+      if (!session || !session.loaded || !session.more || session.loading || !session.rows.length || !config.loadOlder) return;
+      session.loading = true; session.olderError = null; renderRows();
+      const before = session.rows[0].key;
+      try {
+        const page = await config.loadOlder(before);
+        if (key !== currentKey || session.rows[0]?.key !== before) return;
+        const known = new Set(session.rows.map(row => row.key));
+        // Keep the rows on screen where they are while older ones are added above them.
+        const height = log.scrollHeight, top = log.scrollTop;
+        session.rows = [...page.rows.filter(row => !known.has(row.key)), ...session.rows];
+        session.more = page.more; session.loading = false; session.version++;
+        renderRows();
+        log.scrollTop = top + (log.scrollHeight - height);
+        session.scroll = log.scrollTop;
+      } catch (failure) {
+        session.olderError = failure.message;
+      } finally {
+        session.loading = false;
+        if (key === currentKey) { const height = log.scrollHeight, top = log.scrollTop; renderRows(); log.scrollTop = top + (log.scrollHeight - height); }
+      }
+    }
+
+    function olderIndicator(session) {
+      if (session.loading) return h('div', { class: 'chat-older', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), 'Loading earlier messages…');
+      if (session.olderError) return h('div', { class: 'chat-older' }, `Couldn't load earlier messages: ${session.olderError}`, h('button', { type: 'button', class: 'secondary', onclick: loadOlder }, 'Retry'));
+      if (session.more) return h('div', { class: 'chat-older' }, h('button', { type: 'button', class: 'secondary', onclick: loadOlder }, 'Load earlier messages'));
+      if (session.truncated && session.rows.length) return h('div', { class: 'chat-older' }, 'Earlier messages are no longer kept by this backend.');
+      return null;
+    }
 
     async function post(input, requestKey) {
       const key = currentKey, session = sessions.get(key);
@@ -337,8 +376,8 @@
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 50;
       const top = log.scrollTop, active = document.activeElement;
       const focus = log.contains(active) ? { key: active.dataset.chatFocus, start: active.selectionStart, end: active.selectionEnd } : null;
-      const rows = transcript(card.events);
-      log.replaceChildren(...(rows.length ? rows.map((event, index) => {
+      const rows = session.rows;
+      log.replaceChildren(...(rows.length ? [olderIndicator(session), ...rows.map((event, index) => {
         if (event.type === 'user' || event.type === 'agent') return h('article', { class: `chat-message ${event.type}` },
           h('div', { class: 'message-label' }, event.type === 'user' ? 'You' : card.agent === 'demo' ? 'Demo agent · simulated' : card.agent || 'Agent', event.queued ? h('span', { class: 'queued-label' }, 'Queued for next turn') : null),
           event.type === 'agent' ? h('div', { class: 'message-text markdown' }, ...markdown(event.text || '…', h)) : h('div', { class: 'message-text' }, event.text || '…'));
@@ -382,7 +421,8 @@
         }
         if (event.type === 'error') return h('div', { class: 'transcript-error', role: 'note' }, h('strong', {}, event.will_retry ? 'Retrying after an error' : 'Agent error'), h('div', {}, event.message));
         return h('details', { class: 'tool-row' }, h('summary', {}, 'Agent plan'), codeView(event.entries || event.plan || event, h));
-      }) : [h('div', { class: 'chat-empty' }, h('div', { class: 'empty-orbit', 'aria-hidden': 'true' }, '✦'), h('strong', {}, 'A new conversation is starting'), h('p', {}, 'Agent messages, tool activity, and requests will appear here.'))]));
+      })].filter(Boolean) : !session.loaded ? [h('div', { class: 'chat-empty', role: 'status' }, h('span', { class: 'spinner large', 'aria-hidden': 'true' }), h('strong', {}, 'Loading conversation…'))]
+        : [h('div', { class: 'chat-empty' }, h('div', { class: 'empty-orbit', 'aria-hidden': 'true' }, '✦'), h('strong', {}, 'A new conversation is starting'), h('p', {}, 'Agent messages, tool activity, and requests will appear here.'))]));
       if (focus?.key) {
         const next = Array.from(log.querySelectorAll('[data-chat-focus]')).find(node => node.dataset.chatFocus === focus.key);
         if (next && !next.disabled) { next.focus({ preventScroll: true }); if (typeof focus.start === 'number' && next.setSelectionRange && next.type !== 'number') next.setSelectionRange(focus.start, focus.end); }
@@ -395,7 +435,7 @@
       const changed = key !== currentKey;
       if (changed && currentKey) { const previous = sessions.get(currentKey); previous.draft = text.value; previous.scroll = log.scrollTop; }
       currentKey = key; card = nextCard; view = stateView(card);
-      if (!sessions.has(key)) sessions.set(key, { draft: '', scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false });
+      if (!sessions.has(key)) sessions.set(key, newSession());
       const session = sessions.get(key);
       if (changed) { text.value = session.draft; fit(); error.hidden = true; }
       banner.className = `session-banner state-${view.state}`;
@@ -408,7 +448,7 @@
         const button = h('button', { type: 'button', class: action === 'done' ? 'secondary finish-session' : 'secondary', onclick: () => post(action === 'continue' ? { type: 'message', text: 'continue' } : { type: action }) }, action === 'done' ? '✓ Mark done' : action === 'continue' ? 'Continue' : 'Interrupt turn');
         button.disabled = session.sending; return button;
       }));
-      const nextSignature = JSON.stringify([card.events, view.state]);
+      const nextSignature = `${session.version}|${session.loaded}|${view.state}`;
       if (changed || signature !== nextSignature) {
         signature = nextSignature;
         const savedScroll = session.scroll;
@@ -416,7 +456,31 @@
         if (changed) log.scrollTop = session.seen ? savedScroll : log.scrollHeight;
         session.seen = true;
       }
-    }, focus() { if (!text.disabled) text.focus(); } };
+    },
+    // Rows pushed by the server: a reset (the newest page, on open or reconnect) or changed/new rows.
+    rows(key, message) {
+      if (!sessions.has(key)) sessions.set(key, newSession());
+      const session = sessions.get(key);
+      if (message.reset) {
+        // On a reconnect, keep older rows the user already scrolled back to.
+        const first = message.rows[0]?.key, at = first ? session.rows.findIndex(row => row.key === first) : -1;
+        session.rows = at > 0 ? [...session.rows.slice(0, at), ...message.rows] : message.rows;
+        if (at <= 0) session.more = message.more;
+        session.truncated = !!message.truncated; session.loaded = true;
+      } else {
+        const index = new Map(session.rows.map((row, i) => [row.key, i]));
+        for (const row of message.rows) {
+          if (index.has(row.key)) session.rows[index.get(row.key)] = row;
+          else { index.set(row.key, session.rows.length); session.rows.push(row); }
+        }
+        // Older rows can change after paging (a long-running tool or unresolved permission).
+        // Patch them if loaded; never append unseen older rows at the bottom of the transcript.
+        for (const row of message.patches || []) if (index.has(row.key)) session.rows[index.get(row.key)] = row;
+      }
+      session.version++;
+      if (key === currentKey && card) this.render(card, key);
+    },
+    focus() { if (!text.disabled) text.focus(); } };
   }
 
   const api = { transcript, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish };

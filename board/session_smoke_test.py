@@ -46,7 +46,8 @@ def run(system):
         raise AssertionError(f"{system} expected {state}, last card: {card}")
 
     def latest(card, kind):
-        return next(e for e in reversed(card["events"]) if e["type"] == kind)
+        events = call("GET", f"/api/cards/{system}/{run_id}/events")["events"]
+        return next(e for e in reversed(events) if e["type"] == kind)
 
     wait("stuck")
     send(type="message", text="continue")

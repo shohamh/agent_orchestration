@@ -43,7 +43,7 @@ def main():
         if not current:
             time.sleep(2)
             continue
-        events = current["events"]
+        events = call("GET", f"/api/cards/{args.system}/{args.run_id}/events")["events"]
         for event in events[printed:]:
             kind = event["type"]
             if kind in ("user", "status", "approval", "approval_resolved", "question", "error") or (kind == "tool" and event.get("status") != "running"):

@@ -13,7 +13,7 @@ import { agentInput, runAgentSession } from "./trigger/agent-session.js";
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 type StepDef = { kind: "program" | "agent"; needs: string[]; retries: number; timeout_minutes: number } & Record<string, Json>;
 export type FlowDef = { name: string; description: string; input: Record<string, Json>; steps: Record<string, StepDef> };
-type StepPayload = { flowRunId: string; context: { input: Record<string, Json>; steps: Record<string, { output: Json }> } };
+type StepPayload = { flowRunId: string; context: { input: Record<string, Json>; steps: Record<string, { output: Json }>; _flow_restart?: Json } };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -48,7 +48,8 @@ export function defineFlow(def: FlowDef) {
     maxDuration: 86400,
     retry: { maxAttempts: 1 },
     run: async (params: Record<string, Json>, { ctx }) => {
-      const input = { ...def.input, ...(params ?? {}) };
+      const { flowRestart: _flow_restart, ...userInput } = params ?? {};
+      const input = { ...def.input, ...userInput };
       metadata.set("title", String(input.topic ?? input.goal ?? def.name).slice(0, 512));
       metadata.set("flow", def.name);
       const runIds: Record<string, string> = {};
@@ -58,7 +59,7 @@ export function defineFlow(def: FlowDef) {
         for (const id of ids) {
           const step = def.steps[id];
           if (runIds[id] || !step.needs.every((need) => need in outputs)) continue;
-          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])) };
+          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])), _flow_restart };
           const handle = await steps[id].trigger({ flowRunId: ctx.run.id, context }, { tags: [`flowrun:${ctx.run.id}`] });
           runIds[id] = handle.id;
           metadata.set("steps", runIds);

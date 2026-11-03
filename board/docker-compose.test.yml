@@ -1,0 +1,8 @@
+# Local integration/UI test copy. Never expose this password-free service beyond loopback.
+# docker compose -p agent-board-livetest -f board/docker-compose.yml -f board/docker-compose.test.yml --env-file board/.env up -d --build
+services:
+  board:
+    ports: !override
+      - "127.0.0.1:8092:8090"
+    environment:
+      BOARD_PASSWORD: ""

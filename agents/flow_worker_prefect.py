@@ -75,7 +75,8 @@ def build_flow(flow: Flow) -> Any:
     run_flow.__signature__ = inspect.Signature([
         inspect.Parameter(key, inspect.Parameter.KEYWORD_ONLY, default=value,
                           annotation=type(value) if value is not None else Any)
-        for key, value in flow.input.items()])
+        for key, value in flow.input.items()] + [
+        inspect.Parameter('flowRestart', inspect.Parameter.KEYWORD_ONLY, default=None, annotation=dict | None)])
     # serve() runs each flow run in a subprocess that re-imports the flow by module and name, so
     # it must be a module-level attribute (see the bottom of this file).
     run_flow.__name__ = run_flow.__qualname__ = attribute_name(flow)

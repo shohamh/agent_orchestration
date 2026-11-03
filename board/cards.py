@@ -3,6 +3,8 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from transcript import digest, last_text
+
 # Board columns, left to right.
 COLUMNS = ["scheduled", "queued", "running", "waiting", "done", "stopped"]
 
@@ -19,23 +21,22 @@ class Card:
     created_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
-    progress: list[str] = field(default_factory=list)  # intermediate results, oldest first
     output: Any = None
     error: str | None = None
     queue: dict[str, Any] = field(default_factory=dict)  # {"name", "ahead", "running", "limit", "paused"}
     steerable: bool = False
-    events: list[dict[str, Any]] = field(default_factory=list)
     session_state: str | None = None
     agent: str | None = None
+    last: str | None = None  # the latest message / log line, for the card face
+    version: str | None = None  # changes whenever the card's transcript or log does
+    flow: str | None = None  # the portable flow (flows/*.yaml) this run belongs to
+    backend_url: str | None = None
 
-    def apply_session_events(self, events: list[dict[str, Any]]) -> None:
+    def apply_session(self, session: Any) -> None:
         """Project the session status without hiding an engine failure/cancellation."""
-        self.events = [event for event in events if isinstance(event, dict)]
-        for event in self.events:
-            if event.get("type") == "status":
-                self.session_state = event.get("state")
-        self.progress = [str(e.get("text") or e.get("message") or e.get("state"))[:200]
-                         for e in self.events if e.get("type") in ("agent", "error")][-8:]
+        self.session_state = session.state
+        self.last = last_text(session.rows)
+        self.version = session.version
         if self.column == "done":
             self.session_state = "done"
         elif self.column == "stopped":
@@ -43,6 +44,10 @@ class Card:
         elif self.column not in ("queued", "scheduled") and self.session_state:
             waiting = {"approval", "question", "awaiting_review", "awaiting_input", "stuck"}
             self.column = "waiting" if self.session_state in waiting else "running"
+
+    def apply_lines(self, lines: list[str]) -> None:
+        self.last = lines[-1][:200] if lines else None
+        self.version = digest([len(lines), lines[-50:]])
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,6 +68,13 @@ class DagNode:
     finished_at: str | None = None
     output: Any = None
     error: str | None = None
+    step: str | None = None  # portable flows: the step id in the flow definition
+    kind: str | None = None  # portable flows: "agent" | "program"
+    agent: str | None = None
+    backend_url: str | None = None
+    restart_supported: bool = False
+    restart_reason: str | None = None
+    restart_mode: str | None = None
 
 
 @dataclass

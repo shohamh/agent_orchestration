@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from aiohttp.test_utils import TestClient, TestServer
 from cards import Card
 import server
+from transcript import Session
 from trigger_adapter import TriggerAdapter
 
 
@@ -72,15 +73,15 @@ class ProjectionTests(unittest.TestCase):
     def test_waiting_state_and_terminal_engine_precedence(self):
         for column, expected in [('running', 'waiting'), ('done', 'done'), ('stopped', 'stopped')]:
             card = Card('id', 'hatchet', 'demo', 'goal', 'agent-session', column, 'RAW')
-            card.apply_session_events([{'type': 'status', 'state': 'awaiting_review'}])
+            card.apply_session(Session([{'type': 'status', 'state': 'awaiting_review'}]))
             self.assertEqual(card.column, expected)
             self.assertEqual(card.session_state, 'done' if column == 'done' else 'error' if column == 'stopped' else 'awaiting_review')
 
     def test_status_projection_ignores_later_non_status_events(self):
         card = Card('id', 'trigger-dev', 'demo', 'goal', 'agent-session', 'waiting', 'WAITING')
-        card.apply_session_events([{'type': 'status', 'state': 'working'}, {'type': 'agent', 'text': 'hello'}])
+        card.apply_session(Session([{'type': 'status', 'state': 'working'}, {'type': 'agent', 'text': 'hello'}]))
         self.assertEqual((card.column, card.session_state), ('running', 'working'))
-        self.assertEqual(card.progress, ['hello'])
+        self.assertEqual(card.last, 'hello')
 
 
 class TriggerContracts(unittest.IsolatedAsyncioTestCase):
@@ -101,7 +102,9 @@ class TriggerContracts(unittest.IsolatedAsyncioTestCase):
         card, = await adapter.list_cards('demo')
         self.assertEqual((card.column, card.session_state, card.error), ('stopped', 'error', 'worker crashed'))
         self.assertEqual(card.agent, 'demo')
-        self.assertEqual(len(card.events), 2)
+        self.assertEqual(card.last, 'hello')
+        self.assertNotIn('events', card.to_json())
+        self.assertEqual(len((await adapter.events('run-1'))[1]), 2)
 
     async def test_production_rejects_native_session(self):
         with patch.dict('os.environ', {'TRIGGER_SECRET_KEY': 'test'}):
@@ -151,21 +154,27 @@ class HatchetContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_logs_become_events_without_leaking_evt_json_to_progress(self):
         from hatchet_adapter import HatchetAdapter, V1TaskStatus, V1WorkflowType
+        from logtail import TailCache
+        from transcript import Memo
         adapter = HatchetAdapter.__new__(HatchetAdapter)
-        adapter._final_progress = {}
-        async def progress(ref):
-            return ['worker started', 'EVT invalid', 'EVT {"type":"agent","text":"hello"}',
-                    'EVT {"type":"status","state":"approval"}']
-        adapter._progress = progress
-        summary = SimpleNamespace(workflow_run_external_id='run-1', status=V1TaskStatus.RUNNING,
+        adapter.tails, adapter.sessions, adapter._runs, adapter._final_dag = TailCache(unique_messages=True), Memo(), {}, {}
+        now = datetime.now(timezone.utc)
+        async def log_rows(ref, since=None):
+            lines = ['worker started', 'EVT invalid', 'EVT {"type":"agent","text":"hello"}',
+                     'EVT {"type":"status","state":"approval"}']
+            return [SimpleNamespace(created_at=now + timedelta(milliseconds=i), message=m) for i, m in enumerate(lines)]
+        adapter._log_rows = log_rows
+        summary = SimpleNamespace(workflow_run_external_id='run-1', status=V1TaskStatus.RUNNING, additional_metadata=None,
                                   is_evicted=False, workflow_name='agent-session', display_name='agent-session',
                                   input={'input': {'goal': 'fix', 'agent': 'demo'}}, created_at=datetime.now(timezone.utc),
                                   started_at=None, finished_at=None, output=None, error_message=None,
                                   type=V1WorkflowType.TASK, task_external_id='task-1')
         card = await adapter._card(summary, 'demo', {})
         self.assertEqual((card.column, card.session_state, card.agent), ('waiting', 'approval', 'demo'))
-        self.assertEqual(card.progress, ['hello'])
-        self.assertEqual(len(card.events), 2)
+        self.assertEqual(card.last, 'hello')
+        self.assertEqual(len((await adapter.events('run-1'))[1]), 2)
+        self.assertEqual(await adapter.run_lines('run-1'), ['worker started', 'EVT invalid', 'EVT {"type":"agent","text":"hello"}',
+                                                            'EVT {"type":"status","state":"approval"}'])
 
 
 if __name__ == '__main__':

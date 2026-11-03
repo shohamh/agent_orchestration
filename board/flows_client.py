@@ -21,11 +21,11 @@ class FlowHost:
         self._cache: tuple[float, dict[str, Any]] | None = None
         self._down_until = 0.0
 
-    async def _request(self, method: str, path: str, body: Any = None) -> Any:
+    async def _request(self, method: str, path: str, body: Any = None, timeout: float = 10) -> Any:
         if self._session is None:
             self._session = aiohttp.ClientSession(headers=self.headers, timeout=aiohttp.ClientTimeout(total=10, connect=2))
         try:
-            async with self._session.request(method, self.url + path, json=body) as response:
+            async with self._session.request(method, self.url + path, json=body, timeout=aiohttp.ClientTimeout(total=timeout, connect=2)) as response:
                 data = await response.json(content_type=None)
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"The flow host at {self.url} is not reachable ({exc.__class__.__name__}). "
@@ -63,6 +63,9 @@ class FlowHost:
     async def delete(self, name: str) -> None:
         self._cache = None
         await self._request("DELETE", f"/flows/{quote(name, safe='')}")
+
+    async def restart_node(self, system: str, run_id: str, ref: str) -> dict:
+        return await self._request('POST', f'/runs/{quote(system, safe="")}/{quote(run_id, safe="")}/nodes/{quote(ref, safe="")}/restart', timeout=90)
 
     async def close(self) -> None:
         if self._session:

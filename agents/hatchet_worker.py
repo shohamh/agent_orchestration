@@ -63,6 +63,8 @@ def build_task(hatchet: Any) -> Any:
 
         async def sink(event: dict) -> None:
             await ctx.aio_log("EVT " + json.dumps(event, ensure_ascii=False), raise_on_error=True)
+            # Wakes the board's live subscription; the transcript itself is read from the log.
+            await ctx.aio_put_stream(event.get("type") or "event")
 
         return await run_session(payload.model_dump(), inbox.receive, sink)
 
