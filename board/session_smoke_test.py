@@ -10,6 +10,8 @@ import sys
 import time
 import urllib.request
 
+import board_http
+
 BASE = "http://localhost:8090"
 
 
@@ -18,7 +20,7 @@ def call(method, path, body=None):
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with board_http.urlopen(req, timeout=30) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"{method} {path}: {exc.code} {exc.read().decode()[:1000]}") from exc

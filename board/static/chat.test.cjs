@@ -59,3 +59,45 @@ test('working and review states expose explicit actions without auto completion'
   assert.equal(chat.stateView({ session_state: 'working', column: 'stopped', error: 'Worker exited' }).terminal, true);
   assert.equal(chat.stateView({ session_state: 'done', column: 'done' }).terminal, true);
 });
+
+// Minimal element factory standing in for the page's el(): records tag, attributes and children.
+const fakeH = (tag, attrs = {}, ...children) => ({ tag, attrs, children: children.filter(c => c != null) });
+const textOf = node => typeof node === 'string' ? node : (node.children || []).map(textOf).join('');
+const find = (node, predicate, found = []) => {
+  if (node && typeof node === 'object') { if (predicate(node)) found.push(node); (node.children || []).forEach(c => find(c, predicate, found)); }
+  return found;
+};
+
+test('markdown renders formatting without ever producing raw HTML', () => {
+  const nodes = chat.markdown('2 + 2 = **4**\n\nUse `ls` and see [docs](https://example.com) <img src=x onerror=alert(1)>\n- one\n- two\n\n```json\n{"a":1}\n```', fakeH);
+  const tree = { children: nodes };
+  assert.equal(find(tree, n => n.tag === 'strong')[0].children[0], '4');
+  assert.equal(find(tree, n => n.tag === 'code')[0].children[0], 'ls');
+  assert.equal(find(tree, n => n.tag === 'a')[0].attrs.href, 'https://example.com');
+  assert.equal(find(tree, n => n.tag === 'li').length, 2);
+  assert.ok(find(tree, n => n.attrs?.class === 'json-view').length, 'json fence is highlighted');
+  // The HTML stays literal text inside a text node; no element is created from it.
+  assert.ok(textOf(tree).includes('<img src=x onerror=alert(1)>'));
+  assert.equal(find(tree, n => n.tag === 'img').length, 0);
+  assert.equal(chat.markdown('[x](javascript:alert(1))', fakeH).flatMap(p => find(p, n => n.tag === 'a')).length, 0);
+});
+
+test('json is pretty printed with token classes', () => {
+  const view = chat.jsonView({ path: 'C:\cart.py', n: 2, ok: true, none: null }, fakeH);
+  const classes = view.children.filter(c => typeof c === 'object').map(c => c.attrs.class);
+  for (const kind of ['json-key', 'json-string', 'json-number', 'json-boolean', 'json-null']) assert.ok(classes.includes(kind), kind);
+  assert.ok(textOf(view).includes('\n  "path"'), 'indented');
+});
+
+test('edits render as a line diff', () => {
+  const view = chat.diffView('def total(p):\n    return sum(p[:-1])', 'def total(p):\n    return sum(p)', fakeH);
+  assert.deepEqual(view.children.map(r => r.attrs.class), ['diff-ctx', 'diff-del', 'diff-add']);
+});
+
+test('tool rows preview their main parameter', () => {
+  const windowsPath = String.raw`C:\Users\me\AppData\Local\Temp\demo\cart.py`;
+  assert.equal(chat.toolPreview({ name: 'read', summary: 'read', detail: JSON.stringify({ filePath: windowsPath }) }), 'cart.py');
+  assert.equal(chat.toolPreview({ name: 'execute', detail: { command: 'python -m unittest -v' } }), 'python -m unittest -v');
+  assert.equal(chat.toolPreview({ name: 'edit', summary: windowsPath }), 'cart.py');
+  assert.equal(chat.toolPreview({ name: 'think' }), '');
+});

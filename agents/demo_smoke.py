@@ -13,7 +13,7 @@ from agentdriver.session import run_session
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", choices=["codex", "claude", "demo", "opencode", "omp", "pi"], default="demo")
+    parser.add_argument("--agent", choices=["codex", "claude", "demo", "opencode", "opencode2", "omp", "pi"], default="demo")
     parser.add_argument("--approve-demo", action="store_true")
     args = parser.parse_args()
     inbox = asyncio.Queue()

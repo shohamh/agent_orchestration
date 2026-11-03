@@ -22,6 +22,7 @@ from typing import Any
 
 from aiohttp import web
 
+import auth
 from cards import COLUMNS
 
 STATIC = Path(__file__).parent / "static"
@@ -42,6 +43,10 @@ def load_adapters() -> dict[str, Any]:
         from trigger_adapter import TriggerAdapter
 
         adapters["trigger-dev"] = TriggerAdapter(development=True)
+    if os.environ.get("PREFECT_API_URL"):
+        from prefect_adapter import PrefectAdapter
+
+        adapters["prefect"] = PrefectAdapter()
     return adapters
 
 
@@ -88,8 +93,8 @@ async def create_card(request: web.Request) -> web.Response:
     options = {}
     if kind == "agent-session":
         agent = body.get("agent", "codex")
-        if agent not in ("codex", "claude", "opencode", "omp", "pi", "demo"):
-            raise ValueError("agent must be codex, claude, opencode, omp, pi or demo")
+        if agent not in ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"):
+            raise ValueError("agent must be codex, claude, opencode, opencode2, omp, pi or demo")
         workspace = body.get("workspace", "")
         if not isinstance(workspace, str) or len(workspace) > 4096 or "\x00" in workspace:
             raise ValueError("workspace must be a path of at most 4096 characters")
@@ -203,10 +208,18 @@ async def close_adapters(app: web.Application) -> None:
             await adapter.close()
 
 
+async def revalidate_ui(request: web.Request, response: web.StreamResponse) -> None:
+    # Without Cache-Control, browsers heuristically reuse the UI files after the board is rebuilt.
+    if request.path == "/" or request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+
+
 def make_app() -> web.Application:
     app = web.Application(middlewares=[errors_as_json])
     app["adapters"] = load_adapters()
     app.on_cleanup.append(close_adapters)
+    app.on_response_prepare.append(revalidate_ui)
+    auth.install(app)
     app.router.add_get("/", index)
     app.router.add_get("/api/systems", systems)
     app.router.add_get("/api/boards/{system}/{board}/cards", list_cards)

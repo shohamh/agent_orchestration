@@ -15,6 +15,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      # Login (required before exposing the board beyond this PC): see .env.example
+      BOARD_PASSWORD: ${BOARD_PASSWORD:-}
+      BOARD_SECRET: ${BOARD_SECRET:-}
       # Hatchet (leave HATCHET_CLIENT_TOKEN empty to disable)
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_GRPC:-host.docker.internal:7077}
@@ -24,3 +27,5 @@ services:
       TRIGGER_SECRET_KEY: ${TRIGGER_SECRET_KEY:-}
       TRIGGER_DEV_SECRET_KEY: ${TRIGGER_DEV_SECRET_KEY:-}
       TRIGGER_API_URL: ${TRIGGER_URL:-http://host.docker.internal:8030}
+      # Prefect (leave empty to disable): the server's REST API
+      PREFECT_API_URL: ${PREFECT_API_URL-http://host.docker.internal:4200/api}

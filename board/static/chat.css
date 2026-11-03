@@ -79,3 +79,48 @@ aside.session-drawer { width: min(700px, 100vw); }
 @media (prefers-reduced-motion: reduce) { .state-dot { animation: none !important; } aside { transition: none; } }
 @media (prefers-color-scheme: dark) { :root { --chat-tint: #222b44; --chat-border: #354569; --chat-user: #354fac; } }
 @media (max-width: 500px) { .session-drawer .head { padding: 15px; } .session-banner { padding: 13px 15px; } .chat-log { padding: 20px 14px; } .chat-composer { padding: 13px 15px 16px; } .composer-hint { max-width: 145px; } .request-card { padding: 13px; } .simulation-badge { font-size: 8px; } }
+/* An answered permission collapses to its outcome so the conversation stays readable. */
+.approval-card.resolved { padding-top: 10px; padding-bottom: 10px; opacity: .82; }
+.approval-card.resolved .request-resolution { border-top: 0; margin-top: 4px; padding-top: 0; font-weight: 600; text-transform: none; }
+.tool-summary { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; margin-left: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+/* Phones: long goals would push the conversation below the fold; keep the title to two lines. */
+@media (max-width: 700px) { .session-drawer .head { padding: 14px 16px; } .session-drawer .head h3 { font-size: 15px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; } }
+
+/* ---- Rich agent output: Markdown, highlighted JSON, diffs, tool sections ---- */
+:root { --json-key: #8a3ffc; --json-string: #1a7f37; --json-number: #b35900; --json-literal: #0550ae;
+        --diff-add-bg: #e6ffec; --diff-add: #1a7f37; --diff-del-bg: #ffebe9; --diff-del: #cf222e; }
+@media (prefers-color-scheme: dark) {
+  :root { --json-key: #c6a0ff; --json-string: #7ee787; --json-number: #ffa657; --json-literal: #79c0ff;
+          --diff-add-bg: #12261a; --diff-add: #7ee787; --diff-del-bg: #2d1416; --diff-del: #ff8182; }
+}
+.message-text.markdown { white-space: normal; }
+.markdown > :first-child { margin-top: 0; } .markdown > :last-child { margin-bottom: 0; }
+.md-p { margin: 0 0 8px; white-space: pre-wrap; }
+.md-heading { font-weight: 700; margin: 10px 0 6px; }
+.md-list { margin: 0 0 8px; padding-left: 20px; } .md-list li { margin: 2px 0; }
+.md-code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; padding: 1px 5px; border-radius: 4px; background: var(--chat-tint); border: 1px solid var(--chat-border); }
+.markdown a { color: var(--accent); }
+.markdown pre { margin: 6px 0 10px; }
+pre.json-view, pre.diff-view { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto; max-height: 360px; overflow-y: auto; }
+.json-key { color: var(--json-key); } .json-string { color: var(--json-string); } .json-number { color: var(--json-number); }
+.json-boolean, .json-null { color: var(--json-literal); font-weight: 600; }
+pre.diff-view { padding: 6px 0; } .diff-view > div { padding: 0 10px; }
+.diff-add { background: var(--diff-add-bg); color: var(--diff-add); } .diff-del { background: var(--diff-del-bg); color: var(--diff-del); }
+.diff-ctx { color: var(--muted); }
+.approval-card > pre.diff-view { margin: 10px 0 4px; border-radius: 8px; }
+.tool-full-summary { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.tool-section { margin-top: 8px; } .tool-section-label { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+
+/* ---- Phones: keep the conversation large and the composer compact ---- */
+aside { top: var(--vv-top, 0); height: var(--vv-height, 100dvh); }
+@media (max-width: 700px) {
+  .session-banner { padding: 8px 14px; }
+  .session-banner p { display: none; }
+  .chat-log { padding: 14px 12px; gap: 12px; }
+  .chat-composer { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
+  .chat-composer textarea { grid-column: 1 / -1; min-height: 42px; max-height: 30vh; resize: none; }
+  .chat-composer .chat-error { grid-column: 1 / -1; }
+  .composer-bottom { grid-column: 2; grid-row: 3; margin: 0; }
+  .composer-hint { display: none; }
+  .session-actions { grid-column: 1; grid-row: 3; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; }
+}

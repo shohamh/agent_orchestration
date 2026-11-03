@@ -8,8 +8,15 @@
         if (messages.has(event.message_id)) messages.get(event.message_id).text += event.text || '';
         else { const row = { ...event, text: event.text || '' }; rows.push(row); messages.set(event.message_id, row); }
       } else if (event.type === 'tool') {
-        if (tools.has(event.id)) Object.assign(tools.get(event.id), event);
-        else { const row = { ...event }; rows.push(row); tools.set(event.id, row); }
+        // Agents send a tool's name/summary once and later updates without them (opencode's updates
+        // say only "tool"), so an update only replaces the fields it actually carries.
+        if (tools.has(event.id)) {
+          const row = tools.get(event.id);
+          for (const [key, value] of Object.entries(event)) {
+            const generic = key === 'name' && (!value || value === 'tool') && row.name;
+            if (value != null && value !== '' && !generic) row[key] = value;
+          }
+        } else { const row = { ...event }; rows.push(row); tools.set(event.id, row); }
       } else if (event.type === 'approval' || event.type === 'question') {
         const row = { ...event }; rows.push(row); requests.set(`${event.type}:${event.id}`, row);
       } else if (event.type === 'approval_resolved' || event.type === 'answer') {
@@ -18,6 +25,136 @@
       } else if (['user', 'agent', 'error', 'plan'].includes(event.type)) rows.push({ ...event });
     }
     return rows;
+  }
+
+  // One-line label for a collapsed tool row: file paths shrink to their file name.
+  function toolSummary(summary) {
+    const text = String(summary).split('\n')[0];
+    const path = text.match(/^[A-Za-z]?:?[\\/]?(?:[^\\/\s]+[\\/])+([^\\/]+)$/);
+    const short = path ? path[1] : text;
+    return short.length > 60 ? `${short.slice(0, 59)}…` : short;
+  }
+
+  // ---- Rich rendering. Everything is built from DOM nodes (never innerHTML), so agent output
+  // cannot inject markup; links are limited to http(s).
+
+  function parseJsonish(value) {
+    if (value && typeof value === 'object') return value;
+    if (typeof value !== 'string') return undefined;
+    const text = value.trim();
+    if (!/^[[{]/.test(text)) return undefined;
+    try { return JSON.parse(text); } catch { return undefined; }
+  }
+
+  const JSON_TOKEN = /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*")(\s*:)?|\b(true|false)\b|\b(null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+  function jsonView(value, h) {
+    const text = JSON.stringify(value, null, 2), nodes = [];
+    let last = 0, match;
+    JSON_TOKEN.lastIndex = 0;
+    while ((match = JSON_TOKEN.exec(text))) {
+      if (match.index > last) nodes.push(text.slice(last, match.index));
+      const kind = match[1] ? (match[2] ? 'key' : 'string') : match[3] ? 'boolean' : match[4] ? 'null' : 'number';
+      nodes.push(h('span', { class: `json-${kind}` }, match[1] || match[0]));
+      if (match[2]) nodes.push(match[2]);
+      last = JSON_TOKEN.lastIndex;
+    }
+    if (last < text.length) nodes.push(text.slice(last));
+    return h('pre', { class: 'json-view' }, ...nodes);
+  }
+
+  // Text that may be JSON: highlighted when it parses, plain otherwise.
+  function codeView(value, h) {
+    const parsed = parseJsonish(value);
+    return parsed !== undefined ? jsonView(parsed, h) : h('pre', {}, typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+  }
+
+  // Line diff (LCS) for edit requests; large inputs fall back to old/new blocks.
+  function diffView(before, after, h) {
+    const a = String(before ?? '').replace(/\r\n/g, '\n').split('\n'), b = String(after ?? '').replace(/\r\n/g, '\n').split('\n');
+    const rows = [];
+    if (a.length * b.length > 250000) {
+      a.forEach(line => rows.push(['del', line])); b.forEach(line => rows.push(['add', line]));
+    } else {
+      const lcs = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+      for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--)
+        lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < a.length || j < b.length) {
+        if (i < a.length && j < b.length && a[i] === b[j]) { rows.push(['ctx', a[i]]); i++; j++; }
+        // Removed lines before added ones, as unified diffs show a replaced line.
+        else if (i < a.length && (j >= b.length || lcs[i + 1][j] >= lcs[i][j + 1])) rows.push(['del', a[i++]]);
+        else rows.push(['add', b[j++]]);
+      }
+    }
+    const sign = { add: '+', del: '-', ctx: ' ' };
+    return h('pre', { class: 'diff-view' }, ...rows.map(([kind, line]) => h('div', { class: `diff-${kind}` }, `${sign[kind]} ${line}`)));
+  }
+
+  function editOf(input) {
+    if (!input || typeof input !== 'object') return null;
+    const before = input.oldText ?? input.old_string ?? input.oldString, after = input.newText ?? input.new_string ?? input.newString;
+    return typeof before === 'string' && typeof after === 'string' ? { path: input.path || input.filePath || input.file_path, before, after } : null;
+  }
+
+  // The parameter that says what a tool call is about: shown on its collapsed row.
+  const PREVIEW_KEYS = ['filePath', 'file_path', 'path', 'command', 'cmd', 'pattern', 'query', 'url', 'glob', 'description', 'prompt'];
+  function toolPreview(event) {
+    const name = String(event.name || '').toLowerCase();
+    if (event.summary && String(event.summary).toLowerCase() !== name) return toolSummary(event.summary);
+    const input = parseJsonish(event.detail);
+    if (input && typeof input === 'object') {
+      for (const key of PREVIEW_KEYS) {
+        const value = input[key];
+        if (typeof value === 'string' && value.trim()) return toolSummary(value);
+        if (Array.isArray(value) && value.length) return toolSummary(value.join(' '));
+      }
+    }
+    return '';
+  }
+
+  // Small Markdown subset for agent prose: code fences, headings, lists, paragraphs,
+  // `code`, **bold**, *italic* and [links](https://...).
+  const INLINE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[[^\]\n]+\]\((https?:\/\/[^)\s]+)\))|(\*[^*\s][^*\n]*\*)/g;
+  function inlineMarkdown(text, h) {
+    const nodes = [];
+    let last = 0, match;
+    INLINE.lastIndex = 0;
+    while ((match = INLINE.exec(text))) {
+      if (match.index > last) nodes.push(text.slice(last, match.index));
+      if (match[1]) nodes.push(h('code', { class: 'md-code' }, match[1].slice(1, -1)));
+      else if (match[2]) nodes.push(h('strong', {}, match[2].slice(2, -2)));
+      else if (match[3]) nodes.push(h('a', { href: match[4], target: '_blank', rel: 'noopener noreferrer' }, match[3].slice(1, match[3].indexOf(']('))));
+      else nodes.push(h('em', {}, match[5].slice(1, -1)));
+      last = INLINE.lastIndex;
+    }
+    if (last < text.length) nodes.push(text.slice(last));
+    return nodes;
+  }
+
+  function markdown(text, h) {
+    const lines = String(text || '').replace(/\r\n/g, '\n').split('\n'), out = [];
+    const isItem = line => /^\s*([-*+]|\d+[.)])\s+/.test(line);
+    for (let i = 0; i < lines.length;) {
+      const line = lines[i];
+      const fence = line.match(/^\s*```\s*([\w+-]*)\s*$/);
+      if (fence) {
+        const body = [];
+        for (i++; i < lines.length && !/^\s*```\s*$/.test(lines[i]); i++) body.push(lines[i]);
+        i++;
+        out.push(fence[1] === 'diff' ? h('pre', { class: 'diff-view' }, ...body.map(l => h('div', { class: l.startsWith('+') ? 'diff-add' : l.startsWith('-') ? 'diff-del' : 'diff-ctx' }, l))) : codeView(body.join('\n'), h));
+      } else if (!line.trim()) i++;
+      else if (/^#{1,4}\s/.test(line)) { out.push(h('div', { class: 'md-heading' }, ...inlineMarkdown(line.replace(/^#{1,4}\s+/, ''), h))); i++; }
+      else if (isItem(line)) {
+        const ordered = /^\s*\d/.test(line), items = [];
+        for (; i < lines.length && isItem(lines[i]); i++) items.push(h('li', {}, ...inlineMarkdown(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, ''), h)));
+        out.push(h(ordered ? 'ol' : 'ul', { class: 'md-list' }, ...items));
+      } else {
+        const para = [];
+        for (; i < lines.length && lines[i].trim() && !/^\s*```/.test(lines[i]) && !/^#{1,4}\s/.test(lines[i]) && !isItem(lines[i]); i++) para.push(lines[i]);
+        out.push(h('p', { class: 'md-p' }, ...inlineMarkdown(para.join('\n'), h)));
+      }
+    }
+    return out;
   }
 
   function choices(schema = {}) {
@@ -90,7 +227,7 @@
     const banner = h('div', { class: 'session-banner', role: 'status' });
     const log = h('div', { class: 'chat-log', role: 'log', 'aria-label': 'Session conversation', tabindex: '0' });
     const error = h('div', { class: 'chat-error', role: 'alert', hidden: '' });
-    const text = h('textarea', { rows: '3', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer' });
+    const text = h('textarea', { rows: '1', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer' });
     const send = h('button', { type: 'submit', class: 'primary' }, 'Send message');
     const actions = h('div', { class: 'session-actions' });
     const hint = h('span', { class: 'composer-hint' });
@@ -100,7 +237,11 @@
       if (!value || !view || view.terminal || sessions.get(key).sending) return;
       if (await post({ type: 'message', text: value }) && key === currentKey && text.value.trim() === value) { text.value = ''; sessions.get(key).draft = ''; }
     } }, text, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
-    text.addEventListener('input', () => { if (currentKey) sessions.get(currentKey).draft = text.value; });
+    // Grow with the text (up to the CSS max-height) instead of reserving rows on small screens.
+    const fit = () => { text.style.height = 'auto'; text.style.height = `${text.scrollHeight + 2}px`; };
+    text.addEventListener('input', () => { fit(); if (currentKey) sessions.get(currentKey).draft = text.value; });
+    // When the keyboard opens, keep the latest messages in view above the composer.
+    text.addEventListener('focus', () => setTimeout(() => { log.scrollTop = log.scrollHeight; }, 300));
     text.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); } });
     container.append(banner, log, form);
 
@@ -200,13 +341,16 @@
       log.replaceChildren(...(rows.length ? rows.map((event, index) => {
         if (event.type === 'user' || event.type === 'agent') return h('article', { class: `chat-message ${event.type}` },
           h('div', { class: 'message-label' }, event.type === 'user' ? 'You' : card.agent === 'demo' ? 'Demo agent · simulated' : card.agent || 'Agent', event.queued ? h('span', { class: 'queued-label' }, 'Queued for next turn') : null),
-          h('div', { class: 'message-text' }, event.text || '…'));
+          event.type === 'agent' ? h('div', { class: 'message-text markdown' }, ...markdown(event.text || '…', h)) : h('div', { class: 'message-text' }, event.text || '…'));
         if (event.type === 'tool') {
           const details = h('details', { class: `tool-row tool-${event.status || 'running'}` });
           details.open = session.expanded.has(event.id);
           details.addEventListener('toggle', () => { if (details.isConnected) { if (details.open) session.expanded.add(event.id); else session.expanded.delete(event.id); } });
-          details.append(h('summary', { 'data-chat-focus': `tool:${event.id}` }, h('span', { class: 'tool-mark', 'aria-hidden': 'true' }, event.status === 'ok' ? '✓' : event.status === 'error' ? '!' : '↻'), h('span', { class: 'tool-name' }, event.name || 'Tool'), h('span', { class: 'tool-status' }, event.status || 'running')),
-            event.summary ? h('p', {}, event.summary) : null, event.output ? h('pre', {}, typeof event.output === 'string' ? event.output : JSON.stringify(event.output, null, 2)) : null);
+          const preview = toolPreview(event), input = parseJsonish(event.detail), edit = editOf(input);
+          details.append(h('summary', { 'data-chat-focus': `tool:${event.id}` }, h('span', { class: 'tool-mark', 'aria-hidden': 'true' }, event.status === 'ok' ? '✓' : event.status === 'error' ? '!' : '↻'), h('span', { class: 'tool-name' }, event.name || 'Tool'), preview ? h('span', { class: 'tool-summary' }, preview) : null, h('span', { class: 'tool-status' }, event.status || 'running')),
+            event.summary && String(event.summary).toLowerCase() !== String(event.name || '').toLowerCase() ? h('p', { class: 'tool-full-summary' }, event.summary) : null,
+            edit ? diffView(edit.before, edit.after, h) : event.detail ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Input'), codeView(event.detail, h)) : null,
+            event.output ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Output'), codeView(event.output, h)) : null);
           return details;
         }
         if (event.type === 'question') return renderQuestion(event, session);
@@ -218,18 +362,26 @@
             button.disabled = !!resolved || view.terminal || session.pending.has(requestKey); controls.append(button);
           }
           let detail = null;
-          if (event.detail) {
-            detail = h('details', { class: 'permission-detail' }, h('summary', { 'data-chat-focus': `detail:${event.id}` }, 'View request details'), h('pre', {}, typeof event.detail === 'string' ? event.detail : JSON.stringify(event.detail, null, 2)));
+          const requested = parseJsonish(event.detail), edit = editOf(requested);
+          if (edit && !resolved) {
+            // An edit is what is being approved: show the change itself, not its JSON.
+            detail = diffView(edit.before, edit.after, h);
+          } else if (event.detail) {
+            detail = h('details', { class: 'permission-detail' }, h('summary', { 'data-chat-focus': `detail:${event.id}` }, edit ? 'View change' : 'View request details'),
+              edit ? diffView(edit.before, edit.after, h) : codeView(event.detail, h));
             detail.open = !!session.details[event.id];
             detail.addEventListener('toggle', () => { if (detail.isConnected) session.details[event.id] = detail.open; });
           }
-          return h('article', { class: 'request-card approval-card' }, h('div', { class: 'request-heading' }, h('span', { class: 'request-icon', 'aria-hidden': 'true' }, '◇'), h('strong', {}, resolved ? 'Permission resolved' : 'Permission to proceed')),
+          const chosen = (event.options || []).find(option => option.id === resolved?.optionId);
+          const outcome = resolved?.decision === 'cancelled' ? 'Cancelled · the turn was interrupted'
+            : chosen ? `${chosen.kind?.startsWith('reject') ? '✕' : '✓'} ${chosen.label}` : resolved?.decision || 'Response sent';
+          return h('article', { class: `request-card approval-card${resolved ? ' resolved' : ''}` }, h('div', { class: 'request-heading' }, h('span', { class: 'request-icon', 'aria-hidden': 'true' }, '◇'), h('strong', {}, resolved ? 'Permission' : 'Permission to proceed')),
             h('p', { class: 'request-summary' }, event.summary || event.tool || 'The agent is requesting permission.'),
             detail,
-            controls, resolved ? h('div', { class: 'request-resolution' }, event.resolved?.decision === 'cancelled' ? 'Cancelled · the turn was interrupted' : event.resolved?.decision || 'Response sent') : null);
+            resolved ? h('div', { class: 'request-resolution' }, outcome) : controls);
         }
         if (event.type === 'error') return h('div', { class: 'transcript-error', role: 'note' }, h('strong', {}, event.will_retry ? 'Retrying after an error' : 'Agent error'), h('div', {}, event.message));
-        return h('details', { class: 'tool-row' }, h('summary', {}, 'Agent plan'), h('pre', {}, typeof event.plan === 'string' ? event.plan : JSON.stringify(event.entries || event.plan || event, null, 2)));
+        return h('details', { class: 'tool-row' }, h('summary', {}, 'Agent plan'), codeView(event.entries || event.plan || event, h));
       }) : [h('div', { class: 'chat-empty' }, h('div', { class: 'empty-orbit', 'aria-hidden': 'true' }, '✦'), h('strong', {}, 'A new conversation is starting'), h('p', {}, 'Agent messages, tool activity, and requests will appear here.'))]));
       if (focus?.key) {
         const next = Array.from(log.querySelectorAll('[data-chat-focus]')).find(node => node.dataset.chatFocus === focus.key);
@@ -245,9 +397,10 @@
       currentKey = key; card = nextCard; view = stateView(card);
       if (!sessions.has(key)) sessions.set(key, { draft: '', scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false });
       const session = sessions.get(key);
-      if (changed) { text.value = session.draft; error.hidden = true; }
+      if (changed) { text.value = session.draft; fit(); error.hidden = true; }
       banner.className = `session-banner state-${view.state}`;
-      banner.replaceChildren(h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null);
+      // replaceChildren() would render a null child as the text "null".
+      banner.replaceChildren(...[h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null].filter(Boolean));
       text.disabled = view.terminal; send.disabled = view.terminal || session.sending;
       text.placeholder = view.terminal ? 'This session has ended.' : 'Give the agent a direction…';
       hint.textContent = view.terminal ? 'Session closed' : view.queued ? 'Queued for next turn · Ctrl/⌘ Enter to send' : 'Ctrl/⌘ Enter to send';
@@ -266,7 +419,7 @@
     }, focus() { if (!text.disabled) text.focus(); } };
   }
 
-  const api = { transcript, choices, answers, stateView, mount };
+  const api = { transcript, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AgentChat = api;
 })(typeof window !== 'undefined' ? window : globalThis);

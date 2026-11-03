@@ -22,14 +22,25 @@ only `agent-session`; the Docker example workers continue serving the original e
 Hatchet SDK 1.44.0 has two Unix signal assumptions; `hatchet_windows.py` adapts this worker only.
 The shim checks the exact SDK version and must be reviewed when upgrading it.
 
+For Prefect, in another terminal (serves `agent-session/local`; PREFECT_API_URL defaults to localhost:4200):
+
+```powershell
+agents/.venv/Scripts/python.exe -u agents/prefect_worker.py
+```
+
 In another terminal:
 
 ```powershell
 cd trigger.dev/example-project
-npm.cmd run dev
+.\scripts\dev-worker.ps1
 ```
 
-Use the existing `self-hosted` Trigger CLI profile. Its `.env` needs:
+The script authenticates with `TRIGGER_API_URL` / `TRIGGER_ACCESS_TOKEN` from the ignored
+`.env.local` (a personal access token), so no interactive `trigger login` is needed. It pipes the
+CLI's output to keep it non-interactive: trigger.dev 4.8.3 ignores `--skip-mcp-install` (it reads
+`options.skipMCPInstall`), and its first-run MCP question would otherwise block the worker.
+Run it in a terminal that stays open. A worker whose console is closed keeps picking up runs and
+crashes each one at startup (`0xC0000142`). The project's `.env` needs:
 
 ```dotenv
 TRIGGER_STREAM_URL=http://localhost:8030
@@ -69,10 +80,24 @@ Select **Hatchet** or **Trigger.dev · local**. The existing production tab reta
 - **Demo (simulated)** exercises permissions and questions without a model or file changes.
   Codex and Claude are real agents; their availability depends on their CLI login/provider.
 
-Claude was signed out when checked on 2026-11-02: run `claude`, then `/login`, to enable its live demo.
-Codex was exercised against a disposable failing-test project. opencode and omp entry points are
-supported but a provider-authenticated live session has not been verified for them.
-There is no separate opencode-v2 integration: the prior session did not establish what that name meant.
+## Agents (all through ACP)
+
+| Agent | Entry point | Live status on this PC (2026-11-02) |
+|---|---|---|
+| opencode v2 | `@opencode/cli` 2.2.5, installed in `agents/node_modules` (`opencode acp`). Your global v1 `opencode` is unchanged. | **Verified end-to-end through Hatchet**: 3 approvals, fix, review, follow-up, done. Uses v2's shared background service. |
+| opencode | `opencode acp` (native) | **Verified end-to-end through Trigger.dev, Prefect and the chat UI.** It fixed the test, asked 3–4 permissions per run, went to review, took a follow-up, and was marked done. |
+| Codex | `@agentclientprotocol/codex-acp` | Verified through Trigger.dev earlier: 2 approvals, fix, review. Then the account hit its usage limit. The Hatchet session shows that as a real **Stuck** after 3 retries. |
+| Claude Code | `@agentclientprotocol/claude-agent-acp` | The CLI login has expired: run `claude`, then `/login`. |
+| omp | `omp acp` (native) | Starts. It asked a real question through the question form ("spend a saved Codex rate-limit reset?"), because it uses the same rate-limited Codex account. |
+| pi | `pi-acp` adapter (spawns `pi --mode rpc`) | Starts and takes turns, but pi's configured models fail: `nim/z-ai/glm-5.1` returns 410 and `groq` returns 404. Pick a working model in pi. pi-acp reports such failed turns as finished, so the board shows **review** rather than **stuck**. |
+
+Permission prompts come from each agent's own permission settings, not from ACP:
+
+- **opencode** allows every tool by default. Board sessions pass `OPENCODE_CONFIG_CONTENT` with
+  `edit`, `bash` and `webfetch` set to `ask`. This is merged over your own opencode config, which
+  stays unchanged.
+- **Codex** starts in its read-only mode, so edits and commands ask.
+- **Claude Code** uses its default permission mode.
 
 ## Verify
 

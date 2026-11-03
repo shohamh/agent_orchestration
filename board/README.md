@@ -1,6 +1,6 @@
 # Agent Board
 
-A small kanban board over **Hatchet** and **Trigger.dev** runs. Each board is a named lane of agent work. You can:
+A small kanban board over **Hatchet**, **Trigger.dev** and **Prefect** runs. Each board is a named lane of agent work. You can:
 - see cards move through **Scheduled → Queued → Running → Waiting → Done / Stopped**
 - see how many runs are ahead of a queued card
 - watch intermediate results while a card runs
@@ -29,32 +29,59 @@ python smoke_test.py    # optional: end-to-end check against every configured ba
 
 The board reaches both stacks through their published ports (`host.docker.internal`). It doesn't join their networks, so either stack can be down. A backend is enabled only when its credential is set.
 
+## Login and phone access (Tailscale Funnel)
+
+The board can start coding agents that run commands on this PC. Set `BOARD_PASSWORD` in the ignored
+`board/.env` (one was generated there) before exposing it beyond this PC. With a password:
+
+- Every page and API route needs the login. Pages redirect to `/login` and the API returns 401.
+  There is deliberately **no localhost exception**: Tailscale Serve/Funnel deliver traffic from
+  127.0.0.1.
+- The session cookie is signed and expires after 30 days. It is `HttpOnly` and `SameSite=Strict`,
+  and `Secure` on the `*.ts.net` HTTPS name. Failed logins are slowed down.
+- Changing `BOARD_PASSWORD` or `BOARD_SECRET` signs everyone out.
+- The scripts in this folder sign in automatically using `board/.env` (`board_http.py`).
+
+On phones the backends become one scrollable tab row and the columns stack, with empty ones
+collapsed. The chat drawer goes full-screen.
+
+Published on this PC with:
+
+```powershell
+tailscale funnel --bg --https=10000 http://127.0.0.1:8090   # https://<machine>.<tailnet>.ts.net:10000
+tailscale funnel --https=10000 off                           # stop publishing
+```
+
+Funnel makes the URL reachable from **the whole internet**, protected only by the password. If only
+your own devices need access, use `tailscale serve --bg --https=10000 http://127.0.0.1:8090`
+instead (tailnet only; the phone needs the Tailscale app).
+
 ## How it maps onto each system
 
-| | Hatchet | Trigger.dev |
-|---|---|---|
-| Board | `additional_metadata.board` on the run | Run tag `board:<name>` |
-| Card title | Run input `goal` | Run metadata `title` (set when the card is created) |
-| Intermediate results | The run's persisted logs (`ctx.log` in the agent). History survives board restarts. | Run metadata `transcript` (`metadata.set` in the agent), returned by the runs list |
-| Waiting column | Durable task evicted while it waits (holds no worker slot) | `WAITING` (waitpoints, `wait.*`) |
-| Queued position | Queued runs of the same task, oldest first | Same, plus queue `running` / `concurrencyLimit` |
-| Steer / stop | Event `agent:steer` scoped to the run id | `steer` input stream on the run |
-| Cancel | `runs.cancel` | `POST /api/v2/runs/{id}/cancel` |
-| Replay | Re-runs **the same run**. A durable task replays from its recorded event history, so it can finish again almost instantly. | Creates **a new run** on the same board |
-| Pause a queue | Not available. Hold work with concurrency limits or by stopping the worker. | **Pause / Resume queue** button |
+| | Hatchet | Trigger.dev | Prefect |
+|---|---|---|---|
+| Board | `additional_metadata.board` on the run | Run tag `board:<name>` | Flow run tag `board:<name>` |
+| Card title | Run input `goal` | Run metadata `title` (set when the card is created) | Parameter `goal` / `topic` |
+| Intermediate results | The run's persisted logs (`ctx.log` in the agent). History survives board restarts. | Run metadata `transcript` (`metadata.set` in the agent), returned by the runs list | The flow run's persisted logs |
+| Waiting column | Durable task evicted while it waits (holds no worker slot) | `WAITING` (waitpoints, `wait.*`) | `PAUSED` (`pause_flow_run`) |
+| Queued position | Queued runs of the same task, oldest first | Same, plus queue `running` / `concurrencyLimit` | Scheduled/pending runs of the same deployment |
+| Steer / stop | Event `agent:steer` scoped to the run id | `steer` input stream on the run | Flow run input (`send_input` key format), read with `receive_input` |
+| Cancel | `runs.cancel` | `POST /api/v2/runs/{id}/cancel` | Set state `CANCELLING` |
+| Replay | Re-runs **the same run**. A durable task replays from its recorded event history, so it can finish again almost instantly. | Creates **a new run** on the same board | Creates **a new run** with the same parameters and tags |
+| Pause a queue | Not available. Hold work with concurrency limits or by stopping the worker. | **Pause / Resume queue** button | Not for served deployments (work-pool queues can be paused in Prefect's UI) |
 
 ## DAG / run graph view
 
 Click a card to get a live graph of its run in the drawer. Click any node to see its status, timing, output, error and logs. The graph refreshes every 2 seconds while the run is active. Create a **Research report (multi-step DAG)** card to try it.
 
-The two systems produce different kinds of graph:
+Each system produces a different kind of graph:
 
-| | Hatchet | Trigger.dev |
-|---|---|---|
-| What is drawn | The **declared DAG**: tasks and their `parents=[...]` dependencies, which the engine enforces | The **call tree**: the parent run and the child runs it started in code |
-| Ordering | Exact (it's the dependency graph) | Solid lines mean "started child run". Dashed lines mean "ran after", inferred from timing: a child was created only after its earlier siblings finished. For the research report this reconstructs the same graph Hatchet declares. |
-| Not-yet-started steps | Shown in grey as soon as the run exists | Only appear once the code triggers them |
-| Node logs | That task's `ctx.log` lines | That child run's `metadata.transcript` |
+| | Hatchet | Trigger.dev | Prefect |
+|---|---|---|---|
+| What is drawn | The **declared DAG**: tasks and their `parents=[...]` dependencies, which the engine enforces | The **call tree**: the parent run and the child runs it started in code | The **task runs** and which earlier task's result each one received (`task_inputs`) |
+| Ordering | Exact (it's the dependency graph) | Solid lines mean "started child run". Dashed lines mean "ran after", inferred from timing: a child was created only after its earlier siblings finished. For the research report this reconstructs the same graph Hatchet declares. | Exact data flow as it happened. For the research report it matches Hatchet's graph. |
+| Not-yet-started steps | Shown in grey as soon as the run exists | Only appear once the code triggers them | Only appear once the flow submits them |
+| Node logs | That task's `ctx.log` lines | That child run's `metadata.transcript` | That task run's logs |
 
 A single-task run, such as the steerable agent, has nothing to draw, so the graph section is hidden for it.
 

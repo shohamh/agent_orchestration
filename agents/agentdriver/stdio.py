@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import os
 import sys
+import traceback
 
 from acp.stdio import stdio_streams
 
@@ -31,4 +33,16 @@ async def main():
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    asyncio.run(main())
+    code = 0
+    try:
+        asyncio.run(main())
+    except BaseException:
+        traceback.print_exc()
+        code = 1
+    finally:
+        # On Windows the ACP stdio reader is a daemon thread blocked in stdin.read(); normal interpreter
+        # shutdown then aborts on its buffer lock ("could not acquire lock for <stdin>", exit 0xC0000005)
+        # and turns a finished session into a failed run. Flush and leave without finalization.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)

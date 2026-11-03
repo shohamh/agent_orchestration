@@ -36,8 +36,9 @@ decision; it does not perform a hardware operation. Run `steerable-agent/example
 `turns: 100` to inspect live logs and try **Cancel**. Redirect/stop messages are exercised
 by `demo.py` using `send_input`; the stock UI's Resume form applies to paused runs.
 
-The custom Agent Board at port 8090 currently supports Hatchet and Trigger.dev only.
-Prefect's built-in run graph and forms are available directly on port 4200.
+The Agent Board (port 8090, `../board`) also supports Prefect. Cards are flow runs tagged `board:<name>`; its graph shows
+task runs with the data dependencies Prefect recorded; steering uses flow run inputs; and coding-agent
+sessions run in `../agents/prefect_worker.py` on this PC. Prefect's own UI stays on port 4200.
 
 ## The requirements
 

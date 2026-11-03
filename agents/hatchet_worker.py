@@ -52,7 +52,7 @@ def build_task(hatchet: Any) -> Any:
 
     class SessionInput(BaseModel):
         goal: str = Field(min_length=1, max_length=20000)
-        agent: Literal["codex", "claude", "opencode", "omp", "pi", "demo"] = "codex"
+        agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"] = "codex"
         workspace: str = Field(default="", max_length=4096)
         simulateFailures: int = Field(default=0, ge=0, le=20)
 

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>Agent Board</title>
 <style>
   :root {
@@ -44,7 +44,7 @@
   .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--chip); color: var(--muted); }
   .chip.running { color: var(--accent); } .chip.waiting { color: var(--warn); } .chip.done { color: var(--ok); } .chip.stopped { color: var(--danger); }
   .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 0; }
-  aside { position: fixed; top: 0; right: 0; width: min(520px, 100vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .15s ease; z-index: 3; display: flex; flex-direction: column; }
+  aside { position: fixed; top: 0; right: 0; width: min(520px, 100vw); height: 100vh; height: 100dvh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .15s ease; z-index: 3; display: flex; flex-direction: column; }
   aside.open { transform: none; }
   aside .head { padding: 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: start; }
   aside .head h3 { margin: 0; font-size: 16px; flex: 1; overflow-wrap: anywhere; }
@@ -78,7 +78,18 @@
   .legend svg { vertical-align: middle; margin-right: 4px; }
   .node-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
   .node-panel h5 { margin: 0; font-size: 14px; }
-  @media (max-width: 700px) { main { grid-template-columns: repeat(6, 80vw); } }
+  /* Phones: one scrollable row of backend tabs, and the columns stacked top to bottom with empty
+     ones collapsed to their header, so cards that need you are visible without sideways swiping. */
+  @media (max-width: 700px) {
+    header { gap: 8px; padding: 10px 12px; }
+    .tabs { flex: 1 1 100%; overflow-x: auto; scrollbar-width: none; }
+    .tabs button { white-space: nowrap; flex: 0 0 auto; }
+    main { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; min-height: 0; overflow-x: visible; }
+    .column { min-height: 0; }
+    .column.is-empty { padding: 4px 8px; }
+    .column.is-empty h2 { margin: 4px 0; }
+    .column.is-empty .empty { display: none; }
+  }
 </style>
 <link rel="stylesheet" href="/static/chat.css">
 </head>
@@ -144,7 +155,7 @@
     </label>
     <label><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
     <div class="session-fields" id="n-session-fields">
-      <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
+      <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
       <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
       <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
       <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
@@ -161,8 +172,24 @@
 
 <script src="/static/chat.js"></script>
 <script>
+  // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
+  // Chrome honours interactive-widget=resizes-content above; this covers browsers that only
+  // shrink the visual viewport (e.g. iOS Safari), where the composer would sit under the keyboard.
+  (function () {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const sync = () => {
+      document.documentElement.style.setProperty("--vv-height", `${vv.height}px`);
+      document.documentElement.style.setProperty("--vv-top", `${vv.offsetTop}px`);
+    };
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    sync();
+  })();
+</script>
+<script>
 const COLUMN_LABELS = { scheduled: "Scheduled", queued: "Queued", running: "Running", waiting: "Waiting", done: "Done", stopped: "Stopped / failed" };
-const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev · production", "trigger-dev": "Trigger.dev · local" };
+const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev · production", "trigger-dev": "Trigger.dev · local", prefect: "Prefect" };
 const $ = (id) => document.getElementById(id);
 const store = {
   get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
@@ -229,7 +256,7 @@ function renderHeader() {
 function renderBoard() {
   $("columns").replaceChildren(...columns.map((col) => {
     const inCol = cards.filter((c) => c.column === col);
-    return el("section", { class: "column", "aria-label": COLUMN_LABELS[col] },
+    return el("section", { class: inCol.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col] },
       el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, String(inCol.length))),
       ...(inCol.length ? inCol.map(renderCard) : [el("div", { class: "empty" }, "—")]));
   }));
@@ -274,7 +301,7 @@ function renderDrawer() {
   $("d-queue").textContent = queueText(card);
   const pause = $("d-pause");
   pause.hidden = system !== "trigger" || !card.queue?.id;
-  $("d-queue-section").hidden = !queueText(card) && pause.hidden;
+  $("d-queue-section").hidden = session || (!queueText(card) && pause.hidden);
   pause.textContent = card.queue?.paused ? "Resume queue" : "Pause queue";
   const progress = card.progress?.length ? card.progress.map((line) => el("li", {}, line)) : [el("li", {}, "No intermediate results yet")];
   const list = $("d-progress");
@@ -334,7 +361,7 @@ function renderDag() {
   const section = $("d-dag-section");
   if (!dag || dag.nodes.length < 2) { section.hidden = true; return; }
   section.hidden = false;
-  $("d-dag-title").textContent = dag.model === "declared" ? "DAG (declared dependencies)" : "Run graph (child runs)";
+  $("d-dag-title").textContent = { declared: "DAG (declared dependencies)", dataflow: "Task graph (data dependencies)" }[dag.model] || "Run graph (child runs)";
   const { pos, width, height } = layoutDag(dag);
   const visible = dag.edges.filter((e) => pos[e.from] && pos[e.to]);
   // Spread each node's outgoing (bottom) and incoming (top) edge ends across its width, ordered
@@ -383,7 +410,9 @@ function renderLegend() {
   const line = (kind) => svg("svg", { width: 26, height: 8 }, svg("path", { class: `dag-edge ${kind}`, d: "M1,4 L25,4" }));
   const items = dag.model === "declared"
     ? [[line("depends"), "depends on (enforced by the engine)"]]
-    : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]];
+    : dag.model === "dataflow"
+      ? [[line("depends"), "passed its result to (recorded by Prefect)"]]
+      : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]];
   $("d-legend").replaceChildren(...items.map(([icon, text]) => el("span", {}, icon, text)),
     el("span", {}, "Click a node for its output and logs"));
 }

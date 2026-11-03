@@ -11,6 +11,8 @@ import json
 import sys
 import time
 import urllib.request
+
+import board_http
 from typing import Any
 
 BASE = "http://localhost:8090"
@@ -23,7 +25,7 @@ def call(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with board_http.urlopen(request, timeout=60) as response:
         return json.loads(response.read())
 
 

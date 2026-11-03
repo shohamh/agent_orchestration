@@ -41,6 +41,13 @@ ADAPTERS = {
 
 
 def agent_command(agent: str) -> list[str]:
+    if agent == "opencode2":
+        # opencode v2 (npm @opencode/cli), installed locally so it doesn't replace the global v1
+        # `opencode`. (`acp` rejects --standalone, so it uses v2's shared background service.)
+        binary = ROOT / "node_modules" / "@opencode" / "cli" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode")
+        if not binary.is_file():
+            raise RuntimeError("opencode v2 is missing. Run npm ci in agents/.")
+        return [str(binary), "acp"]
     if agent in ADAPTERS:
         scope, package = ADAPTERS[agent]
         adapter = ROOT / "node_modules" / Path(*filter(None, (scope, package))) / "dist" / "index.js"
@@ -77,6 +84,7 @@ class AcpEngine:
         self.process = None
         self.session_id = None
         self.message_id = None
+        self.tools: dict[str, dict[str, str]] = {}  # toolCallId -> last known {name, summary}
         self.stderr_task = None
         self.stderr_tail = ""
         self.process_tree = None
@@ -89,6 +97,11 @@ class AcpEngine:
         if self.session.config["agent"] == "codex":
             env.setdefault("INITIAL_AGENT_MODE", "read-only")
             env.setdefault("NO_BROWSER", "1")
+        if self.session.config["agent"] in ("opencode", "opencode2"):
+            # opencode allows every tool by default, so a board session would never see a permission
+            # prompt. Ask for edits, shell and web fetches; merged over the user's own opencode config.
+            env.setdefault("OPENCODE_CONFIG_CONTENT", json.dumps(
+                {"permission": {"edit": "ask", "bash": "ask", "webfetch": "ask"}}))
         self.context = acp.spawn_agent_process(self, command[0], *command[1:],
             cwd=self.session.config["workspace"], env=env, use_unstable_protocol=True)
         self.connection, self.process = await self.context.__aenter__()
@@ -157,9 +170,15 @@ class AcpEngine:
         elif kind in ("tool_call", "tool_call_update"):
             self.message_id = None
             status = {"completed": "ok", "failed": "error"}.get(data.get("status"), "running")
-            fields = {"id": data["toolCallId"], "status": status}
+            tool_id = data["toolCallId"]
+            # Updates often omit kind/title. Repeat the last known ones on every event: Trigger.dev's
+            # rolling transcript may keep only a tool's latest event, which must still say what it was.
+            known = self.tools.setdefault(tool_id, {"name": "tool", "summary": ""})
+            if data.get("kind") and data["kind"] != "other":
+                known["name"] = data["kind"]
             if data.get("title"):
-                fields.update(name=data.get("kind", "tool"), summary=data["title"])
+                known["summary"] = data["title"]
+            fields = {"id": tool_id, "status": status, **{k: v for k, v in known.items() if v}}
             if data.get("content"):
                 fields["output"] = text_content(data["content"])
             elif data.get("rawOutput") is not None:
