@@ -56,6 +56,14 @@ aside.session-drawer { width: min(700px, 100vw); }
 .question-fields:disabled { opacity: .65; }
 .question-fields:disabled .question-option { cursor: default; }
 .chat-composer { flex-shrink: 0; padding: 16px 24px 20px; border-top: 1px solid var(--line); background: var(--panel); box-shadow: 0 -5px 20px #24305c04; }
+.agent-settings { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.agent-settings:empty { display: none; }
+.agent-settings label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 10px; }
+.agent-settings select { max-width: 190px; font-size: 12px; }
+.context-usage { color: var(--muted); font-size: 11px; margin-left: auto; }
+.chat-attachments { display: flex; flex-wrap: wrap; gap: 5px; }
+.attachment-chip { margin-top: 6px; padding: 3px 6px; background: var(--chip); border-radius: 5px; font-size: 11px; }
+.attachment-chip button { border: 0; background: transparent; cursor: pointer; margin-left: 4px; }
 .command-suggestions { max-height: 220px; overflow-y: auto; margin-bottom: 8px; border: 1px solid var(--chat-border); border-radius: 9px; background: var(--panel); }
 .command-suggestions button { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 0; text-align: left; background: transparent; color: var(--ink); cursor: pointer; }
 .command-suggestions button[aria-selected="true"], .command-suggestions button:hover { background: var(--chat-tint); }

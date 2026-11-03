@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { existsSync } from "node:fs";
 import { metadata, streams, task } from "@trigger.dev/sdk";
 
-type SessionConfig = { goal: string; agent: string; workspace?: string; simulateFailures?: number };
+type SessionConfig = { goal: string; agent: string; workspace?: string; simulateFailures?: number; resumeSessionId?: string };
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 type SessionEvent = Record<string, Json>;
 type Runtime = {
@@ -14,7 +14,7 @@ type Runtime = {
   root?: string;
   python?: string;
   subscribe: (handler: (data: object) => void) => () => void;
-  publish: (events: SessionEvent[], dropped: number, commands?: Json[]) => Promise<void>;
+  publish: (events: SessionEvent[], dropped: number, commands?: Json[], acpState?: SessionEvent) => Promise<void>;
   /** Python module to run (default agentdriver.stdio; flow steps use flowkit.stdio). */
   module?: string;
 };
@@ -66,11 +66,12 @@ export async function runAgentSession(payload: SessionConfig | Record<string, Js
   const events: SessionEvent[] = [];
   let previousEvent: SessionEvent | undefined;
   let commands: Json[] | undefined;
+  let acpState: SessionEvent | undefined;
   let result: SessionEvent | undefined; // flowkit.stdio's final {"type": "result", "output"}
   let dropped = 0, stderr = "", inputError: Error | undefined;
   const trimEvents = () => {
     // Reserve metadata space for the persistent command snapshot and the title.
-    const budget = Math.min(24 * 1024, 29 * 1024 - Buffer.byteLength(JSON.stringify(commands ?? []), "utf8"));
+    const budget = Math.min(24 * 1024, 29 * 1024 - Buffer.byteLength(JSON.stringify([commands ?? [], acpState ?? {}]), "utf8"));
     while (events.length && (events.length > 200 || Buffer.byteLength(JSON.stringify(events), "utf8") > budget)) {
       events.shift(); dropped++;
     }
@@ -101,14 +102,15 @@ export async function runAgentSession(payload: SessionConfig | Record<string, Js
       const event: SessionEvent = JSON.parse(line);
       if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string") throw new Error("Invalid agent event JSON");
       if (event.type === "result") { result = event; continue; }
-      if (event.type === "commands" && Array.isArray(event.commands)) {
-        commands = event.commands;
+      if ((event.type === "commands" && Array.isArray(event.commands)) || event.type === "acp_state") {
+        if (event.type === "commands" && Array.isArray(event.commands)) commands = event.commands;
+        else acpState = event;
         previousEvent = event;
         trimEvents();
-        await runtime.publish(events, dropped, commands);
+        await runtime.publish(events, dropped, commands, acpState);
         continue;
       }
-      if (Buffer.byteLength(line, "utf8") + 2 > 29 * 1024 - Buffer.byteLength(JSON.stringify(commands ?? []), "utf8"))
+      if (Buffer.byteLength(line, "utf8") + 2 > 29 * 1024 - Buffer.byteLength(JSON.stringify([commands ?? [], acpState ?? {}]), "utf8"))
         throw new Error("Agent event exceeds the transcript space available alongside commands");
       const last = events.at(-1);
       if (event.type === "agent" && typeof event.message_id === "string" && typeof event.text === "string" &&
@@ -130,12 +132,12 @@ export async function runAgentSession(payload: SessionConfig | Record<string, Js
       } else events.push(event);
       previousEvent = event;
       trimEvents();
-      await runtime.publish(events, dropped, commands);
+      await runtime.publish(events, dropped, commands, acpState);
     }
     const code = await exited;
     if (aborted) throw new Error("Agent session aborted");
     if (code !== 0) throw new Error(`Native agent exited (${code}): ${stderr || inputError?.message || "no stderr"}`);
-    await runtime.publish(events, dropped, commands);
+    await runtime.publish(events, dropped, commands, acpState);
     return { agent: (payload as Record<string, Json>).agent, eventsDropped: dropped, eventCount: events.length, output: result?.output };
   } finally {
     unsubscribe();
@@ -158,10 +160,11 @@ export const agentSession = task({
       environment: ctx.environment.type,
       signal,
       subscribe: (handler) => { const subscription = agentInput.on(handler); return () => subscription.off(); },
-      publish: async (events, dropped, commands) => {
+      publish: async (events, dropped, commands, acpState) => {
         metadata.set("events", events);
         metadata.set("eventsDropped", dropped);
         if (commands !== undefined) metadata.set("commands", commands);
+        if (acpState !== undefined) metadata.set("acpState", acpState);
         await metadata.flush();
       },
     });

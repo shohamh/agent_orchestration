@@ -9,9 +9,10 @@
   }
   function transcript(events) {
     const rows = [], messages = new Map(), tools = new Map(), requests = new Map();
-    let commands = null;
+    let commands = null, acpState = null;
     for (const event of events || []) {
       if (event.type === 'commands') commands = { ...event };
+      else if (event.type === 'acp_state') acpState = { ...event };
       else if (event.type === 'agent' && event.message_id) {
         if (messages.has(event.message_id)) messages.get(event.message_id).text += event.text || '';
         else { const row = { ...event, text: event.text || '' }; rows.push(row); messages.set(event.message_id, row); }
@@ -33,6 +34,7 @@
       } else if (['user', 'agent', 'error', 'plan'].includes(event.type)) rows.push({ ...event });
     }
     if (commands) rows.unshift(commands);
+    if (acpState) rows.unshift(acpState);
     return rows;
   }
 
@@ -241,15 +243,27 @@
     const text = h('textarea', { rows: '1', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer', role: 'combobox', 'aria-autocomplete': 'list', 'aria-controls': menuId, 'aria-expanded': 'false' });
     const send = h('button', { type: 'submit', class: 'primary' }, 'Send message');
     const actions = h('div', { class: 'session-actions' });
+    const settings = h('div', { class: 'agent-settings', 'aria-label': 'Agent settings' });
+    const attachmentInput = h('input', { type: 'file', multiple: '', 'aria-label': 'Attach images or files' });
+    const attachments = h('div', { class: 'chat-attachments' });
     const hint = h('span', { class: 'composer-hint' });
     const suggestions = h('div', { id: menuId, class: 'command-suggestions', role: 'listbox', 'aria-label': 'Slash commands', hidden: '' });
     let selected = 0, matches = [], dismissed = false;
     const form = h('form', { class: 'chat-composer', onsubmit: async event => {
       event.preventDefault();
-      const value = text.value.trim(), key = currentKey;
-      if (!value || !view || view.terminal || sessions.get(key).sending) return;
-      if (await post({ type: 'message', text: value }) && key === currentKey && text.value.trim() === value) { text.value = ''; sessions.get(key).draft = ''; renderCommands(); fit(); }
-    } }, suggestions, text, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
+      const value = text.value.trim(), key = currentKey, session = sessions.get(key), files = session.files;
+      if ((!value && !files.length) || !view || view.terminal || session.sending) return;
+      try {
+        const encoded = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+          const reader = new FileReader(); reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+          reader.onload = () => resolve({ name: file.name, mimeType: file.type || 'application/octet-stream', data: String(reader.result).split(',')[1] });
+          reader.readAsDataURL(file);
+        })));
+        if (key !== currentKey) return;
+        const message = encoded.length ? { type: 'message', text: value, attachments: encoded } : { type: 'message', text: value };
+        if (await post(message) && key === currentKey && text.value.trim() === value) { text.value = ''; session.draft = ''; session.files = []; attachmentInput.value = ''; renderAttachments(); renderCommands(); fit(); }
+      } catch (failure) { error.textContent = failure.message; error.hidden = false; }
+    } }, settings, suggestions, text, attachments, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
     // Grow with the text (up to the CSS max-height) instead of reserving rows on small screens.
     const fit = () => { text.style.height = 'auto'; text.style.height = `${text.scrollHeight + 2}px`; };
     function chooseCommand(command) {
@@ -286,7 +300,7 @@
     log.addEventListener('scroll', () => { if (log.scrollTop < 120) loadOlder(); });
 
     function newSession() {
-      return { draft: '', commands: [], scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false,
+      return { draft: '', files: [], commands: [], acpState: {}, scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false,
         rows: [], loaded: false, more: false, truncated: false, loading: false, olderError: null, version: 0 };
     }
 
@@ -340,6 +354,54 @@
         if (key === currentKey) { send.disabled = view.terminal; actions.querySelectorAll('button').forEach(button => { button.disabled = view.terminal; }); renderRows(); }
       }
     }
+
+    function renderSettings(session) {
+      const state = session.acpState || {}, controls = [];
+      const options = state.configOptions || [];
+      for (const option of options) {
+        if (!option.id || !['select', 'boolean'].includes(option.type)) continue;
+        const select = h('select', { 'aria-label': option.name || option.id });
+        const values = option.type === 'boolean' ? [{ value: 'true', name: 'On' }, { value: 'false', name: 'Off' }]
+          : (option.options || []).flatMap(item => item.options || [item]);
+        for (const item of values) select.append(h('option', { value: String(item.value) }, item.name || String(item.value)));
+        select.value = String(option.currentValue); select.disabled = view.terminal || session.sending;
+        select.addEventListener('change', () => post({ type: 'config', id: option.id, value: option.type === 'boolean' ? select.value === 'true' : select.value }));
+        controls.push(h('label', {}, h('span', {}, option.name || option.id), select));
+      }
+      if (!options.some(option => option.category === 'mode') && state.modes?.availableModes?.length) {
+        const select = h('select', { 'aria-label': 'Agent mode' });
+        for (const mode of state.modes.availableModes) select.append(h('option', { value: mode.id }, mode.name || mode.id));
+        select.value = state.modes.currentModeId; select.disabled = view.terminal || session.sending;
+        select.addEventListener('change', () => post({ type: 'mode', id: select.value }));
+        controls.push(h('label', {}, h('span', {}, 'Agent mode'), select));
+      }
+      if (state.usage && state.usage.size > 0) {
+        const usage = state.usage, percentage = Math.min(100, Math.round(100 * usage.used / usage.size));
+        controls.push(h('span', { class: 'context-usage', title: `${usage.used} of ${usage.size} tokens` },
+          `Context ${percentage}%`, usage.cost ? ` · ${usage.cost.amount} ${usage.cost.currency}` : ''));
+      }
+      if (state.capabilities?.loadSession && state.sessionId) controls.push(h('span', { class: 'context-usage', title: 'Use this ID with the same agent and workspace to resume' }, `Session: ${state.sessionId}`));
+      const promptCaps = state.capabilities?.promptCapabilities || {};
+      if (promptCaps.image || promptCaps.embeddedContext) {
+        attachmentInput.accept = promptCaps.embeddedContext ? '' : 'image/*';
+        attachmentInput.disabled = view.terminal || session.sending;
+        controls.push(h('label', {}, h('span', {}, 'Attach · 96 KiB total'), attachmentInput));
+      }
+      settings.replaceChildren(...controls);
+    }
+
+    function renderAttachments() {
+      const session = currentKey && sessions.get(currentKey);
+      attachments.replaceChildren(...(session?.files || []).map((file, i) => h('span', { class: 'attachment-chip' }, file.name,
+        h('button', { type: 'button', 'aria-label': `Remove ${file.name}`, onclick: () => { session.files.splice(i, 1); renderAttachments(); } }, '×'))));
+    }
+    attachmentInput.addEventListener('change', () => {
+      const session = sessions.get(currentKey), files = [...attachmentInput.files], caps = session.acpState.capabilities?.promptCapabilities || {};
+      if (files.length > 5 || files.reduce((sum, file) => sum + file.size, 0) > 96 * 1024 || files.some(file => file.type.startsWith('image/') ? !caps.image : !caps.embeddedContext)) {
+        error.textContent = 'Choose up to five supported files, with a combined size of at most 96 KiB.'; error.hidden = false;
+      } else { session.files = files; error.hidden = true; renderAttachments(); }
+      attachmentInput.value = '';
+    });
 
     function questionSchema(event) {
       if (event.schema) return event.schema;
@@ -418,7 +480,8 @@
       log.replaceChildren(...(rows.length ? [olderIndicator(session), ...rows.map((event, index) => {
         if (event.type === 'user' || event.type === 'agent') return h('article', { class: `chat-message ${event.type}` },
           h('div', { class: 'message-label' }, event.type === 'user' ? 'You' : card.agent === 'demo' ? 'Demo agent · simulated' : card.agent || 'Agent', event.queued ? h('span', { class: 'queued-label' }, 'Queued for next turn') : null),
-          event.type === 'agent' ? h('div', { class: 'message-text markdown' }, ...markdown(event.text || '…', h)) : h('div', { class: 'message-text' }, event.text || '…'));
+          event.type === 'agent' ? h('div', { class: 'message-text markdown' }, ...markdown(event.text || '…', h)) : h('div', { class: 'message-text' }, event.text || '',
+            ...(event.attachments || []).map(file => h('div', { class: 'message-attachment' }, `📎 ${file.name}`))));
         if (event.type === 'tool') {
           const details = h('details', { class: `tool-row tool-${event.status || 'running'}` });
           details.open = session.expanded.has(event.id);
@@ -427,7 +490,12 @@
           details.append(h('summary', { 'data-chat-focus': `tool:${event.id}` }, h('span', { class: 'tool-mark', 'aria-hidden': 'true' }, event.status === 'ok' ? '✓' : event.status === 'error' ? '!' : '↻'), h('span', { class: 'tool-name' }, event.name || 'Tool'), preview ? h('span', { class: 'tool-summary' }, preview) : null, h('span', { class: 'tool-status' }, event.status || 'running')),
             event.summary && String(event.summary).toLowerCase() !== String(event.name || '').toLowerCase() ? h('p', { class: 'tool-full-summary' }, event.summary) : null,
             edit ? diffView(edit.before, edit.after, h) : event.detail ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Input'), codeView(event.detail, h)) : null,
-            event.output ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Output'), codeView(event.output, h)) : null);
+            event.output ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Output'), codeView(event.output, h)) : null,
+            ...(event.content || []).map(item => item.type === 'diff'
+              ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, item.path || 'Changes'), diffView(item.oldText || '', item.newText || '', h))
+              : item.type === 'terminal' ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Terminal output'),
+                  codeView(session.rows.find(row => row.id === `terminal:${item.terminalId}`)?.output || 'Waiting for output…', h))
+              : item.content?.type === 'text' ? h('div', { class: 'tool-section' }, codeView(item.content.text, h)) : null).filter(Boolean));
           return details;
         }
         if (event.type === 'question') return renderQuestion(event, session);
@@ -481,6 +549,8 @@
       banner.replaceChildren(...[h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null].filter(Boolean));
       text.disabled = view.terminal; send.disabled = view.terminal || session.sending;
       renderCommands();
+      renderSettings(session);
+      renderAttachments();
       text.placeholder = view.terminal ? 'This session has ended.' : 'Give the agent a direction…';
       hint.textContent = view.terminal ? 'Session closed' : view.queued ? 'Queued for next turn · Ctrl/⌘ Enter to send' : 'Ctrl/⌘ Enter to send';
       actions.replaceChildren(...view.actions.map(action => {
@@ -501,9 +571,12 @@
       if (!sessions.has(key)) sessions.set(key, newSession());
       const session = sessions.get(key);
       const commandRow = [...(message.rows || []), ...(message.patches || [])].find(row => row.type === 'commands');
+      const stateRow = [...(message.rows || []), ...(message.patches || [])].find(row => row.type === 'acp_state');
       if (commandRow) session.commands = commandRow.commands || [];
       else if (message.reset) session.commands = [];
-      message = { ...message, rows: (message.rows || []).filter(row => row.type !== 'commands'), patches: (message.patches || []).filter(row => row.type !== 'commands') };
+      if (stateRow) session.acpState = stateRow;
+      else if (message.reset) session.acpState = {};
+      message = { ...message, rows: (message.rows || []).filter(row => !['commands', 'acp_state'].includes(row.type)), patches: (message.patches || []).filter(row => !['commands', 'acp_state'].includes(row.type)) };
       if (message.reset) {
         // On a reconnect, keep older rows the user already scrolled back to.
         const first = message.rows[0]?.key, at = first ? session.rows.findIndex(row => row.key === first) : -1;

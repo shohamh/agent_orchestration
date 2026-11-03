@@ -14,7 +14,7 @@ const chat = require('./chat.js');
 
 // Rows with the same keys the server's transcript.coalesce gives them.
 function rowsOf(events) {
-  return chat.transcript(events).map(row => ({ ...row, key: row.type === 'commands' ? 'commands' : row.type === 'agent' && row.message_id ? `m:${row.message_id}`
+  return chat.transcript(events).map(row => ({ ...row, key: row.type === 'acp_state' ? 'acp_state' : row.type === 'commands' ? 'commands' : row.type === 'agent' && row.message_id ? `m:${row.message_id}`
     : row.type === 'tool' ? `t:${row.id}` : row.type === 'approval' ? `a:${row.id}` : row.type === 'question' ? `q:${row.id}` : `e:${JSON.stringify(row)}` }));
 }
 
@@ -23,6 +23,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
   assert.ok(fs.existsSync(chromePath), 'Set CHROME_PATH to a Chromium browser');
   const posts = [], errors = [];
   const events = [
+    { type: 'acp_state', capabilities: { promptCapabilities: { image: true, embeddedContext: true } }, usage: { used: 40, size: 100 }, configOptions: [{ id: 'permissions', name: 'Permission mode', type: 'select', category: 'mode', currentValue: 'ask', options: [{ value: 'ask', name: 'Ask' }, { value: 'auto', name: 'Automatic' }] }] },
     { type: 'commands', commands: [{ name: 'test', description: 'Run tests', input: { hint: 'path' } }, { name: 'plan', description: 'Plan work' }] },
     { type: 'user', seq: 1, text: 'Fix the test' },
     { type: 'agent', seq: 2, message_id: 'm', text: 'I will ' },
@@ -78,7 +79,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
         streams.add(stream); request.on('close', () => streams.delete(stream));
         send(stream, { type: 'feed', live: true });
         send(stream, { type: 'cards', reset: true, cards: cardsOf(stream) });
-        if (stream.node === 'agent-ref') send(stream, { type: 'node-rows', card: 'flow1', node: 'agent-ref', state: 'question', reset: true, rows: rowsOf(events.slice(0, 8)), more: false });
+        if (stream.node === 'agent-ref') send(stream, { type: 'node-rows', card: 'flow1', node: 'agent-ref', state: 'question', reset: true, rows: rowsOf(events.slice(0, 9)), more: false });
         else if (stream.node === 'program-ref') send(stream, { type: 'node-lines', card: 'flow1', node: 'program-ref', reset: true, start: 1500, lines: longLines.slice(1500), more: true });
         else if (stream.card === 'long1') send(stream, { type: 'rows', card: 'long1', reset: true, rows: longRows.slice(-100), more: true });
         else if (stream.card === 'logs1') send(stream, { type: 'lines', card: 'logs1', reset: true, start: 1500, lines: longLines.slice(1500), more: true });
@@ -135,6 +136,13 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     await waitFor('document.querySelector(".card")');
     await evaluate('document.querySelector(".card").click()');
     await waitFor('document.querySelector(".question-card")');
+    assert.equal(await evaluate('document.querySelector(".context-usage").textContent'), 'Context 40%');
+    await evaluate(`document.querySelector('[aria-label="Permission mode"]').value = 'auto'; document.querySelector('[aria-label="Permission mode"]').dispatchEvent(new Event('change'))`);
+    for (let i = 0; i < 50 && !posts.some(p => p.body.type === 'config'); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(posts.some(p => p.body.type === 'config' && p.body.id === 'permissions' && p.body.value === 'auto'));
+    await evaluate(`{ const input = document.querySelector('[aria-label="Attach images or files"]'); const transfer = new DataTransfer(); transfer.items.add(new File(['hello'], 'note.txt', { type: 'text/plain' })); input.files = transfer.files; input.dispatchEvent(new Event('change')); }`);
+    assert.ok(await evaluate(`document.querySelector('.attachment-chip').textContent.includes('note.txt')`));
+    await evaluate(`document.querySelector('[aria-label="Remove note.txt"]').click()`);
     await evaluate(`document.querySelector('[aria-label="Message to agent"]').value = '/'; document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new Event('input'))`);
     assert.equal(await evaluate('document.querySelectorAll(".command-suggestions button").length'), 2);
     await evaluate(`document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);

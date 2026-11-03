@@ -13,6 +13,10 @@ from .events import Emitter, Sink
 WAITING = {"awaiting_review", "awaiting_input", "stuck"}
 
 
+class InputRejected(ValueError):
+    """The agent cannot accept this message; retrying or reconnecting would not help."""
+
+
 class Session:
     def __init__(self, config: dict, receive: Callable[[], Awaitable[dict]], sink: Sink):
         self.config, self.receive = config, receive
@@ -125,12 +129,23 @@ class Session:
         while True:
             message = await self.receive()
             kind = message.get("type")
-            if kind == "message" and str(message.get("text", "")).strip():
-                text = str(message["text"]).strip()
-                await self.emit("user", text=text, queued=self.state not in WAITING)
-                await self.messages.put(text)
+            if kind == "message" and (str(message.get("text", "")).strip() or message.get("attachments")):
+                text = str(message.get("text", "")).strip()
+                attachments = message.get("attachments") or []
+                await self.emit("user", text=text, attachments=[{"name": a['name'], "mimeType": a['mimeType']} for a in attachments], queued=self.state not in WAITING)
+                await self.messages.put({"text": text, "attachments": attachments} if attachments else text)
             elif kind in ("approval", "answer"):
                 await self._resolve(message)
+            elif kind in ("config", "mode"):
+                try:
+                    if not self.engine:
+                        raise ValueError("Agent session is not ready yet")
+                    if kind == "config":
+                        await self.engine.set_option(message["id"], message["value"])
+                    else:
+                        await self.engine.set_mode(message["id"])
+                except Exception as exc:
+                    await self.emit("error", message=f"Could not change agent setting: {exc}", will_retry=False)
             elif kind == "interrupt":
                 self.interrupted = True
                 self.cancel_event.set()
@@ -172,13 +187,15 @@ class Session:
         if self.engine is None:
             self.engine = self.engine_factory()
             await self.engine.start()
-            if self.connections:
+            if self.connections and not getattr(self.engine, 'resumed', False):
                 # A failed transport loses the provider's in-memory conversation. Restore user intent.
                 context = json.dumps(self.history, ensure_ascii=False)
                 if len(context) > 48000:
                     context = "[Earlier conversation omitted]\n" + context[-48000:]
-                text = ("The agent connection restarted. Continue the existing task; files may already contain earlier work.\n"
-                        f"Original task: {self.config['goal']}\nConversation so far:\n{context}\nLatest instruction: {text}")
+                latest = text.get('text', '') if isinstance(text, dict) else text
+                restored = ("The agent connection restarted. Continue the existing task; files may already contain earlier work.\n"
+                            f"Original task: {self.config['goal']}\nConversation so far:\n{context}\nLatest instruction: {latest}")
+                text = {**text, 'text': restored} if isinstance(text, dict) else restored
             self.connections += 1
         if self.failures:
             self.failures -= 1
@@ -205,7 +222,7 @@ class Session:
                     break
                 self.interrupted = False
                 self.cancel_event.clear()
-                self.history.append({"role": "user", "text": text})
+                self.history.append({"role": "user", "text": text.get('text', '') if isinstance(text, dict) else text})
                 max_attempts = 3
                 for attempt in range(1, max_attempts + 1):
                     if self.interrupted or self.finishing:
@@ -236,6 +253,10 @@ class Session:
                             raise
                         await self._close_engine()
                         await self.status("awaiting_input", reason="Interrupted. The agent connection will restart on your next message.")
+                        break
+                    except InputRejected as exc:
+                        await self.emit("error", message=str(exc), will_retry=False)
+                        await self.status("awaiting_input", reason="Message not sent. Change it and try again.")
                         break
                     except Exception as exc:
                         if pump.done():

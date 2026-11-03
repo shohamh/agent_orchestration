@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agentdriver.session import Session
+from agentdriver.session import InputRejected, Session
 
 
 class FakeEngine:
@@ -69,6 +69,23 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(self.task, 3)
         self.assertEqual(result['state'], 'done')
         self.assertEqual(self.engine.calls, ['fix it', 'continue'])
+
+    async def test_rejected_input_is_reported_without_retry_or_reconnect(self):
+        await self.state('awaiting_review')
+        original = self.engine.prompt
+        async def reject(text):
+            self.engine.calls.append(text)
+            raise InputRejected('This agent does not support image attachments')
+        self.engine.prompt = reject
+        attachment = {'name': 'a.png', 'mimeType': 'image/png', 'data': 'aGk='}
+        await self.inputs.put({'type': 'message', 'text': 'look', 'attachments': [attachment]})
+        await self.state('awaiting_input')
+        self.assertEqual(len(self.engine.calls), 2)
+        self.assertIs(self.session.engine, self.engine)
+        self.assertTrue(any(e['type'] == 'error' and not e['will_retry'] for e in self.events))
+        self.engine.prompt = original
+        await self.inputs.put({'type': 'message', 'text': 'without it'})
+        await self.state('awaiting_review')
 
     async def test_retry_exhaustion_waits_for_continue(self):
         self.engine.failures = 3

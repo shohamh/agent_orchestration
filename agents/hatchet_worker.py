@@ -55,6 +55,7 @@ def build_task(hatchet: Any) -> Any:
         agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"] = "codex"
         workspace: str = Field(default="", max_length=4096)
         simulateFailures: int = Field(default=0, ge=0, le=20)
+        resumeSessionId: str = Field(default="", max_length=512)
 
     @hatchet.task(name="agent-session", input_validator=SessionInput, retries=0,
                   execution_timeout=timedelta(hours=24))

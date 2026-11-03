@@ -8,6 +8,14 @@ Choose **Coding agent session**, an agent, and a prompt. Leave Workspace blank t
 temporary Python project with a failing test, or enter an existing absolute directory on the worker PC.
 The default demo prompt asks the agent to fix that test. Agents run with your local CLI login and tools.
 
+The chat shows the model, mode, permission and other configuration choices advertised by the
+agent, along with context usage and cost when provided. Type `/` for advertised commands.
+Supported agents can receive image and file attachments (up to five, 96 KiB total). ACP terminal
+commands require confirmation and run within the session workspace; their output is shown live.
+To resume a session after a restart, copy its ACP session ID from the chat and supply it when
+creating a session with the same agent and workspace. Loading depends on agent support; if it
+is unavailable, a transport retry reconstructs recent conversation context instead.
+
 ## Start the local workers (Windows / PowerShell)
 
 From the repository root:

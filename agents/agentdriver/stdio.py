@@ -43,6 +43,7 @@ if __name__ == "__main__":
         # On Windows the ACP stdio reader is a daemon thread blocked in stdin.read(); normal interpreter
         # shutdown then aborts on its buffer lock ("could not acquire lock for <stdin>", exit 0xC0000005)
         # and turns a finished session into a failed run. Flush and leave without finalization.
-        sys.stdout.flush()
+        if not sys.stdout.closed:
+            sys.stdout.flush()
         sys.stderr.flush()
         os._exit(code)

@@ -18,12 +18,17 @@ for line in sys.stdin:
     method = req.get('method')
     if method == 'initialize':
         assert req['params']['clientCapabilities']['elicitation']['form'] == {}
-        result = {'protocolVersion': 1, 'agentCapabilities': {}}
+        result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True}}
     elif method == 'session/new':
         send({'method': 'session/update', 'params': {'sessionId': 'test-session',
             'update': {'sessionUpdate': 'available_commands_update', 'availableCommands': [
                 {'name': 'test', 'description': 'Run tests', 'input': {'hint': 'path'}}]}}})
         result = {'sessionId': 'test-session'}
+    elif method == 'session/load':
+        assert req['params']['sessionId'] == 'test-session'
+        send({'method': 'session/update', 'params': {'sessionId': 'test-session',
+            'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'Past response'}}}})
+        result = {}
     elif method == 'session/prompt':
         permission = ask('permission', 'session/request_permission', {
             'sessionId': 'test-session', 'toolCall': {'toolCallId': 'tool-1', 'title': 'Run tests', 'kind': 'execute'},

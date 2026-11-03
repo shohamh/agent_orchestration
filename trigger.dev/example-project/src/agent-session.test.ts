@@ -72,15 +72,16 @@ test("bridge bounds UTF-8 transcript metadata and reports trimmed history", asyn
 });
 
 test("command snapshot survives the rolling transcript", async () => {
-  const root = await fixture(`import json\ninput()\nprint(json.dumps({'type':'commands','commands':[{'name':'review','description':'Review'}]}),flush=True)\nfor i in range(240): print(json.dumps({'type':'user','text':str(i)}),flush=True)\n`);
-  let commands: unknown;
+  const root = await fixture(`import json\ninput()\nprint(json.dumps({'type':'commands','commands':[{'name':'review','description':'Review'}]}),flush=True)\nprint(json.dumps({'type':'acp_state','usage':{'used':3,'size':10}}),flush=True)\nfor i in range(240): print(json.dumps({'type':'user','text':str(i)}),flush=True)\n`);
+  let commands: unknown, state: unknown;
   try {
     await runAgentSession({ goal: "history", agent: "demo" }, {
       environment: "DEVELOPMENT", signal: new AbortController().signal, root,
       python: process.env.AGENT_PYTHON!, subscribe: () => () => {},
-      publish: async (_events, _dropped, latestCommands) => { commands = latestCommands; },
+      publish: async (_events, _dropped, latestCommands, latestState) => { commands = latestCommands; state = latestState; },
     });
     assert.deepEqual(commands, [{ name: 'review', description: 'Review' }]);
+    assert.deepEqual(state, { type: 'acp_state', usage: { used: 3, size: 10 } });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

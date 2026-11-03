@@ -32,10 +32,11 @@ export function defineFlow(def: FlowDef) {
         environment: ctx.environment.type,
         signal,
         subscribe: (handler) => { const subscription = agentInput.on(handler); return () => subscription.off(); },
-        publish: async (events, dropped, commands) => {
+        publish: async (events, dropped, commands, acpState) => {
           metadata.set("events", events);
           metadata.set("eventsDropped", dropped);
           if (commands !== undefined) metadata.set("commands", commands);
+          if (acpState !== undefined) metadata.set("acpState", acpState);
           await metadata.flush();
         },
       });

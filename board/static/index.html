@@ -174,6 +174,7 @@
     <div class="session-fields" id="n-session-fields">
       <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
       <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
+      <label>Resume ACP session ID <input id="n-resume" placeholder="Optional"><small>Use the same agent and workspace as the original session. The agent must support loading sessions.</small></label>
       <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
       <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
     </div>
@@ -895,7 +896,7 @@ $("new-form").addEventListener("submit", async (e) => {
     ? { kind: "flow", flow: kind.slice(5), execution: launchExecution, input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
         n.tagName === "SELECT" ? n.value === "true" : n.type === "number" ? Number(n.value) : n.value])) }
     : kind === "agent-session"
-    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), simulateFailures: Number($("n-failures").value) }
+    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), resumeSessionId: $("n-resume").value.trim(), simulateFailures: Number($("n-failures").value) }
     : { kind, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) };
   $("n-create").disabled = true;
   try {

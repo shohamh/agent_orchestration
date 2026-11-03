@@ -54,7 +54,7 @@ def build_flow() -> Any:
     @flow(name="agent-session", retries=0, log_prints=False, persist_result=False)
     async def agent_session(goal: str,
                             agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"] = "codex",
-                            workspace: str = "", simulateFailures: int = 0) -> dict:
+                            workspace: str = "", simulateFailures: int = 0, resumeSessionId: str = "") -> dict:
         logger = get_run_logger()
         async with get_client() as client:
             inbox = InputInbox(client, flow_run.get_id())
@@ -62,7 +62,7 @@ def build_flow() -> Any:
             async def sink(event: dict) -> None:
                 logger.info("EVT " + json.dumps(event, ensure_ascii=False))
 
-            config = {"goal": goal, "agent": agent, "workspace": workspace, "simulateFailures": simulateFailures}
+            config = {"goal": goal, "agent": agent, "workspace": workspace, "simulateFailures": simulateFailures, "resumeSessionId": resumeSessionId}
             return await run_session(config, inbox.receive, sink)
 
     return agent_session

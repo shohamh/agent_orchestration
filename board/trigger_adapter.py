@@ -211,6 +211,8 @@ class TriggerAdapter:
         events = list(metadata.get("events") or [])
         if isinstance(metadata.get("commands"), list):
             events.append({"type": "commands", "commands": metadata["commands"]})
+        if isinstance(metadata.get("acpState"), dict):
+            events.append(metadata["acpState"])
         return events
 
     async def run_lines(self, run_id: str) -> list[str]:

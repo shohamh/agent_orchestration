@@ -10,6 +10,40 @@ from agentdriver.acp_engine import AcpEngine
 
 
 class AcpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_session_can_be_loaded_after_reconnect(self):
+        events = []
+        async def sink(event): events.append(event)
+        async def receive(): await asyncio.Event().wait()
+        with tempfile.TemporaryDirectory() as workspace:
+            session = Session({'goal': 'fix', 'agent': 'codex', 'workspace': workspace}, receive, sink)
+            command = [sys.executable, str(Path(__file__).with_name('fake_acp_agent.py'))]
+            first = AcpEngine(session, command=command)
+            await first.start()
+            await first.close()
+            second = AcpEngine(session, command=command)
+            try:
+                await second.start()
+                self.assertTrue(second.resumed)
+                self.assertEqual(second.session_id, 'test-session')
+                self.assertFalse(any(e.get('text') == 'Past response' for e in events))
+            finally:
+                await second.close()
+
+    async def test_explicit_resume_replays_previous_messages(self):
+        events = []
+        async def sink(event): events.append(event)
+        async def receive(): await asyncio.Event().wait()
+        with tempfile.TemporaryDirectory() as workspace:
+            session = Session({'goal': 'continue', 'agent': 'codex', 'workspace': workspace,
+                               'resumeSessionId': 'test-session'}, receive, sink)
+            engine = AcpEngine(session, command=[sys.executable, str(Path(__file__).with_name('fake_acp_agent.py'))])
+            try:
+                await engine.start()
+                self.assertTrue(engine.resumed)
+                self.assertTrue(any(e.get('text') == 'Past response' for e in events))
+            finally:
+                await engine.close()
+
     async def test_real_stdio_transport_round_trip_with_permission_and_form(self):
         events = []
         inputs = asyncio.Queue()

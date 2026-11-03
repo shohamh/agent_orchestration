@@ -6,9 +6,12 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import acp
 from acp import schema as s
+
+from .session import InputRejected
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,10 +91,19 @@ class AcpEngine:
         self.stderr_task = None
         self.stderr_tail = ""
         self.process_tree = None
+        self.acp_state = {"configOptions": [], "modes": None, "usage": None, "capabilities": {}}
+        self.resumed = False
+        self.replaying = False
+        self.terminals = {}
+
+    async def publish_state(self, **fields):
+        self.acp_state.update(fields)
+        await self.session.emit("acp_state", **self.acp_state)
 
     async def start(self):
         # A reconnect creates a new ACP session; old commands no longer apply.
         await self.session.emit("commands", commands=[])
+        await self.publish_state()
         command = self.command or agent_command(self.session.config["agent"])
         env = dict(os.environ)
         # Inherited nesting markers belong to this board's host, not the coding session.
@@ -112,19 +124,139 @@ class AcpEngine:
             self.process_tree = ProcessTree(self.process.pid)
         self.stderr_task = asyncio.create_task(self._drain_stderr())
         async with asyncio.timeout(60):
-            await self.connection.initialize(protocol_version=acp.PROTOCOL_VERSION,
-                client_capabilities=s.ClientCapabilities(elicitation=s.ElicitationCapabilities(form=s.ElicitationFormCapabilities())))
-            response = await self.connection.new_session(cwd=self.session.config["workspace"], mcp_servers=[])
-        self.session_id = response.session_id
+            init = await self.connection.initialize(protocol_version=acp.PROTOCOL_VERSION,
+                client_capabilities=s.ClientCapabilities(terminal=True, elicitation=s.ElicitationCapabilities(form=s.ElicitationFormCapabilities())))
+            caps = as_dict(init.agent_capabilities) or {}
+            prior = self.session.config.get("_acp_session_id") or self.session.config.get("resumeSessionId")
+            if prior and not caps.get("loadSession") and self.session.config.get("resumeSessionId"):
+                raise ValueError('This agent does not support loading previous sessions')
+            if prior and caps.get("loadSession"):
+                self.replaying = bool(self.session.config.get("_acp_session_id"))
+                try:
+                    response = await self.connection.load_session(session_id=prior, cwd=self.session.config["workspace"], mcp_servers=[])
+                finally:
+                    self.replaying = False
+                self.session_id, self.resumed = prior, True
+                self.session.config["_acp_session_id"] = prior
+            else:
+                response = await self.connection.new_session(cwd=self.session.config["workspace"], mcp_servers=[])
+                self.session_id = response.session_id
+                self.session.config["_acp_session_id"] = self.session_id
+        info = as_dict(response)
+        await self.publish_state(capabilities=caps, configOptions=info.get("configOptions", self.acp_state['configOptions']),
+                                 modes=info.get("modes", self.acp_state['modes']), sessionId=self.session_id)
+
+    async def set_option(self, option_id, value):
+        result = await self.connection.set_config_option(session_id=self.session_id, config_id=option_id, value=value)
+        await self.publish_state(configOptions=[as_dict(option) for option in result.config_options])
+
+    async def set_mode(self, mode_id):
+        await self.connection.set_session_mode(session_id=self.session_id, mode_id=mode_id)
+        modes = dict(self.acp_state.get("modes") or {})
+        modes["currentModeId"] = mode_id
+        await self.publish_state(modes=modes)
+
+    async def create_terminal(self, session_id, command, args=None, env=None, cwd=None, output_byte_limit=None, **kwargs):
+        if session_id != self.session_id: raise ValueError('Unknown session')
+        workspace = Path(self.session.config['workspace']).resolve()
+        directory = Path(cwd or workspace).resolve()
+        if not directory.is_relative_to(workspace): raise ValueError('Terminal directory must be inside the session workspace')
+        env_names = [as_dict(entry)['name'] for entry in env or []]
+        choice = await self.session.permission('execute', 'Run terminal command',
+            json.dumps({'command': command, 'args': args or [], 'cwd': str(directory), 'environmentNames': env_names}, ensure_ascii=False),
+            [{'id': 'allow', 'label': 'Allow once', 'kind': 'allow_once'}, {'id': 'deny', 'label': 'Deny', 'kind': 'reject_once'}])
+        if choice != 'allow': raise PermissionError('Terminal command was not approved')
+        environment = dict(os.environ)
+        for entry in env or []:
+            value = as_dict(entry)
+            environment[value['name']] = value['value']
+        process = await asyncio.create_subprocess_exec(command, *(args or []), cwd=directory,
+            env=environment, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=os.name != 'nt')
+        from flowkit.executor import _own
+        try:
+            tree = _own(process.pid)
+        except OSError:
+            try:
+                await asyncio.wait_for(process.wait(), .1)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise
+            tree = None
+        terminal_id = uuid.uuid4().hex
+        terminal = {'process': process, 'tree': tree, 'output': b'', 'truncated': False,
+                    'limit': min(max(output_byte_limit if output_byte_limit is not None else 65536, 1), 1024 * 1024)}
+        self.terminals[terminal_id] = terminal
+        async def read_output():
+            await self.session.emit('tool', id='terminal:' + terminal_id, name='terminal', summary=command, status='running')
+            while chunk := await process.stdout.read(4096):
+                terminal['output'] += chunk
+                if len(terminal['output']) > terminal['limit']:
+                    terminal['output'] = terminal['output'][-terminal['limit']:]
+                    while terminal['output'] and terminal['output'][0] & 0xc0 == 0x80:
+                        terminal['output'] = terminal['output'][1:]
+                    terminal['truncated'] = True
+                await self.session.emit('tool', id='terminal:' + terminal_id, name='terminal', summary=command,
+                    status='running', output=terminal['output'][-8000:].decode('utf-8', 'replace'))
+            code = await process.wait()
+            await self.session.emit('tool', id='terminal:' + terminal_id, name='terminal', summary=command,
+                status='ok' if code == 0 else 'error', output=terminal['output'][-8000:].decode('utf-8', 'replace'))
+        terminal['task'] = asyncio.create_task(read_output())
+        return s.CreateTerminalResponse(terminal_id=terminal_id)
+
+    def _terminal(self, session_id, terminal_id):
+        if session_id != self.session_id or terminal_id not in self.terminals: raise ValueError('Unknown terminal')
+        return self.terminals[terminal_id]
+
+    async def terminal_output(self, session_id, terminal_id, **kwargs):
+        terminal = self._terminal(session_id, terminal_id)
+        code = terminal['process'].returncode
+        status = s.TerminalExitStatus(exit_code=code if code is not None and code >= 0 else None,
+                                      signal=str(-code) if code is not None and code < 0 else None) if code is not None else None
+        return s.TerminalOutputResponse(output=terminal['output'].decode('utf-8', 'replace'), truncated=terminal['truncated'], exit_status=status)
+
+    async def wait_for_terminal_exit(self, session_id, terminal_id, **kwargs):
+        terminal = self._terminal(session_id, terminal_id)
+        await terminal['task']
+        code = terminal['process'].returncode
+        return s.WaitForTerminalExitResponse(exit_code=code if code >= 0 else None, signal=str(-code) if code < 0 else None)
+
+    async def kill_terminal(self, session_id, terminal_id, **kwargs):
+        terminal = self._terminal(session_id, terminal_id)
+        from flowkit.executor import _kill
+        _kill(terminal['process'], terminal['tree'])
+        await terminal['task']
+        return s.KillTerminalResponse()
+
+    async def release_terminal(self, session_id, terminal_id, **kwargs):
+        terminal = self._terminal(session_id, terminal_id)
+        if terminal['process'].returncode is None: await self.kill_terminal(session_id, terminal_id)
+        else: await terminal['task']
+        if terminal['tree']: terminal['tree'].close()
+        del self.terminals[terminal_id]
+        return s.ReleaseTerminalResponse()
 
     async def _drain_stderr(self):
         if self.process.stderr:
             while chunk := await self.process.stderr.read(4096):
                 self.stderr_tail = (self.stderr_tail + chunk.decode("utf-8", errors="replace"))[-4000:]
 
-    async def prompt(self, text: str):
+    async def prompt(self, text: str | dict):
         self.message_id = None
-        result = await self.connection.prompt(session_id=self.session_id, prompt=[acp.text_block(text)])
+        message = text if isinstance(text, dict) else {"text": text}
+        blocks = [acp.text_block(message.get("text", ""))]
+        caps = self.acp_state.get("capabilities", {}).get("promptCapabilities", {})
+        for item in message.get("attachments", []):
+            mime = item['mimeType']
+            if mime.startswith('image/'):
+                if not caps.get('image'): raise InputRejected('This agent does not support image attachments')
+                blocks.append(s.ImageContentBlock(type='image', data=item['data'], mime_type=mime))
+            else:
+                if not caps.get('embeddedContext'): raise InputRejected('This agent does not support file attachments')
+                resource = s.BlobResourceContents(uri='attachment:///' + quote(item['name']), mime_type=mime, blob=item['data'])
+                blocks.append(s.EmbeddedResourceContentBlock(type='resource', resource=resource))
+        result = await self.connection.prompt(session_id=self.session_id, prompt=blocks)
         return result.stop_reason
 
     async def cancel(self):
@@ -132,6 +264,8 @@ class AcpEngine:
             await self.connection.cancel(session_id=self.session_id)
 
     async def close(self):
+        for terminal_id in list(self.terminals):
+            await self.release_terminal(self.session_id, terminal_id)
         if self.process_tree:
             self.process_tree.close()
             self.process_tree = None
@@ -164,11 +298,18 @@ class AcpEngine:
     async def session_update(self, session_id, update, **kwargs):
         data = as_dict(update)
         kind = data.get("sessionUpdate")
+        if self.replaying and kind in ("agent_message_chunk", "user_message_chunk", "tool_call", "tool_call_update", "plan"):
+            return
         if kind == "agent_message_chunk":
             text = text_content(data.get("content"))
             if text:
                 self.message_id = self.message_id or uuid.uuid4().hex
                 await self.session.emit("agent", text=text, message_id=self.message_id)
+        elif kind == "user_message_chunk":
+            text = text_content(data.get("content"))
+            if text:
+                self.message_id = None
+                await self.session.emit("user", text=text, replayed=True)
         elif kind in ("tool_call", "tool_call_update"):
             self.message_id = None
             status = {"completed": "ok", "failed": "error"}.get(data.get("status"), "running")
@@ -182,7 +323,7 @@ class AcpEngine:
                 known["summary"] = data["title"]
             fields = {"id": tool_id, "status": status, **{k: v for k, v in known.items() if v}}
             if data.get("content"):
-                fields["output"] = text_content(data["content"])
+                fields["content"] = data["content"]
             elif data.get("rawOutput") is not None:
                 raw = data["rawOutput"]
                 fields["output"] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
@@ -194,6 +335,14 @@ class AcpEngine:
             await self.session.emit("plan", entries=entries)
         elif kind == "available_commands_update":
             await self.session.emit("commands", commands=data.get("availableCommands", []))
+        elif kind == "usage_update":
+            await self.publish_state(usage={k: data[k] for k in ("used", "size", "cost") if k in data})
+        elif kind == "config_option_update":
+            await self.publish_state(configOptions=data.get("configOptions", []))
+        elif kind == "current_mode_update":
+            modes = dict(self.acp_state.get("modes") or {})
+            modes["currentModeId"] = data.get("currentModeId")
+            await self.publish_state(modes=modes)
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         tool = as_dict(tool_call)

@@ -27,6 +27,8 @@ No external assets: the UI in ./static works with no internet.
 import asyncio
 import logging
 import json
+import base64
+import binascii
 import os
 from pathlib import Path
 from typing import Any
@@ -189,6 +191,9 @@ async def create_card(request: web.Request) -> web.Response:
             raise ValueError("workspace must be a path of at most 4096 characters")
         options["session_options"] = {"agent": agent, "workspace": workspace.strip(),
                                       "simulateFailures": bounded_int(body, "simulateFailures", 0, 0, 20)}
+        if body.get('resumeSessionId'):
+            if not workspace.strip(): raise ValueError('resuming a session requires its original workspace')
+            options['session_options']['resumeSessionId'] = text_field(body, 'resumeSessionId', 512)
     run_id = await adapter_for(request).create(
         request.match_info["board"],
         kind,
@@ -250,13 +255,36 @@ def bounded_int(body: dict, name: str, default: int, minimum: int, maximum: int)
 def validate_session_input(body: dict[str, Any]) -> dict[str, Any]:
     kind = body.get("type")
     fields = {"message": {"type", "text"}, "interrupt": {"type"}, "done": {"type"},
-              "approval": {"type", "id", "optionId"}, "answer": {"type", "id", "answers"}}
-    if not isinstance(kind, str) or kind not in fields or set(body) != fields[kind]:
-        raise ValueError("input must be message, interrupt, done, approval or answer with its required fields")
+              "approval": {"type", "id", "optionId"}, "answer": {"type", "id", "answers"},
+              "config": {"type", "id", "value"}, "mode": {"type", "id"}}
+    allowed = fields.get(kind) if isinstance(kind, str) else None
+    if kind == 'message' and set(body) == {'type', 'text', 'attachments'}:
+        allowed = {'type', 'text', 'attachments'}
+    if not allowed or set(body) != allowed:
+        raise ValueError("input must be message, interrupt, done, approval, answer, config or mode with its required fields")
     if kind == "message":
-        text_field(body, "text", 20000)
+        if body.get('attachments'):
+            if not isinstance(body.get('text'), str) or len(body['text']) > 20000 or '\x00' in body['text']:
+                raise ValueError('message text must be at most 20000 characters')
+            items = body['attachments']
+            if not isinstance(items, list) or len(items) > 5: raise ValueError('at most five attachments are allowed')
+            total = 0
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {'name', 'mimeType', 'data'}: raise ValueError('invalid attachment')
+                text_field(item, 'name', 255); text_field(item, 'mimeType', 255)
+                if '/' in item['name'] or '\\' in item['name']: raise ValueError('attachment name must be a file name')
+                if not isinstance(item['data'], str) or len(item['data']) > 132000: raise ValueError('attachment data exceeds limit')
+                try: total += len(base64.b64decode(item['data'], validate=True))
+                except (ValueError, TypeError, binascii.Error): raise ValueError('attachment data must be base64') from None
+            if total > 96 * 1024: raise ValueError('attachments exceed 96 KiB')
+        else:
+            text_field(body, "text", 20000)
     if kind in ("approval", "answer"):
         text_field(body, "id", 512)
+    if kind in ("config", "mode"):
+        text_field(body, "id", 512)
+    if kind == "config" and not (type(body["value"]) is bool or isinstance(body["value"], str) and 0 < len(body["value"]) <= 512):
+        raise ValueError("config value must be a boolean or nonempty text")
     if kind == "approval":
         text_field(body, "optionId", 512)
     if kind == "answer":
