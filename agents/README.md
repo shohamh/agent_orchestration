@@ -149,10 +149,11 @@ The agent unit/fixture tests and public Confluence integration tests also run in
 [Tests workflow](../.github/workflows/tests.yml) on pushes, pull requests and a daily schedule
 (scheduled workflows run on the default branch). The public suite needs internet access and
 anonymous access to the selected third-party sites. It imports four public page trees and checks
-Markdown, attachments, links and transfer between two local worker services. Public-site outages
-or content changes can fail this separate CI job. To run only the deterministic/offline suite,
-omit the `agents/integration_tests` command. The real-engine smoke scripts below still require
-the corresponding local stacks and are not run by this workflow.
+Markdown, attachments, links and transfer between two local worker services. CI also starts
+disposable Hatchet and Prefect stacks and runs the public-page setup, worker transfer and native
+step restart on each engine. Public-site outages or content changes can fail those separate jobs.
+To run only the deterministic/offline suite, omit the `agents/integration_tests` command. Trigger.dev
+native-engine smoke still requires a local stack and is not run by this workflow.
 
 The Chrome integration test uses a deterministic API fixture and requires installed Chrome
 (override `CHROME_PATH`). The live session smoke test uses simulated agents through both real engines.

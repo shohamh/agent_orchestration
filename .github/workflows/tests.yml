@@ -52,3 +52,80 @@ jobs:
         run: python -m pip install -r agents/requirements.txt
       - name: Import public page trees and transfer a page between workers
         run: python -m unittest discover -s agents/integration_tests -v
+
+  native-engine-public:
+    name: Public Confluence with ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [hatchet, prefect]
+    env:
+      PYTHONUTF8: '1'
+      DO_NOT_TRACK: '1'
+      ENGINE: ${{ matrix.engine }}
+      FLOW_BACKENDS: ${{ matrix.engine }}
+      FLOW_HOST_URL: http://127.0.0.1:8095
+      BOARD_HOST: 127.0.0.1
+      BOARD_PORT: '8093'
+      HATCHET_CLIENT_HOST_PORT: 127.0.0.1:7077
+      HATCHET_CLIENT_SERVER_URL: http://127.0.0.1:8080
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      PREFECT_API_URL: ${{ matrix.engine == 'prefect' && 'http://127.0.0.1:4200/api' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: agents/requirements.txt
+      - name: Install worker and exporter dependencies
+        run: python -m pip install -r agents/requirements.txt
+      - name: Start disposable Hatchet stack
+        if: matrix.engine == 'hatchet'
+        run: |
+          cp hatchet/.env.example hatchet/.env
+          docker compose --env-file hatchet/.env -f hatchet/docker-compose.yml up -d
+          sh hatchet/scripts/create-token.sh
+      - name: Start disposable Prefect stack
+        if: matrix.engine == 'prefect'
+        run: |
+          cp prefect/.env.example prefect/.env
+          docker compose --env-file prefect/.env -f prefect/docker-compose.yml up -d prefect-server
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:4200/api/health >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo 'Prefect server did not become ready' >&2
+          exit 1
+      - name: Start native coordinator and board
+        run: |
+          nohup python -u agents/flow_host.py > "$RUNNER_TEMP/flow-host.log" 2>&1 &
+          nohup python -u -c 'import runpy,sys; from dotenv import load_dotenv; load_dotenv("hatchet/.env"); sys.path.insert(0,"board"); runpy.run_path("board/server.py",run_name="__main__")' > "$RUNNER_TEMP/board.log" 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8095/flows >/dev/null && curl -fsS http://127.0.0.1:8093/api/systems >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo 'Flow host or board did not become ready' >&2
+          exit 1
+      - name: Import public Cloud page, transfer between workers and restart the native step
+        run: python -u board/workers_smoke_test.py --base http://127.0.0.1:8093 --systems "$ENGINE" --public-confluence
+      - name: Show redacted runtime logs on failure
+        if: failure()
+        run: |
+          python - <<'PY'
+          from dotenv import dotenv_values
+          from pathlib import Path
+          import os
+          token = dotenv_values('hatchet/.env').get('HATCHET_CLIENT_TOKEN') or ''
+          for name in ('flow-host.log', 'board.log'):
+              path = Path(os.environ['RUNNER_TEMP']) / name
+              if path.is_file():
+                  text = '\n'.join(path.read_text(encoding='utf-8', errors='replace').splitlines()[-100:])
+                  print(f'--- {name} ---')
+                  print(text.replace(token, '[redacted]') if token else text)
+          PY
+      - name: Stop disposable stack
+        if: always()
+        run: docker compose --env-file "$ENGINE/.env" -f "$ENGINE/docker-compose.yml" down --remove-orphans

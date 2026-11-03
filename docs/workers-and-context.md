@@ -136,7 +136,9 @@ content hashes. Results are recorded in `verification.json`. See the
 The same live imports, plus a public-page transfer between two local workers, are part of the
 automated suite. Run `agents/.venv/Scripts/python.exe -m unittest discover -s agents/integration_tests -v`.
 The [Tests workflow](../.github/workflows/tests.yml) runs them on pushes, pull requests and daily on
-the default branch; its fixture-based tests run in a separate job so public-site failures are clear.
+the default branch. Separate jobs start disposable Hatchet and Prefect stacks and test a real
+public-page import, worker transfer and native step restart. Fixture tests run separately so
+public-site failures are clear; Trigger.dev native-engine smoke remains a local-stack test.
 
 The runtime expands `environment` into a real native `setup_environment` agent node before all
 root steps. It attempts each source, shows preparation errors, and opens the selected agent for
