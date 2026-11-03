@@ -188,7 +188,7 @@ class TriggerAdapter:
 
     async def node_events(self, ref: str) -> tuple[int, list[dict]]:
         metadata = (await self._retrieve(ref)).get("metadata") or {}
-        return int(metadata.get("eventsDropped") or 0), metadata.get("events") or []
+        return int(metadata.get("eventsDropped") or 0), self._events_with_commands(metadata)
 
     async def run_info(self, run_id: str) -> dict:
         run = await self._retrieve(run_id)
@@ -203,15 +203,22 @@ class TriggerAdapter:
         return self._metadata[run_id]
 
     def _session_view(self, run_id: str, metadata: dict[str, Any]) -> Session:
-        events, dropped = metadata.get("events") or [], int(metadata.get("eventsDropped") or 0)
+        events, dropped = self._events_with_commands(metadata), int(metadata.get("eventsDropped") or 0)
         return self.sessions.get(run_id, digest([dropped, events]), lambda: Session(events, dropped))
+
+    @staticmethod
+    def _events_with_commands(metadata: dict[str, Any]) -> list[dict]:
+        events = list(metadata.get("events") or [])
+        if isinstance(metadata.get("commands"), list):
+            events.append({"type": "commands", "commands": metadata["commands"]})
+        return events
 
     async def run_lines(self, run_id: str) -> list[str]:
         return list((await self._run_metadata(run_id)).get("transcript") or [])
 
     async def events(self, run_id: str) -> tuple[int, list[dict[str, Any]]]:
         metadata = await self._run_metadata(run_id)
-        return int(metadata.get("eventsDropped") or 0), list(metadata.get("events") or [])
+        return int(metadata.get("eventsDropped") or 0), self._events_with_commands(metadata)
 
     async def session(self, run_id: str) -> Session:
         return self._session_view(run_id, await self._run_metadata(run_id))

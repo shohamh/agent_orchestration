@@ -33,6 +33,15 @@ jobs:
         run: python -m unittest discover -s agents -p 'test_hatchet*.py' -v
       - name: Board tests
         run: python -m unittest discover -s board -p 'test_*.py' -v
+      - name: Chat UI tests
+        run: node --test board/static/chat.test.cjs board/static/chat.browser.test.cjs
+      - name: Install Trigger.dev test dependencies
+        run: npm ci --prefix trigger.dev/example-project
+      - name: Trigger.dev bridge tests
+        working-directory: trigger.dev/example-project
+        env:
+          AGENT_PYTHON: python
+        run: node --import tsx --test src/agent-session.test.ts
 
   public-confluence:
     name: Public Confluence integration tests

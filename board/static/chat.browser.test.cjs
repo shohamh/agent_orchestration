@@ -14,7 +14,7 @@ const chat = require('./chat.js');
 
 // Rows with the same keys the server's transcript.coalesce gives them.
 function rowsOf(events) {
-  return chat.transcript(events).map(row => ({ ...row, key: row.type === 'agent' && row.message_id ? `m:${row.message_id}`
+  return chat.transcript(events).map(row => ({ ...row, key: row.type === 'commands' ? 'commands' : row.type === 'agent' && row.message_id ? `m:${row.message_id}`
     : row.type === 'tool' ? `t:${row.id}` : row.type === 'approval' ? `a:${row.id}` : row.type === 'question' ? `q:${row.id}` : `e:${JSON.stringify(row)}` }));
 }
 
@@ -23,6 +23,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
   assert.ok(fs.existsSync(chromePath), 'Set CHROME_PATH to a Chromium browser');
   const posts = [], errors = [];
   const events = [
+    { type: 'commands', commands: [{ name: 'test', description: 'Run tests', input: { hint: 'path' } }, { name: 'plan', description: 'Plan work' }] },
     { type: 'user', seq: 1, text: 'Fix the test' },
     { type: 'agent', seq: 2, message_id: 'm', text: 'I will ' },
     { type: 'agent', seq: 3, message_id: 'm', text: 'inspect it.' },
@@ -77,7 +78,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
         streams.add(stream); request.on('close', () => streams.delete(stream));
         send(stream, { type: 'feed', live: true });
         send(stream, { type: 'cards', reset: true, cards: cardsOf(stream) });
-        if (stream.node === 'agent-ref') send(stream, { type: 'node-rows', card: 'flow1', node: 'agent-ref', state: 'question', reset: true, rows: rowsOf(events.slice(0, 7)), more: false });
+        if (stream.node === 'agent-ref') send(stream, { type: 'node-rows', card: 'flow1', node: 'agent-ref', state: 'question', reset: true, rows: rowsOf(events.slice(0, 8)), more: false });
         else if (stream.node === 'program-ref') send(stream, { type: 'node-lines', card: 'flow1', node: 'program-ref', reset: true, start: 1500, lines: longLines.slice(1500), more: true });
         else if (stream.card === 'long1') send(stream, { type: 'rows', card: 'long1', reset: true, rows: longRows.slice(-100), more: true });
         else if (stream.card === 'logs1') send(stream, { type: 'lines', card: 'logs1', reset: true, start: 1500, lines: longLines.slice(1500), more: true });
@@ -134,6 +135,13 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     await waitFor('document.querySelector(".card")');
     await evaluate('document.querySelector(".card").click()');
     await waitFor('document.querySelector(".question-card")');
+    await evaluate(`document.querySelector('[aria-label="Message to agent"]').value = '/'; document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new Event('input'))`);
+    assert.equal(await evaluate('document.querySelectorAll(".command-suggestions button").length'), 2);
+    await evaluate(`document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`);
+    assert.equal(await evaluate(`document.querySelector('[aria-label="Message to agent"]').value`), '/plan ');
+    events.push({ type: 'commands', commands: [{ name: 'review', description: 'Review changes' }] }); push();
+    await evaluate(`document.querySelector('[aria-label="Message to agent"]').value = '/re'; document.querySelector('[aria-label="Message to agent"]').dispatchEvent(new Event('input'))`);
+    await waitFor('document.querySelector(".command-suggestions button")?.textContent.includes("/review")');
     assert.equal(await evaluate('document.querySelectorAll(".chat-message.agent").length'), 1);
     assert.equal(await evaluate('document.querySelector(".chat-message.agent .message-text").textContent'), 'I will inspect it.');
     assert.equal(await evaluate('document.querySelectorAll(".tool-row").length'), 1);

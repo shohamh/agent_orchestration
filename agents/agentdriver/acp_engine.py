@@ -90,6 +90,8 @@ class AcpEngine:
         self.process_tree = None
 
     async def start(self):
+        # A reconnect creates a new ACP session; old commands no longer apply.
+        await self.session.emit("commands", commands=[])
         command = self.command or agent_command(self.session.config["agent"])
         env = dict(os.environ)
         # Inherited nesting markers belong to this board's host, not the coding session.
@@ -190,6 +192,8 @@ class AcpEngine:
         elif kind == "plan":
             entries = data.get("entries", [])
             await self.session.emit("plan", entries=entries)
+        elif kind == "available_commands_update":
+            await self.session.emit("commands", commands=data.get("availableCommands", []))
 
     async def request_permission(self, session_id, tool_call, options, **kwargs):
         tool = as_dict(tool_call)

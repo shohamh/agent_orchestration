@@ -28,6 +28,8 @@ class AcpTests(unittest.IsolatedAsyncioTestCase):
             session.engine_factory = lambda: AcpEngine(session, command=[sys.executable, str(Path(__file__).with_name('fake_acp_agent.py'))])
             result = await asyncio.wait_for(session.run(), 20)
         self.assertEqual(result['state'], 'done')
+        self.assertEqual([e['commands'] for e in events if e['type'] == 'commands'][-1],
+                         [{'name': 'test', 'description': 'Run tests', 'input': {'hint': 'path'}}])
         self.assertEqual(''.join(e['text'] for e in events if e['type'] == 'agent'), 'It works.')
         self.assertFalse(any(e['type'] == 'error' for e in events), events)
 

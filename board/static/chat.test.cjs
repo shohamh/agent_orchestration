@@ -3,6 +3,14 @@ const assert = require('node:assert/strict');
 let chat = {};
 try { chat = require('./chat.js'); } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
 
+test('slash suggestions filter agent commands only at the start of a prompt', () => {
+  const commands = [{ name: 'test', description: 'Run tests' }, { name: 'plan', description: 'Plan work' }];
+  assert.deepEqual(chat.commandMatches(commands, '/TE').map(c => c.name), ['test']);
+  assert.equal(chat.commandMatches(commands, '/').length, 2);
+  assert.equal(chat.commandMatches(commands, 'look /te').length, 0);
+  assert.equal(chat.commandMatches(commands, '/test argument').length, 0);
+});
+
 test('streamed messages coalesce by message_id without merging different turns', () => {
   assert.equal(typeof chat.transcript, 'function', 'chat transcript reducer is available');
   const result = chat.transcript([

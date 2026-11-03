@@ -20,6 +20,9 @@ for line in sys.stdin:
         assert req['params']['clientCapabilities']['elicitation']['form'] == {}
         result = {'protocolVersion': 1, 'agentCapabilities': {}}
     elif method == 'session/new':
+        send({'method': 'session/update', 'params': {'sessionId': 'test-session',
+            'update': {'sessionUpdate': 'available_commands_update', 'availableCommands': [
+                {'name': 'test', 'description': 'Run tests', 'input': {'hint': 'path'}}]}}})
         result = {'sessionId': 'test-session'}
     elif method == 'session/prompt':
         permission = ask('permission', 'session/request_permission', {

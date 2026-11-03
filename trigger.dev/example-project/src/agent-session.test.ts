@@ -71,6 +71,19 @@ test("bridge bounds UTF-8 transcript metadata and reports trimmed history", asyn
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("command snapshot survives the rolling transcript", async () => {
+  const root = await fixture(`import json\ninput()\nprint(json.dumps({'type':'commands','commands':[{'name':'review','description':'Review'}]}),flush=True)\nfor i in range(240): print(json.dumps({'type':'user','text':str(i)}),flush=True)\n`);
+  let commands: unknown;
+  try {
+    await runAgentSession({ goal: "history", agent: "demo" }, {
+      environment: "DEVELOPMENT", signal: new AbortController().signal, root,
+      python: process.env.AGENT_PYTHON!, subscribe: () => () => {},
+      publish: async (_events, _dropped, latestCommands) => { commands = latestCommands; },
+    });
+    assert.deepEqual(commands, [{ name: 'review', description: 'Review' }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("300 chunks retain opening user, complete message and pending approval", async () => {
   const root = await fixture(`import json\ninput()\ndef emit(event): print(json.dumps(event),flush=True)\nemit({'type':'user','text':'opening goal'})\nfor i in range(300): emit({'type':'agent','message_id':'m1','text':str(i)+','})\nemit({'type':'tool','id':'t1','name':'shell','summary':'inspect','status':'running'})\nemit({'type':'agent','message_id':'m2','text':'before steering'})\nemit({'type':'user','text':'steer'})\nemit({'type':'tool','id':'t1','status':'ok','output':'result'})\nemit({'type':'agent','message_id':'m2','text':'after steering'})\nemit({'type':'approval','id':'p1','options':[{'id':'allow'}]})\n`);
   let last: Array<Record<string, unknown>> = [], dropped = -1;

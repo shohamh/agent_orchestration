@@ -21,9 +21,12 @@ def coalesce(events: list[dict[str, Any]], dropped: int = 0) -> list[dict[str, A
     messages: dict[str, dict] = {}
     tools: dict[str, dict] = {}
     requests: dict[str, dict] = {}
+    commands = None
     for index, event in enumerate(events):
         kind = event.get("type")
-        if kind == "agent" and event.get("message_id"):
+        if kind == "commands":
+            commands = event
+        elif kind == "agent" and event.get("message_id"):
             row = messages.get(event["message_id"])
             if row is not None:
                 row["text"] += event.get("text") or ""
@@ -53,6 +56,9 @@ def coalesce(events: list[dict[str, Any]], dropped: int = 0) -> list[dict[str, A
                 row["resolved"] = event
         elif kind in SHOWN:
             rows.append({**event, "key": f"e:{dropped + index}"})
+    # Keep the latest session metadata in the newest page, even in long chats.
+    if commands is not None:
+        rows.insert(0, {**commands, "key": "commands"})
     return rows
 
 
@@ -85,11 +91,14 @@ def digest(value: Any) -> str:
 
 def page(rows: list[dict[str, Any]], before: str | None, limit: int) -> tuple[list[dict[str, Any]], bool]:
     """The `limit` rows just before the row keyed `before` (the newest rows when it is None)."""
+    commands = rows[0] if rows and rows[0].get('type') == 'commands' else None
+    if commands:
+        rows = rows[1:]
     end = len(rows)
     if before is not None:
         end = next((i for i, row in enumerate(rows) if row["key"] == before), 0)
     start = max(0, end - limit)
-    return rows[start:end], start > 0
+    return ([commands] if commands and before is None else []) + rows[start:end], start > 0
 
 
 class Memo:

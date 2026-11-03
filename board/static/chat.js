@@ -1,10 +1,18 @@
 /* Shared transcript/form model and the dependency-free session drawer. */
 (function (root) {
   'use strict';
+  function commandMatches(commands, value) {
+    const match = /^\/([^\s/]*)$/.exec(value);
+    if (!match) return [];
+    const prefix = match[1].toLowerCase();
+    return (commands || []).filter(command => typeof command.name === 'string' && command.name.toLowerCase().startsWith(prefix));
+  }
   function transcript(events) {
     const rows = [], messages = new Map(), tools = new Map(), requests = new Map();
+    let commands = null;
     for (const event of events || []) {
-      if (event.type === 'agent' && event.message_id) {
+      if (event.type === 'commands') commands = { ...event };
+      else if (event.type === 'agent' && event.message_id) {
         if (messages.has(event.message_id)) messages.get(event.message_id).text += event.text || '';
         else { const row = { ...event, text: event.text || '' }; rows.push(row); messages.set(event.message_id, row); }
       } else if (event.type === 'tool') {
@@ -24,6 +32,7 @@
         if (row) row.resolved = event;
       } else if (['user', 'agent', 'error', 'plan'].includes(event.type)) rows.push({ ...event });
     }
+    if (commands) rows.unshift(commands);
     return rows;
   }
 
@@ -220,6 +229,7 @@
     return { state, title, hint: card.error || hint, terminal, queued, actions };
   }
 
+  let commandMenuId = 0;
   function mount(container, config) {
     const h = config.el;
     const sessions = new Map();
@@ -227,28 +237,56 @@
     const banner = h('div', { class: 'session-banner', role: 'status' });
     const log = h('div', { class: 'chat-log', role: 'log', 'aria-label': 'Session conversation', tabindex: '0' });
     const error = h('div', { class: 'chat-error', role: 'alert', hidden: '' });
-    const text = h('textarea', { rows: '1', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer' });
+    const menuId = `slash-commands-${++commandMenuId}`;
+    const text = h('textarea', { rows: '1', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer', role: 'combobox', 'aria-autocomplete': 'list', 'aria-controls': menuId, 'aria-expanded': 'false' });
     const send = h('button', { type: 'submit', class: 'primary' }, 'Send message');
     const actions = h('div', { class: 'session-actions' });
     const hint = h('span', { class: 'composer-hint' });
+    const suggestions = h('div', { id: menuId, class: 'command-suggestions', role: 'listbox', 'aria-label': 'Slash commands', hidden: '' });
+    let selected = 0, matches = [], dismissed = false;
     const form = h('form', { class: 'chat-composer', onsubmit: async event => {
       event.preventDefault();
       const value = text.value.trim(), key = currentKey;
       if (!value || !view || view.terminal || sessions.get(key).sending) return;
-      if (await post({ type: 'message', text: value }) && key === currentKey && text.value.trim() === value) { text.value = ''; sessions.get(key).draft = ''; }
-    } }, text, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
+      if (await post({ type: 'message', text: value }) && key === currentKey && text.value.trim() === value) { text.value = ''; sessions.get(key).draft = ''; renderCommands(); fit(); }
+    } }, suggestions, text, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
     // Grow with the text (up to the CSS max-height) instead of reserving rows on small screens.
     const fit = () => { text.style.height = 'auto'; text.style.height = `${text.scrollHeight + 2}px`; };
-    text.addEventListener('input', () => { fit(); if (currentKey) sessions.get(currentKey).draft = text.value; });
+    function chooseCommand(command) {
+      text.value = `/${command.name} `; sessions.get(currentKey).draft = text.value;
+      dismissed = true; renderCommands(); fit(); text.focus();
+    }
+    function renderCommands() {
+      const session = currentKey && sessions.get(currentKey);
+      matches = !dismissed && session && !view?.terminal ? commandMatches(session.commands, text.value) : [];
+      selected = Math.min(selected, Math.max(0, matches.length - 1));
+      suggestions.hidden = !matches.length;
+      text.setAttribute('aria-expanded', String(!!matches.length));
+      if (matches.length) text.setAttribute('aria-activedescendant', `${menuId}-${selected}`);
+      else text.removeAttribute('aria-activedescendant');
+      suggestions.replaceChildren(...matches.map((command, index) => h('button', {
+        id: `${menuId}-${index}`, type: 'button', role: 'option', 'aria-selected': String(index === selected),
+        onmousedown: event => event.preventDefault(), onclick: () => chooseCommand(command),
+      }, h('strong', {}, `/${command.name}`), command.input?.hint ? h('span', { class: 'command-hint' }, command.input.hint) : null,
+      h('small', {}, command.description || ''))));
+    }
+    text.addEventListener('input', () => { fit(); dismissed = false; selected = 0; if (currentKey) sessions.get(currentKey).draft = text.value; renderCommands(); });
     // When the keyboard opens, keep the latest messages in view above the composer.
     text.addEventListener('focus', () => setTimeout(() => { log.scrollTop = log.scrollHeight; }, 300));
-    text.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); } });
+    text.addEventListener('keydown', event => {
+      if (matches.length && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); selected = (selected + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length; renderCommands(); return; }
+        if (event.key === 'Enter' || event.key === 'Tab') { event.preventDefault(); chooseCommand(matches[selected]); return; }
+        if (event.key === 'Escape') { event.preventDefault(); dismissed = true; renderCommands(); return; }
+      }
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); form.requestSubmit(); }
+    });
     container.append(banner, log, form);
     // Scrolling near the top of the conversation loads the previous page of rows.
     log.addEventListener('scroll', () => { if (log.scrollTop < 120) loadOlder(); });
 
     function newSession() {
-      return { draft: '', scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false,
+      return { draft: '', commands: [], scroll: 0, seen: false, answers: {}, expanded: new Set(), details: {}, pending: new Set(), sending: false,
         rows: [], loaded: false, more: false, truncated: false, loading: false, olderError: null, version: 0 };
     }
 
@@ -376,7 +414,7 @@
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 50;
       const top = log.scrollTop, active = document.activeElement;
       const focus = log.contains(active) ? { key: active.dataset.chatFocus, start: active.selectionStart, end: active.selectionEnd } : null;
-      const rows = session.rows;
+      const rows = session.rows.filter(row => row.type !== 'commands');
       log.replaceChildren(...(rows.length ? [olderIndicator(session), ...rows.map((event, index) => {
         if (event.type === 'user' || event.type === 'agent') return h('article', { class: `chat-message ${event.type}` },
           h('div', { class: 'message-label' }, event.type === 'user' ? 'You' : card.agent === 'demo' ? 'Demo agent · simulated' : card.agent || 'Agent', event.queued ? h('span', { class: 'queued-label' }, 'Queued for next turn') : null),
@@ -437,11 +475,12 @@
       currentKey = key; card = nextCard; view = stateView(card);
       if (!sessions.has(key)) sessions.set(key, newSession());
       const session = sessions.get(key);
-      if (changed) { text.value = session.draft; fit(); error.hidden = true; }
+      if (changed) { text.value = session.draft; dismissed = false; selected = 0; fit(); error.hidden = true; }
       banner.className = `session-banner state-${view.state}`;
       // replaceChildren() would render a null child as the text "null".
       banner.replaceChildren(...[h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null].filter(Boolean));
       text.disabled = view.terminal; send.disabled = view.terminal || session.sending;
+      renderCommands();
       text.placeholder = view.terminal ? 'This session has ended.' : 'Give the agent a direction…';
       hint.textContent = view.terminal ? 'Session closed' : view.queued ? 'Queued for next turn · Ctrl/⌘ Enter to send' : 'Ctrl/⌘ Enter to send';
       actions.replaceChildren(...view.actions.map(action => {
@@ -461,6 +500,10 @@
     rows(key, message) {
       if (!sessions.has(key)) sessions.set(key, newSession());
       const session = sessions.get(key);
+      const commandRow = [...(message.rows || []), ...(message.patches || [])].find(row => row.type === 'commands');
+      if (commandRow) session.commands = commandRow.commands || [];
+      else if (message.reset) session.commands = [];
+      message = { ...message, rows: (message.rows || []).filter(row => row.type !== 'commands'), patches: (message.patches || []).filter(row => row.type !== 'commands') };
       if (message.reset) {
         // On a reconnect, keep older rows the user already scrolled back to.
         const first = message.rows[0]?.key, at = first ? session.rows.findIndex(row => row.key === first) : -1;
@@ -483,7 +526,7 @@
     focus() { if (!text.disabled) text.focus(); } };
   }
 
-  const api = { transcript, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish };
+  const api = { transcript, commandMatches, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AgentChat = api;
 })(typeof window !== 'undefined' ? window : globalThis);
