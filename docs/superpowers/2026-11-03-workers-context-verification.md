@@ -58,3 +58,15 @@ rebuilt as part of this feature.
 
 Unrelated pre-existing edits to `board/README.md`, `prefect/README.md`, and removal of
 `board/LIVE_UPDATES_PLAN.md` were preserved and excluded from this feature commit.
+
+## Deployment
+
+Feature commit `3ce47d6` was pushed to `origin/feat/agent-chat-dashboard`. The main board on 8090
+and the isolated worker test copy on 8093 run the rebuilt image
+`sha256:975209278f3db6ce351ba5c479887e14f9e4a6d54c091bd08044e502f5df0b16`.
+The flow host was restarted in Orca terminal `term_84644a90-9193-4ccb-8d42-917e54873f26`, with
+the local execution service online, four slots and zero active jobs after verification.
+
+Local and Funnel checks both passed: unauthenticated `/` = 302, `/api/systems` = 401;
+authenticated worker catalog and the updated UI = 200. The flow host listed the original three
+definitions and no disposable smoke flow. Password and backend credentials were preserved.

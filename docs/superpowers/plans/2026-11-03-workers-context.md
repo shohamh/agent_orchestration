@@ -56,7 +56,7 @@ Interfaces: validate environment mapping, expand into `setup_environment` ordina
 - [x] Implement deterministic source preparation, safe destinations, credential-env lookup and interactive reviewed agent repair loop; validate every target before returning success.
 - [x] Verify real setup chat and downstream file availability on a different service, existing restart and native smoke suites.
 - [x] Update documentation and ledger, request fresh whole-change review, fix material findings and rerun relevant checks.
-- [ ] Commit/push and deploy the authorized feature branch.
+- [x] Commit/push and deploy the authorized feature branch.
 
 ## Execution ledger
 
@@ -65,3 +65,5 @@ Builder check completed: restart reconstruction, fencing, assets, completion val
 
 Ruling: Deliver the shared runtime, board and setup changes in one integrated feature commit; native parameter and workspace changes span these tasks. Preserve unrelated concurrent documentation edits outside the commit.
 Verification: See ../2026-11-03-workers-context-verification.md. Fresh review is clear; Windows and Linux regression checks and all three native smoke flows passed.
+
+Delivery: Feature commit `3ce47d6` pushed to `origin/feat/agent-chat-dashboard`. Main board rebuilt and flow host restarted with the local execution service online; authenticated local/Funnel worker catalog and UI both returned 200, while unauthenticated root/API returned 302/401.
