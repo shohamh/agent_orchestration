@@ -31,6 +31,6 @@ if __name__ == '__main__':
         traceback.print_exc()
         code = 1
     finally:
-        sys.stdout.flush()
+        if not sys.stdout.closed: sys.stdout.flush()
         sys.stderr.flush()
         os._exit(code)

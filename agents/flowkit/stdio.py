@@ -54,6 +54,7 @@ if __name__ == "__main__":
         code = 1
     finally:
         # Same Windows stdin-thread shutdown problem as agentdriver.stdio.
-        sys.stdout.flush()
+        if not sys.stdout.closed:
+            sys.stdout.flush()
         sys.stderr.flush()
         os._exit(code)
