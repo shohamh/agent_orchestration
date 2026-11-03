@@ -1,0 +1,58 @@
+name: multi-agent-design
+description: Codex and OpenCode 2 independently design and review a feature, then combine their findings.
+input:
+  feature: A small incident status page that shows ongoing incidents and lets an operator post updates.
+steps:
+  brief:
+    kind: program
+    run: python -c "print('Design a practical feature with clear scope, security, failure handling, and tests.')"
+  architecture:
+    kind: agent
+    needs: [brief]
+    agent: codex
+    review: false
+    prompt: |
+      Work as a software architect. Design this feature:
+      {{ input.feature }}
+
+      Brief: {{ steps.brief.output.stdout }}
+
+      Describe the user flow, a minimal architecture, data model and API, and a small
+      implementation sequence. State assumptions. This is an analysis task: do not edit
+      files, install software, contact external services, or perform side effects.
+      Return your proposed design in your final message.
+  risk_review:
+    kind: agent
+    needs: [brief]
+    agent: opencode2
+    review: false
+    prompt: |
+      Independently review this proposed feature for security, reliability, accessibility,
+      and operational risks:
+      {{ input.feature }}
+
+      Brief: {{ steps.brief.output.stdout }}
+
+      Prioritize concrete failure scenarios and mitigations, and propose useful tests.
+      State assumptions. This is an analysis task: do not edit files, install software,
+      contact external services, or perform side effects. Return your review in your
+      final message.
+  implementation_plan:
+    kind: agent
+    needs: [architecture, risk_review]
+    agent: codex
+    review: false
+    prompt: |
+      Create a concise implementation plan for this feature:
+      {{ input.feature }}
+
+      Codex architecture:
+      {{ steps.architecture.output }}
+
+      Independent OpenCode 2 risk review:
+      {{ steps.risk_review.output }}
+
+      Reconcile differences, explain important tradeoffs, and provide an ordered plan,
+      acceptance criteria, and a test checklist. Flag unresolved assumptions rather
+      than inventing facts. Do not edit files, install software, contact external
+      services, or perform side effects. Return the completed plan in your final message.

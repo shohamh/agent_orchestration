@@ -12,6 +12,12 @@ so it also shows up in each backend's own UI:
 Create or edit flows from the board (**Flows** button) or edit the files directly. The flow host
 (`agents/flow_host.py`) re-registers them on every backend within a few seconds.
 
+`multi-agent-design` is a reusable example: a brief fans out to Codex for architecture and
+OpenCode 2 for an independent risk review, then Codex combines both into an implementation
+plan. The `feature` input can be changed when starting a run. Select **Flows** or **New card**
+on the board to inspect or launch it, and click an agent node to follow its conversation and
+answer any permission requests. The real agents require working local logins.
+
 ## Format
 
 ```yaml
