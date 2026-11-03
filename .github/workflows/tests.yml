@@ -1,0 +1,54 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  unit-and-fixture:
+    name: Unit and fixture integration tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: agents/requirements.txt
+      - name: Install worker and exporter dependencies
+        run: python -m pip install -r agents/requirements.txt
+      - name: Agent and Confluence fixture tests
+        run: python -m unittest discover -s agents/tests -v
+      - name: Native worker compatibility tests
+        run: python -m unittest discover -s agents -p 'test_hatchet*.py' -v
+      - name: Board tests
+        run: python -m unittest discover -s board -p 'test_*.py' -v
+
+  public-confluence:
+    name: Public Confluence integration tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: agents/requirements.txt
+      - name: Install worker and exporter dependencies
+        run: python -m pip install -r agents/requirements.txt
+      - name: Import public page trees and transfer a page between workers
+        run: python -m unittest discover -s agents/integration_tests -v

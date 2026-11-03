@@ -24,11 +24,11 @@ SOURCES=[
 ]
 
 
-async def main(args):
-    output=Path(args.output).resolve();output.mkdir(parents=True,exist_ok=True)
+async def run_public_checks(output,only=None):
+    output=Path(output).resolve();output.mkdir(parents=True,exist_ok=True)
     results=[]
     for source in SOURCES:
-        if args.only and source['target'] not in args.only: continue
+        if only and source['target'] not in only: continue
         item={k:v for k,v in source.items() if k!='url'}
         config={'confluence':[item]}
         print('Importing '+source['url'],flush=True)
@@ -47,6 +47,11 @@ async def main(args):
         print(json.dumps(result),flush=True);results.append(result)
         (output/'verification.json').write_text(json.dumps({'exporter_version':EXPORTER_VERSION,
             'verified_at':datetime.now(timezone.utc).isoformat(),'sources':results},indent=2),encoding='utf-8')
+    return results
+
+
+async def main(args):
+    return await run_public_checks(args.output,args.only)
 
 
 if __name__=='__main__':
