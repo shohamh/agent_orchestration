@@ -354,6 +354,7 @@ test('unsaved changes guard switching flows and starting a new one', async () =>
   await choose('dialog.fb-ask select', 'empty');
   await click('dialog.fb-ask .fb-ask-actions button', 'Create');
   await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && document.querySelectorAll('.fb-node').length === 1`, 'new flow from the empty template');
+  assert.equal(await evaluate(q('.fb-state') + '.textContent'), 'Not saved yet', 'a new flow has no state chip yet');
   assert.equal(store.get('multi-agent-design').yaml, MULTI_YAML, 'discarding never saved anything');
 });
 

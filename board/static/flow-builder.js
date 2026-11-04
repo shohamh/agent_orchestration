@@ -950,7 +950,7 @@
       title.textContent = c ? (c.doc?.name || c.name || 'New flow') : 'Flows';
       stateLine.replaceChildren(...(c ? [
         c.state ? h('span', { class: `fb-chip fb-state-${c.state}`, title: STATES[c.state]?.[1] || '' }, STATES[c.state]?.[0] || c.state) : null,
-        h('span', { class: `fb-state-text${dirty ? ' fb-dirty-text' : ''}` }, dirty ? (c.isNew ? 'Not saved yet' : 'Unsaved changes') : c.state ? STATES[c.state]?.[1] || '' : '')] : [h('span', {}, 'Pick a flow or create one.')]));
+        h('span', { class: `fb-state-text${dirty ? ' fb-dirty-text' : ''}` }, dirty ? (c.isNew ? 'Not saved yet' : 'Unsaved changes') : c.state ? STATES[c.state]?.[1] || '' : '')].filter(Boolean) : [h('span', {}, 'Pick a flow or create one.')]));
       saveBtn.disabled = !c || (!dirty && !c.isNew);
       const blocked = !c || c.isNew ? 'Save the new flow first' : dirty ? 'Save the draft before activating it' : c.state === 'active' ? 'This draft is already active'
         : c.state === 'broken' ? 'Fix the errors and save before activating' : null;
