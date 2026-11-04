@@ -8,6 +8,8 @@ runs list already returns, so one request per board refresh covers every card.
 import json
 import asyncio
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -33,6 +35,13 @@ _COLUMN = {
     "COMPLETED": "done",
 }  # everything else (CANCELED, FAILED, CRASHED, SYSTEM_FAILURE, TIMED_OUT, EXPIRED) -> stopped
 ACTIVE_STATUSES = ("PENDING_VERSION", "DELAYED", "QUEUED", "DEQUEUED", "EXECUTING", "WAITING")
+
+
+def _timestamp(text: str | None) -> float:
+    try:
+        return datetime.fromisoformat((text or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
 
 
 def _sequence_edges(children: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -67,6 +76,7 @@ class TriggerAdapter:
         self._outputs: dict[str, Any] = {}  # finished runs' output, fetched once
         self._finished_runs: dict[str, dict[str, Any]] = {}  # finished runs never change
         self._metadata: dict[str, dict[str, Any]] = {}  # run id -> metadata from the latest list
+        self._runs_seen: dict[str, dict[str, Any]] = {}  # run id -> tags + metadata, for replays with priority
         self.sessions = Memo()
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
@@ -83,7 +93,9 @@ class TriggerAdapter:
         runs = await self._list_runs({"filter[tag]": f"board:{board}", "filter[createdAt][period]": "7d"})
         queues = {q["name"]: q for q in (await self._request("GET", "/api/v1/queues?perPage=100"))["data"]}
         queued_by_task: dict[str, list[str]] = {}
-        for run in sorted(await self._list_runs({"filter[status]": "QUEUED"}), key=lambda r: r["createdAt"]):
+        # Dequeue order: created time minus the priority offset (recorded in metadata by the board).
+        queue_time = lambda r: _timestamp(r["createdAt"]) - float((r.get("metadata") or {}).get("priority") or 0)
+        for run in sorted(await self._list_runs({"filter[status]": "QUEUED"}), key=queue_time):
             queued_by_task.setdefault(run["taskIdentifier"], []).append(run["id"])
 
         cards = []
@@ -106,6 +118,11 @@ class TriggerAdapter:
                 agent=metadata.get("agent"),
             )
             self._metadata[run["id"]] = metadata
+            # Trigger.dev dequeues by queue time = created time minus `priority` seconds. The board
+            # records the priority it chose in the run's metadata; the runs list doesn't report it.
+            card.priority = float(metadata.get("priority") or 0)
+            card.order = _timestamp(run.get("createdAt")) - card.priority
+            self._runs_seen[run["id"]] = {"tags": run.get("tags") or [], "metadata": metadata}
             if task == "agent-session":
                 card.apply_session(self._session_view(run["id"], metadata))
             else:
@@ -305,6 +322,32 @@ class TriggerAdapter:
 
     async def steer(self, run_id: str, message: dict[str, Any]) -> None:
         await self._request("POST", f"/realtime/v1/streams/{run_id}/input/{STEER_STREAM}", json={"data": message})
+
+    async def place(self, card: Card, above: Card | None, below: Card | None) -> str:
+        """Drag and drop into Queued (moves.py). Trigger.dev sets a run's priority only when it is
+        triggered, so the run is cancelled (unless finished) and replayed with a priority offset that
+        puts its queue time between its new neighbours. moves.py only allows this in the middle of
+        the column for runs that haven't started; started runs go to the top or bottom."""
+        if above is not None and below is not None:
+            target = (above.order + below.order) / 2
+        elif below is not None:
+            target = below.order - 10
+        elif above is not None:
+            target = above.order + 1
+        else:
+            target = time.time()
+        priority = max(0, round(time.time() - target + 1))
+        seen = self._runs_seen.get(card.id) or {}
+        if not is_final(card.column):
+            await self.cancel(card.id)
+        body = {"priority": priority, "tags": seen.get("tags") or [f"board:{card.board}"],
+                "metadata": {**(seen.get("metadata") or {"title": card.title}), "priority": priority}}
+        return (await self._request("POST", f"/api/v1/runs/{card.id}/replay", json=body))["id"]
+
+    async def start_now(self, card: Card) -> None:
+        # A delayed run: reschedule it to now.
+        await self._request("POST", f"/api/v1/runs/{card.id}/reschedule",
+                            json={"delay": datetime.now(timezone.utc).isoformat()})
 
     async def cancel(self, run_id: str) -> None:
         await self._request("POST", f"/api/v2/runs/{run_id}/cancel")

@@ -50,6 +50,13 @@ def _longest_minutes(flow: dict[str, Any]) -> float:
     return max((finish(sid) for sid in steps), default=0)
 
 
+def _priority(value: Any) -> int:
+    try:
+        return min(3, max(1, int(value)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -104,6 +111,10 @@ class HatchetAdapter:
             steerable=task in (AGENT_TASK, "agent-session") and not is_final(column),
             agent=run_input.get("agent"),
         )
+        # Hatchet runs higher priority (1-3, default 1) first, then oldest first. The board records
+        # the priority it chose in the run's metadata; the run summary doesn't report it.
+        card.priority = _priority((s.additional_metadata or {}).get("priority"))
+        card.order = -card.priority * 1e10 + (s.created_at.timestamp() if s.created_at else 0)
         if column == "queued":
             ahead = queued.get(task, [])
             card.queue = {
@@ -212,7 +223,8 @@ class HatchetAdapter:
         return sorted(logs.values(), key=lambda line: line.created_at)
 
     async def _queued_ahead(self) -> dict[str, list[str]]:
-        """Queued runs per task (any board), oldest first: a card's index = how many are ahead."""
+        """Queued runs per task (any board), in the order Hatchet runs them (higher priority, then
+        oldest first): a card's index = how many are ahead."""
         since = datetime.now(timezone.utc) - timedelta(days=7)
         rows = await asyncio.to_thread(
             lambda: self.hatchet.runs.list(
@@ -221,7 +233,7 @@ class HatchetAdapter:
             or []
         )
         per_task: dict[str, list[str]] = {}
-        for s in sorted(rows, key=lambda s: s.created_at):
+        for s in sorted(rows, key=lambda s: (-_priority((s.additional_metadata or {}).get("priority")), s.created_at)):
             per_task.setdefault(s.workflow_name or s.display_name, []).append(s.workflow_run_external_id)
         return per_task
 
@@ -324,6 +336,21 @@ class HatchetAdapter:
 
     async def steer(self, run_id: str, message: dict[str, Any]) -> None:
         await asyncio.to_thread(lambda: self.hatchet.event.push(STEER_EVENT, message, scope=run_id))
+
+    async def place(self, card: Card, above: Card | None, below: Card | None) -> str:
+        """Drag and drop into Queued (moves.py). Hatchet can't change a run's priority after it is
+        created, so the run is re-created at the nearest of its three levels (coarse): top -> 3,
+        bottom -> 1, between two cards -> the level of the card above (it lands at the end of that
+        level, since order within a level is by age). The original is cancelled if not finished."""
+        priority = 3 if above is None else 1 if below is None else _priority(above.priority)
+        details = await asyncio.to_thread(self.hatchet.runs.get, card.id)
+        run_input = details.run.input or {}
+        run_input = run_input.get("input", run_input) if isinstance(run_input, dict) else {}
+        metadata = {**(details.run.additional_metadata or {}), "priority": priority}
+        if not is_final(card.column):
+            await self.cancel(card.id)
+        created = await self.hatchet.runs.aio_create(card.task, run_input, additional_metadata=metadata, priority=priority)
+        return created.run.metadata.id
 
     async def cancel(self, run_id: str) -> None:
         await asyncio.to_thread(self.hatchet.runs.cancel, run_id)

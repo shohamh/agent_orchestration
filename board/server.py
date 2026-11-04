@@ -40,6 +40,7 @@ from typing import Any
 from aiohttp import web
 
 import auth
+import moves
 from cards import COLUMNS, Dag, DagNode
 from flows_client import FlowHost, flow_for_task
 from live import Hub
@@ -106,6 +107,39 @@ async def label_flows(app: web.Application, cards: list[Any]) -> None:
     for card in cards:
         card.flow = flow_for_task(card.task, flows)
         card.backend_url = backend_url(card.system, card.id, tenant=tenant_id(app['adapters'].get(card.system)))
+    moves.annotate(cards)  # drag-and-drop targets per card; the UI sorts columns by card.order
+
+
+async def move_card(request: web.Request) -> web.Response:
+    """Drag and drop: {board, to, above, below} (ids of the cards around the drop point, or null).
+    The action follows from the card's column and the target (moves.py); returns the card's id,
+    which is new when the engine had to re-create the run."""
+    adapter = adapter_for(request)
+    body = await json_object(request)
+    board, to = text_field(body, "board", 200), text_field(body, "to", 20)
+    run_id = request.match_info["run_id"]
+    cards = await adapter.list_cards(board, light=True)
+    await label_flows(request.app, cards)
+    card = next((c for c in cards if c.id == run_id), None)
+    if card is None:
+        raise web.HTTPNotFound(text="that card is no longer on this board")
+    target = [c for c in cards if c.column == to]
+    above, below = moves.placement(target, run_id, body.get("above"), body.get("below"))
+    action = moves.validate(card, to, above, below)
+    new_id = run_id
+    if action in ("reorder", "restart"):
+        new_id = await adapter.place(card, above, below)
+    elif action == "start_now":
+        await adapter.start_now(card)
+    elif action == "cancel":
+        await adapter.cancel(run_id)
+    elif action == "stop":
+        await adapter.steer(run_id, {"action": "stop"})
+    elif action == "mark_done":
+        await adapter.input(run_id, {"type": "done"})
+    elif action == "continue":
+        await adapter.input(run_id, {"type": "message", "text": "continue"})
+    return web.json_response({"id": new_id, "action": action})
 
 
 async def list_cards(request: web.Request) -> web.Response:
@@ -623,6 +657,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)
     app.router.add_delete("/api/flows/{name}", flows_delete)
+    app.router.add_post("/api/cards/{system}/{run_id}/move", move_card)
     app.router.add_post("/api/cards/{system}/{run_id}/{action}", card_action)
     app.router.add_post("/api/queues/{system}/{queue}/pause", pause_queue)
     app.router.add_static("/static", STATIC)

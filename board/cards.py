@@ -31,6 +31,12 @@ class Card:
     version: str | None = None  # changes whenever the card's transcript or log does
     flow: str | None = None  # the portable flow (flows/*.yaml) this run belongs to
     backend_url: str | None = None
+    # Drag and drop (moves.py): queue order key (lower runs first), engine priority, allowed moves.
+    order: float | None = None
+    priority: float | None = None
+    moves: dict[str, str] = field(default_factory=dict)  # target column -> action
+    reorder: str | None = None  # native | coarse | recreate
+    reorder_note: str | None = None
 
     def apply_session(self, session: Any) -> None:
         """Project the session status without hiding an engine failure/cancellation."""

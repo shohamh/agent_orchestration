@@ -11,6 +11,7 @@ Talks to the Prefect REST API (env: PREFECT_API_URL, e.g. http://host.docker.int
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -36,6 +37,30 @@ _COLUMN = {
     "PAUSED": "waiting",
     "COMPLETED": "done",
 }  # FAILED, CRASHED, CANCELLED -> stopped
+
+
+def _timestamp(text: str | None) -> float | None:
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _between(above: float | None, below: float | None) -> float:
+    """A start time that sorts between two neighbours (top: before the first, bottom: after the last)."""
+    if above is not None and below is not None:
+        return (above + below) / 2
+    if below is not None:
+        return below - 10
+    if above is not None:
+        return above + 1
+    return time.time()
+
+
+def _iso(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
 
 
 def _column(run: dict[str, Any]) -> str:
@@ -126,7 +151,7 @@ class PrefectAdapter:
         runs = await self._request("POST", "/flow_runs/filter",
                                    {"flow_runs": {"tags": {"all_": [f"board:{board}"]}}, "sort": "EXPECTED_START_TIME_DESC", "limit": 200})
         waiting = await self._request("POST", "/flow_runs/filter",
-                                      {"flow_runs": {"state": {"type": {"any_": ["SCHEDULED", "PENDING"]}}}, "sort": "EXPECTED_START_TIME_ASC", "limit": 200})
+                                      {"flow_runs": {"state": {"type": {"any_": ["SCHEDULED", "PENDING"]}}}, "sort": "NEXT_SCHEDULED_START_TIME_ASC", "limit": 200})
         ahead_by_deployment: dict[str, list[str]] = {}
         for run in waiting:
             ahead_by_deployment.setdefault(run.get("deployment_id") or "", []).append(run["id"])
@@ -161,6 +186,13 @@ class PrefectAdapter:
             steerable=task in ("steerable-agent", "agent-session") and not is_final(column),
             agent=params.get("agent"),
         )
+        # Prefect starts the run with the earliest scheduled time first: that is the queue order.
+        # next_scheduled_start_time follows a new Scheduled state; expected_start_time keeps the first one.
+        card.order = _timestamp(run.get("next_scheduled_start_time") or run.get("expected_start_time"))
+        if column == "scheduled" and card.order is not None and card.order <= time.time():
+            # Due but not picked up yet: it's waiting in the queue, whether or not Prefect's
+            # late-runs service has renamed it "Late" (a reorder sets "Scheduled" again).
+            card.column = column = "queued"
         if column in ("queued", "scheduled"):
             ahead = ahead_by_deployment.get(run.get("deployment_id") or "", [])
             card.queue = {"name": run.get("work_queue_name") or task, "queued": len(ahead),
@@ -292,6 +324,28 @@ class PrefectAdapter:
 
     async def steer(self, run_id: str, message: dict[str, Any]) -> None:
         await self._send_input(run_id, "steermessage", message)
+
+    async def place(self, card: Card, above: Card | None, below: Card | None) -> str:
+        """Drag and drop into Queued/Scheduled (moves.py): exact, since Prefect runs the earliest
+        scheduled time first. A queued or scheduled run gets a new start time between its new
+        neighbours; any other run is started again as a new run at that time (cancelled first if
+        it is still running)."""
+        when = _between(above.order if above else None, below.order if below else None)
+        state = {"type": "SCHEDULED", "name": "Scheduled", "state_details": {"scheduled_time": _iso(when)}}
+        if card.column in ("queued", "scheduled"):
+            await self._request("POST", f"/flow_runs/{card.id}/set_state", {"state": state, "force": True})
+            return card.id
+        run = await self._request("GET", f"/flow_runs/{card.id}")
+        if not is_final(card.column):
+            await self.cancel(card.id)
+        new = await self._request("POST", f"/deployments/{run['deployment_id']}/create_flow_run",
+                                  {"parameters": run.get("parameters") or {}, "tags": run.get("tags") or [],
+                                   "name": run.get("name"), "state": state})
+        return new["id"]
+
+    async def start_now(self, card: Card) -> None:
+        state = {"type": "SCHEDULED", "name": "Scheduled", "state_details": {"scheduled_time": _iso(time.time())}}
+        await self._request("POST", f"/flow_runs/{card.id}/set_state", {"state": state, "force": True})
 
     async def cancel(self, run_id: str) -> None:
         await self._request("POST", f"/flow_runs/{run_id}/set_state", {"state": {"type": "CANCELLING"}, "force": True})

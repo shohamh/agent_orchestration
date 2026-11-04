@@ -70,6 +70,30 @@ instead (tailnet only; the phone needs the Tailscale app).
 | Replay | Re-runs **the same run**. A durable task replays from its recorded event history, so it can finish again almost instantly. | Creates **a new run** on the same board | Creates **a new run** with the same parameters and tags |
 | Pause a queue | Not available. Hold work with concurrency limits or by stopping the worker. | **Pause / Resume queue** button | Not for served deployments (work-pool queues can be paused in Prefect's UI) |
 
+## Drag and drop
+
+Drag a card (on a phone, hold it briefly first) to another column or to a new place in Queued. While
+you drag, columns the card can't go to are dimmed and each allowed column says what dropping does.
+The rules are in `moves.py`; the server checks them again before acting.
+
+| Drop | Action | Hatchet | Trigger.dev | Prefect |
+|---|---|---|---|---|
+| Within Queued | Change priority (top runs first) | **Coarse:** the not-started run is re-created at priority 3 (top), 1 (bottom) or the level of the card above; order within a level is by age | The not-started run is cancelled and replayed with a `priority` offset that puts it between its neighbours | **Exact:** a new start time between its neighbours (Prefect runs the earliest first) |
+| Within Scheduled | Change start time | — | — | New start time |
+| Scheduled → Queued | Start now | — | Reschedule to now | Start time = now |
+| Queued/Scheduled/Running/Waiting → Stopped | Cancel | Cancel | Cancel | Cancel |
+| Running → Done | Stop gracefully (steerable agent only) | `agent:steer` stop | `steer` stream stop | Flow run input stop |
+| Waiting → Done / Running | Mark done / Continue (coding-agent session waiting for you) | Session input | Session input | Session input |
+| Running/Waiting/Done/Stopped → Queued | Run again as a new run, **top = high priority, bottom = low** | New run at priority 3 or 1 | New run with a high or no `priority` offset (cancels a running one first) | New run at the front or back of the queue |
+
+- A run that already started can only go to the **top or bottom** of Queued; the middle is dimmed
+  while you hold it. Moves that cancel a running run ask first.
+- Columns are ordered the way the engine will run them: Queued and Scheduled by priority/start time,
+  Running oldest first, Done and Stopped newest first. "N ahead" follows the same order.
+- Re-created runs get a new run id: the old one stays in the engine's UI as cancelled.
+- The priority the board chose is kept in the run's metadata (`priority`), because neither Hatchet's
+  nor Trigger.dev's run list reports it.
+
 ## Live updates
 
 The browser holds one server-sent event stream per tab (`GET /api/live?system=&board=&card=`) and
