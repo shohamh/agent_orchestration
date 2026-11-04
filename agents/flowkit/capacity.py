@@ -7,6 +7,9 @@ until execution stops. Dead-owner pending launches and verified-dead trees are
 reclaimed; a changed OS boot UUID proves all old leases reclaimable.
 Cooldown and samples survive reconnects; OS boot identity invalidates old samples.
 RAM is (total-available)/total physical memory, including reclaimable memory as free.
+Automatic live-orphan termination is supported only for Windows named Jobs in
+the same OS session. POSIX surviving orphan groups remain safely reserved until
+verified group death or reboot; unattended POSIX crash recovery is unsupported.
 """
 import contextlib
 import ctypes
@@ -61,11 +64,21 @@ def process_identity(pid):
     except FileNotFoundError: return None
 
 
+def session_id():
+    if os.name != 'nt': return None
+    from ctypes import wintypes
+    result=wintypes.DWORD()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(),ctypes.byref(result)):
+        raise ctypes.WinError()
+    return result.value
+
+
 def execution_dead(details):
     if details['phase'] == 'pending':
         # The child cannot receive its execution payload until start is durable.
         return True
     if os.name == 'nt':
+        if details.get('session') is None or details['session'] != session_id(): return False
         try: from agentdriver.process_tree import reclaim_named_tree
         except ImportError: from agents.agentdriver.process_tree import reclaim_named_tree
         return reclaim_named_tree(details['tree'])
@@ -161,7 +174,7 @@ class CapacityGate:
             self._reclaim(db)
             reason=None
             if db.execute('SELECT COUNT(*) FROM leases').fetchone()[0]>=settings['slots']: reason='full_slots'
-            elif any(json.loads(row[0]).get('phase') == 'pending' for row in db.execute('SELECT details FROM leases')): reason='pending_start'
+            elif any(json.loads(row[0]).get('phase') in ('pending','launching') for row in db.execute('SELECT details FROM leases')): reason='pending_start'
             elif now-s['last_start']<10 or (s['samples'] and s['samples'][-1][0]-s['last_start']<10): reason='cooldown'
             elif m['state']=='unknown': reason='missing_metrics'
             elif m['cpu_percent']>=settings['cpu_limit']: reason='high_cpu'
@@ -181,13 +194,20 @@ class CapacityGate:
                 if execution_dead(details): db.execute('DELETE FROM leases WHERE job=?',(job,))
             except (OSError, KeyError, ImportError): continue
 
+    def attach_execution(self, job, fence, pid, tree=None):
+        with self.transaction() as db:
+            if not self._valid(db,job,fence): raise RuntimeError('Capacity lease lost before launch')
+            details=json.loads(db.execute('SELECT details FROM leases WHERE job=?',(job,)).fetchone()[0])
+            details.update(phase='launching',pid=pid,process_identity=process_identity(pid),tree=tree,session=session_id())
+            db.execute('UPDATE leases SET details=? WHERE job=?',(json.dumps(details),job))
+
     def confirm_started(self, job, fence, pid, tree=None):
         with self.transaction() as db:
             if not self._valid(db,job,fence): raise RuntimeError('Capacity lease lost before start')
             raw=db.execute('SELECT details FROM leases WHERE job=?',(job,)).fetchone()[0]
             details=json.loads(raw)
-            if details.get('phase') != 'pending': return
-            details.update(phase='started',pid=pid,process_identity=process_identity(pid),tree=tree)
+            if details.get('phase') == 'started': return
+            details.update(phase='started',pid=pid,process_identity=process_identity(pid),tree=tree,session=session_id())
             db.execute('UPDATE leases SET details=? WHERE job=?',(json.dumps(details),job))
             s=self._state(db); s['last_start']=self.clock(); self._save(db,s)
 

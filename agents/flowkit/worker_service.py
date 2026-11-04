@@ -19,14 +19,16 @@ from .definition import parse
 ROOT = Path(__file__).resolve().parents[2]
 
 
-async def capacity_call(function, *args, deadline=None):
+async def capacity_call(function, *args, deadline=None, cancelled=None):
     """SQLite may block briefly; retries never block the event loop."""
     while True:
+        if cancelled is not None and cancelled.is_set(): raise asyncio.CancelledError
         try: return await asyncio.to_thread(function, *args)
         except sqlite3.OperationalError as exc:
             if 'locked' not in str(exc).lower() and 'busy' not in str(exc).lower(): raise
             if deadline is not None and time.monotonic() >= deadline:
                 raise RuntimeError('Capacity database unavailable; lease lost') from exc
+            if cancelled is not None and cancelled.is_set(): raise asyncio.CancelledError
             await asyncio.sleep(.05)
 
 
@@ -70,9 +72,11 @@ class Job:
                 restore(self.config['files'], workspaces/self.config['runId'])
                 restore(self.config['assets'], assets)
                 while True:
-                    acquire = asyncio.create_task(capacity_call(self.app['capacity'].try_acquire, self.id))
+                    cancel_acquire = asyncio.Event()
+                    acquire = asyncio.create_task(capacity_call(self.app['capacity'].try_acquire, self.id, cancelled=cancel_acquire))
                     try: lease = await asyncio.shield(acquire)
                     except asyncio.CancelledError:
+                        cancel_acquire.set()
                         lease = await acquire  # Account for a reservation committed during cancellation.
                         raise
                     if lease['acquired']: break
@@ -93,10 +97,8 @@ class Job:
                 heartbeat = asyncio.create_task(renew())
                 self.app['stats']['active'] += 1
                 try:
-                    self.state = 'running'
-                    self.started = True
-                    self.events.append({'type': 'worker', 'worker': self.app['identity']})
-                    env = {**os.environ, 'FLOW_WORKSPACES': str(workspaces), 'FLOW_ASSETS_DIR': str(assets), 'FLOW_MANAGED_JOB':'1', 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1'}
+                    self.waiting_reason = 'starting'
+                    env = {**os.environ, 'FLOW_WORKSPACES': str(workspaces), 'FLOW_ASSETS_DIR': str(assets), 'FLOW_MANAGED_JOB':'1', 'FLOW_CAPACITY_HANDSHAKE':'1', 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1'}
                     launch = asyncio.create_task(asyncio.create_subprocess_exec(sys.executable, '-u', '-m', 'flowkit.worker_stdio', cwd=ROOT/'agents', env=env,
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         limit=512*1024, start_new_session=os.name != 'nt'))
@@ -109,13 +111,28 @@ class Job:
                         from agentdriver.process_tree import ProcessTree
                         tree_name = 'Local\\FlowCapacity-' + lease['fence']
                         tree = ProcessTree(self.process.pid, name=tree_name)
+                    self.process.stdin.write((json.dumps(self.config['start'])+'\n').encode())
+                    await self.process.stdin.drain()
+                    ready = json.loads(await self.process.stdout.readline())
+                    if ready != {'type':'capacity_ready'}: raise RuntimeError('Worker readiness handshake failed')
+                    attach = asyncio.create_task(capacity_call(self.app['capacity'].attach_execution, self.id, lease['fence'], self.process.pid, tree_name, deadline=lease['expires']))
+                    try: await asyncio.shield(attach)
+                    except asyncio.CancelledError:
+                        await attach
+                        raise
+                    self.process.stdin.write(b'{"type":"capacity_go"}\n')
+                    await self.process.stdin.drain()
+                    started = json.loads(await self.process.stdout.readline())
+                    if started != {'type':'capacity_started'}: raise RuntimeError('Worker start handshake failed')
                     confirm = asyncio.create_task(capacity_call(self.app['capacity'].confirm_started, self.id, lease['fence'], self.process.pid, tree_name, deadline=lease['expires']))
                     try: await asyncio.shield(confirm)
                     except asyncio.CancelledError:
                         await confirm
                         raise
-                    self.process.stdin.write((json.dumps(self.config['start'])+'\n').encode())
-                    await self.process.stdin.drain()
+                    self.waiting_reason = None
+                    self.state = 'running'
+                    self.started = True
+                    self.events.append({'type': 'worker', 'worker': self.app['identity']})
                     async def inputs():
                         while True:
                             item = await self.inbox.get()

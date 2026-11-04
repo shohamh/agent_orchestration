@@ -19,7 +19,13 @@ async def main():
         return json.loads(line)
     async def sink(event):
         print(json.dumps(event, ensure_ascii=False), flush=True)
-    output = await run_step(parse(start['flow']), start['step'], start['context'], start['runId'], receive, sink)
+    flow = parse(start['flow'])
+    if os.environ.get('FLOW_CAPACITY_HANDSHAKE') == '1':
+        await sink({'type':'capacity_ready'})
+        if json.loads(await reader.readline()) != {'type':'capacity_go'}:
+            raise RuntimeError('Worker start was not authorized')
+        await sink({'type':'capacity_started'})
+    output = await run_step(flow, start['step'], start['context'], start['runId'], receive, sink)
     await sink({'type': 'result', 'output': output})
 
 

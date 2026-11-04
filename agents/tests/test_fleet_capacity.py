@@ -309,3 +309,72 @@ class LegacySafetyTests(unittest.TestCase):
             self.assertTrue(gate.valid('active',lease['fence']))
             with upgraded.transaction() as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],1)
+
+class RoundTwoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_queued_acquisition_while_database_stays_locked(self):
+        import asyncio
+        from agents.flowkit.worker_service import Job
+        with tempfile.TemporaryDirectory() as directory:
+            gate=CapacityGate(Path(directory)/'gate.db')
+            now=time.monotonic()
+            for i in range(11): gate.observe(1,1,now-10+i)
+            with gate.transaction():
+                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'root':Path(directory)},'queued',{'files':{},'assets':{},'runId':'test'})
+                await asyncio.sleep(.04)
+                job.task.cancel()
+                await asyncio.wait_for(asyncio.gather(job.task,return_exceptions=True),.8)
+                self.assertEqual(job.state,'cancelled')
+                self.assertIsNone(job.process)
+            with gate.transaction() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
+
+    @unittest.skipUnless(os.name=='nt','Windows session namespace')
+    def test_other_session_absence_is_not_proof_of_tree_death(self):
+        from agents.flowkit.capacity import execution_dead
+        details={'phase':'started','tree':'Local\\FlowCapacity-test','session':123}
+        with patch('agents.flowkit.capacity.session_id',return_value=456), patch('agentdriver.process_tree.reclaim_named_tree',return_value=True) as reclaim:
+            self.assertFalse(execution_dead(details))
+            reclaim.assert_not_called()
+        with patch('agents.flowkit.capacity.session_id',return_value=123), patch('agentdriver.process_tree.reclaim_named_tree',return_value=True):
+            self.assertTrue(execution_dead(details))
+        details.pop('session')
+        with patch('agentdriver.process_tree.reclaim_named_tree',return_value=True) as reclaim:
+            self.assertFalse(execution_dead(details))
+            reclaim.assert_not_called()
+
+    async def test_delayed_child_handshake_blocks_admission_until_workload_start(self):
+        import asyncio
+        import json
+        from agents.flowkit.worker_service import Job
+        original=asyncio.create_subprocess_exec
+        script='import sys,time,json; sys.stdin.readline(); time.sleep(.3); print(json.dumps({"type":"capacity_ready"}),flush=True); sys.stdin.readline(); time.sleep(.4); print(json.dumps({"type":"capacity_started"}),flush=True); time.sleep(60)'
+        async def delayed(*args,**kwargs):
+            return await original(sys.executable,'-u','-c',script,**kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            gate=CapacityGate(Path(directory)/'gate.db',slots=2)
+            now=time.monotonic()
+            for i in range(11): gate.observe(1,1,now-10+i)
+            with patch('agents.flowkit.worker_service.asyncio.create_subprocess_exec',side_effect=delayed):
+                job=Job({'slots':asyncio.Semaphore(2),'capacity':gate,'root':Path(directory),'stats':{'active':0},'identity':{}},'slow',{'files':{},'assets':{},'runId':'test','start':{}})
+                try:
+                    phases=[]; launching_at=None; started_at=None
+                    for _ in range(200):
+                        await asyncio.sleep(.01)
+                        with gate.transaction() as db:
+                            row=db.execute('SELECT details FROM leases WHERE job=?',('slow',)).fetchone()
+                            if row:
+                                phase=json.loads(row[0])['phase']
+                                phases.append(phase)
+                                if phase=='launching' and launching_at is None: launching_at=time.monotonic()
+                                if phase=='started':
+                                    started_at=gate._state(db)['last_start']; break
+                        if row and phase in ('pending','launching'):
+                            self.assertEqual(gate.try_acquire('other')['reason'],'pending_start')
+                    self.assertIn('pending',phases)
+                    self.assertIn('launching',phases)
+                    self.assertIsNotNone(started_at)
+                    self.assertGreaterEqual(started_at-launching_at,.3)
+                    self.assertEqual(gate.try_acquire('other')['reason'],'cooldown')
+                finally:
+                    job.task.cancel()
+                    await asyncio.gather(job.task,return_exceptions=True)
