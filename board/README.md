@@ -118,7 +118,7 @@ Verified on 2026-11-03: shared watchers and incremental updates, 100-message/100
 per-step chat controls on all three local backends, native Hatchet descendant replay with
 unchanged outputs, and Prefect/Trigger runtime restart with prerequisite result/workspace reuse.
 `step_smoke_test.py` uses simulated agents and a disposable flow; run it only while portable-flow
-workers are idle because saving/deleting that fixture re-registers them.
+workers are idle because it activates (and later removes) that fixture, which re-registers them.
 
 Each system produces a different kind of graph:
 

@@ -13,9 +13,12 @@
   GET  /api/cards/{system}/{run_id}/nodes/{ref}/logs  -> one DAG node's log, paged like /logs
                                                       (&after=<index> returns only newer lines)
   POST /api/cards/{system}/{run_id}/nodes/{ref}/input  agent input for one step of a portable flow
-  GET  /api/flows                                     -> portable flows (flows/*.yaml via the flow host)
+  GET  /api/flows                                     -> the active portable flows (what can be launched)
   POST /api/flows/validate {yaml}                     -> {ok, flow | error}
-  PUT|DELETE /api/flows/{name} {yaml}                 save / delete a flow (all backends re-register it)
+  PUT|DELETE /api/flows/{name} {yaml}                 save / delete a flow draft (nothing is activated)
+  /api/flow-documents[/{name}[/layout|/activation|/activate]], /api/flow-documents/parse|serialize
+                                                      workflow builder: drafts, revisions, layout and
+                                                      confirmed activation (2026-11-03-workflow-builder-api.md)
   POST /api/cards/{system}/{run_id}/steer             {instruction}
   POST /api/cards/{system}/{run_id}/{stop|cancel|replay}
   POST /api/queues/{system}/{queue}/pause             {paused: bool}   (Trigger.dev only)
@@ -29,6 +32,7 @@ import logging
 import json
 import base64
 import binascii
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -412,13 +416,118 @@ async def flows_validate(request: web.Request) -> web.Response:
 
 
 async def flows_save(request: web.Request) -> web.Response:
-    text = text_field(await json_object(request), "yaml", 200000)
-    return web.json_response(await request.app["flow_host"].save(request.match_info["name"], text))
+    body = await json_object(request)
+    text = text_field(body, "yaml", 200000)
+    expected = body.get("expectedRevision", ...)
+    if expected is not ... and expected is not None and not isinstance(expected, str):
+        raise ValueError("expectedRevision must be a revision or null")
+    return passed_through(await request.app["flow_host"].save(request.match_info["name"], text, expected))
 
 
 async def flows_delete(request: web.Request) -> web.Response:
     await request.app["flow_host"].delete(request.match_info["name"])
     return web.json_response({"ok": True})
+
+
+# Workflow builder: docs/superpowers/specs/2026-11-03-workflow-builder-api.md. The flow host owns
+# drafts and activation; the board adds what only it can see, the active runs on every engine.
+ENGINE_SYSTEMS = {"hatchet": "hatchet", "prefect": "prefect", "trigger": "trigger-dev"}
+
+
+def passed_through(result: tuple[int, Any]) -> web.Response:
+    status, body = result
+    return web.json_response(body, status=status)
+
+
+def yaml_field(body: dict) -> str:
+    text = body.get("yaml")
+    if not isinstance(text, str) or len(text) > 200000:
+        raise ValueError("yaml must be text of at most 200000 characters")
+    return text
+
+
+async def flow_documents(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].documents())
+
+
+async def flow_document(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].document(request.match_info["name"]))
+
+
+async def flow_document_parse(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].parse_document(yaml_field(await json_object(request))))
+
+
+async def flow_document_serialize(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].serialize_document((await json_object(request)).get("document")))
+
+
+async def flow_document_save(request: web.Request) -> web.Response:
+    body = await json_object(request)
+    expected = body.get("expectedRevision")
+    if expected is not None and not isinstance(expected, str):
+        raise ValueError("expectedRevision must be a revision or null")
+    return passed_through(await request.app["flow_host"].save_document(request.match_info["name"], yaml_field(body), expected))
+
+
+async def flow_document_layout(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].save_layout(request.match_info["name"], (await json_object(request)).get("layout")))
+
+
+async def flow_document_delete(request: web.Request) -> web.Response:
+    return passed_through(await request.app["flow_host"].delete_document(request.match_info["name"], request.query.get("revision", "")))
+
+
+async def engine_runs(app: web.Application, engine: str, flows: dict[str, dict]) -> list[dict] | None:
+    """Active runs an activation could interrupt on one engine, across all boards; None if unknown."""
+    adapter = app["adapters"].get(ENGINE_SYSTEMS[engine])
+    if adapter is None or not hasattr(adapter, "active_runs"):
+        return None
+    try:
+        return await asyncio.wait_for(adapter.active_runs(flows), 20)
+    except Exception as exc:  # unknown, never "no runs"
+        log.warning("active runs on %s unavailable: %s: %s", engine, type(exc).__name__, exc)
+        return None
+
+
+async def activation_preview(app: web.Application, name: str) -> tuple[int, dict]:
+    status, host = await app["flow_host"].activation(name)
+    if status != 200:
+        return status, host
+    # Every flow an engine serves (a removal that failed somewhere included), with its definition.
+    flows = {**(host.get("served") or {}), **({} if name in (host.get("served") or {}) else {name: {}})}
+    runs = await asyncio.gather(*(engine_runs(app, e["engine"], flows) for e in host["engines"]))
+    engines = [{"engine": e["engine"], "action": e["action"], "available": bool(e.get("enabled", True)) and found is not None,
+                "activeRuns": found} for e, found in zip(host["engines"], runs)]
+    disruptive = any(e["action"] != "none" and (e["activeRuns"] is None or e["activeRuns"]) for e in engines)
+    impact = {"revision": host["revision"], "activeRevision": host["activeRevision"], "change": host["change"],
+              "engines": [[e["engine"], e["action"], None if e["activeRuns"] is None else sorted(r["id"] for r in e["activeRuns"])]
+                          for e in engines]}
+    digest = hashlib.sha256(json.dumps(impact, sort_keys=True).encode()).hexdigest()
+    return 200, {"name": name, "revision": host["revision"], "activeRevision": host["activeRevision"], "change": host["change"],
+                 "engines": engines, "disruptive": disruptive, "impact": f"sha256:{digest}", "errors": host.get("errors", [])}
+
+
+async def flow_document_activation(request: web.Request) -> web.Response:
+    return passed_through(await activation_preview(request.app, request.match_info["name"]))
+
+
+async def flow_document_activate(request: web.Request) -> web.Response:
+    """Recheck the impact right before applying: confirmation is enforced here, not in the browser."""
+    body, name = await json_object(request), request.match_info["name"]
+    status, preview = await activation_preview(request.app, name)
+    if status != 200:
+        return web.json_response(preview, status=status)
+    if body.get("revision") != preview["revision"]:
+        return web.json_response({"error": "conflict", "preview": preview}, status=409)
+    if body.get("impact") != preview["impact"]:
+        return web.json_response({"error": "impact changed", "preview": preview}, status=409)
+    if preview["disruptive"] and body.get("confirm") is not True:
+        return web.json_response({"error": "confirmation required", "preview": preview}, status=409)
+    status, result = await request.app["flow_host"].activate(name, preview["revision"])
+    if status == 409:  # the draft changed in between: show the board's view of the new draft
+        result = {"error": "conflict", "preview": (await activation_preview(request.app, name))[1]}
+    return web.json_response(result, status=status)
 
 
 async def node_logs(request: web.Request) -> web.Response:
@@ -501,6 +610,15 @@ def make_app() -> web.Application:
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/transcript", node_transcript)
     app.router.add_post("/api/cards/{system}/{run_id}/nodes/{ref}/restart", node_restart)
     app.router.add_get("/api/flows", flows_list)
+    app.router.add_get("/api/flow-documents", flow_documents)
+    app.router.add_post("/api/flow-documents/parse", flow_document_parse)
+    app.router.add_post("/api/flow-documents/serialize", flow_document_serialize)
+    app.router.add_get("/api/flow-documents/{name}", flow_document)
+    app.router.add_put("/api/flow-documents/{name}", flow_document_save)
+    app.router.add_delete("/api/flow-documents/{name}", flow_document_delete)
+    app.router.add_put("/api/flow-documents/{name}/layout", flow_document_layout)
+    app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
+    app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
     app.router.add_get('/api/workers', workers_list)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)

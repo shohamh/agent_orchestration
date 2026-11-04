@@ -84,7 +84,9 @@ Select **Hatchet** or **Trigger.dev · local**. The existing production tab reta
 
 Flows in [`../flows`](../flows/README.md) run natively on all three backends. Start the flow host in
 another terminal; it runs the Hatchet and Prefect flow workers, regenerates the Trigger.dev flow tasks
-(picked up by the `trigger dev` worker above), and serves the board's Flows API on 127.0.0.1:8095:
+(picked up by the `trigger dev` worker above) when a flow is activated, and serves the board's Flows
+API on 127.0.0.1:8095. Saved files are drafts; the workers serve the active snapshots in
+`FLOW_STATE_DIR` (default `.flow-state/`), see [Drafts and activation](../flows/README.md#drafts-and-activation):
 
 ```powershell
 agents/.venv/Scripts/python.exe -u agents/flow_host.py

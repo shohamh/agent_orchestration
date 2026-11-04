@@ -37,6 +37,19 @@ class _ShapeItem(NamedTuple):
     children_step_ids: list[str]
 
 
+def _longest_minutes(flow: dict[str, Any]) -> float:
+    """Longest a run of a flow definition ({steps: {needs, retries, timeout_minutes}}) can execute."""
+    steps, memo = flow.get("steps") or {}, {}
+
+    def finish(sid: str, seen: frozenset = frozenset()) -> float:
+        if sid not in memo:
+            step = steps.get(sid) or {}
+            before = [finish(n, seen | {sid}) for n in step.get("needs", []) if n in steps and n not in seen]
+            memo[sid] = max(before, default=0) + step.get("timeout_minutes", 60) * (step.get("retries", 0) + 1)
+        return memo[sid]
+    return max((finish(sid) for sid in steps), default=0)
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
@@ -51,6 +64,7 @@ class HatchetAdapter:
         # A finished DAG's task statuses don't change (until it is replayed, which changes finished_at).
         self._final_dag: dict[tuple[str, str | None], list[str]] = {}
         self._runs: dict[str, tuple[str, bool, bool]] = {}  # run id -> (task run id, is DAG, settled)
+        self._settled_tasks: dict[str, bool] = {}  # DAG task run id -> finished a while ago (seen by dag())
 
     async def list_cards(self, board: str, light: bool = False) -> list[Card]:
         """light: skip reading logs (no last line or session state yet) for a fast first paint."""
@@ -211,6 +225,28 @@ class HatchetAdapter:
             per_task.setdefault(s.workflow_name or s.display_name, []).append(s.workflow_run_external_id)
         return per_task
 
+    ACTIVE_WINDOW = timedelta(days=6)  # the SDK warns about list() ranges of 7 days or more
+    ACTIVE_LIMIT = 500
+
+    async def active_runs(self, flows: dict[str, dict]) -> list[dict[str, Any]] | None:
+        """Queued and running runs of portable flows on any board: restarting the flow worker
+        (activating a flow) interrupts them. None (unknown) when the listing could miss some:
+        too many rows, or a flow whose steps can run longer than the listed window."""
+        if any(_longest_minutes(flow) >= self.ACTIVE_WINDOW.total_seconds() / 60 for flow in flows.values()):
+            return None
+        since = datetime.now(timezone.utc) - self.ACTIVE_WINDOW
+        rows = await asyncio.to_thread(
+            lambda: self.hatchet.runs.list(
+                since=since, limit=self.ACTIVE_LIMIT, statuses=[V1TaskStatus.QUEUED, V1TaskStatus.RUNNING], include_payloads=False
+            ).rows
+            or []
+        )
+        if len(rows) >= self.ACTIVE_LIMIT:
+            return None
+        return [{"system": self.system, "board": (s.additional_metadata or {}).get("board"), "id": s.workflow_run_external_id,
+                 "title": str((s.additional_metadata or {}).get("title") or s.display_name), "status": s.status.value}
+                for s in rows if (s.workflow_name or s.display_name) in flows]
+
     async def dag(self, run_id: str) -> Dag:
         """The workflow's declared DAG (from the run's shape) with each task's live status."""
         details = await asyncio.to_thread(self.hatchet.runs.get, run_id)
@@ -220,6 +256,9 @@ class HatchetAdapter:
         shape = details.shape or [_ShapeItem(t.step_id, t.display_name, []) for t in details.tasks]
         for item in shape:
             task = tasks.get(item.step_id)
+            if task:
+                self._settled_tasks[task.task_external_id] = (
+                    is_final(_COLUMN.get(task.status, "running")) and settled(_iso(task.finished_at)))
             dag.nodes.append(
                 DagNode(
                     id=item.step_id,
@@ -237,7 +276,8 @@ class HatchetAdapter:
         return dag
 
     async def node_lines(self, ref: str) -> list[str]:
-        return await self._lines(ref, False)
+        # A settled step's log is read once more, then served from the cache.
+        return await self._lines(ref, self._settled_tasks.get(ref, False))
 
     async def run_info(self, run_id: str) -> dict:
         details = await asyncio.to_thread(self.hatchet.runs.get, run_id)
@@ -277,6 +317,7 @@ class HatchetAdapter:
         # Replayed nodes reuse task ids. Forget cached history; the engine owns which tasks ran.
         self.tails = TailCache(unique_messages=True)
         self.sessions = Memo()
+        self._settled_tasks.clear()
 
     async def input(self, run_id: str, message: dict[str, Any]) -> None:
         await asyncio.to_thread(lambda: self.hatchet.event.push("agent:input", message, scope=run_id))

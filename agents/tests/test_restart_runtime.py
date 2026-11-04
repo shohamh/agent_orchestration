@@ -100,7 +100,7 @@ class RestartService(unittest.IsolatedAsyncioTestCase):
 
     async def invoke(self, system):
         from flowkit import restart_service as service
-        with patch.object(service, 'dotenv_values', return_value={}), patch.object(service, 'load_all', return_value=({self.flow.name: self.flow}, {})), patch.object(service, 'build_plan', return_value={'step': 'b'}) as plan:
+        with patch.object(service, 'dotenv_values', return_value={}), patch.object(service, 'load_active', return_value=({self.flow.name: self.flow}, {})), patch.object(service, 'build_plan', return_value={'step': 'b'}) as plan:
             result = await service.restart_node(system, 'source', 'b')
             return result, plan.call_args
 

@@ -80,16 +80,7 @@
   .node-panel h5 { margin: 0; font-size: 14px; }
   .dag-node text.kind { fill: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
   .dag-node.agent rect.box { stroke-dasharray: 4 3; }
-  dialog.wide { width: min(860px, 96vw); }
-  .flow-editor { display: grid; grid-template-columns: 200px 1fr; gap: 12px; min-height: 420px; }
-  .flow-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 60vh; }
-  .flow-list button { text-align: left; font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
-  .flow-list button[aria-pressed="true"] { border-color: var(--accent); font-weight: 600; }
-  .flow-editor textarea { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; width: 100%; min-height: 380px; resize: vertical; tab-size: 2; }
-  .flow-check { font-size: 12px; white-space: pre-wrap; padding: 6px 8px; border-radius: 6px; background: var(--chip); }
-  .flow-check.bad { color: var(--danger); } .flow-check.good { color: var(--ok); }
   #n-flow-fields { display: flex; flex-direction: column; gap: 10px; }
-  @media (max-width: 700px) { .flow-editor { grid-template-columns: 1fr; } .flow-list { flex-direction: row; overflow-x: auto; } }
   /* Phones: one scrollable row of backend tabs, and the columns stacked top to bottom with empty
      ones collapsed to their header, so cards that need you are visible without sideways swiping. */
   @media (max-width: 700px) {
@@ -104,6 +95,7 @@
   }
 </style>
 <link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/flow-builder.css">
 </head>
 <body>
 <header>
@@ -188,29 +180,12 @@
   </form>
 </dialog>
 
-<dialog id="flows-dialog" class="wide">
-  <form id="flows-form" method="dialog">
-    <strong>Flows</strong>
-    <p class="status" style="margin:0">A flow runs on every backend as a native workflow: a Hatchet DAG workflow, a Prefect deployment,
-      and Trigger.dev tasks. Saving re-registers it on all three; steps running on the flow workers at that moment are interrupted.</p>
-    <div class="flow-editor">
-      <div class="flow-list" id="f-list"></div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <textarea id="f-yaml" spellcheck="false" aria-label="Flow YAML"></textarea>
-        <div class="flow-check" id="f-check" role="status">Pick a flow or start a new one.</div>
-      </div>
-    </div>
-    <div class="row" style="justify-content:space-between">
-      <button class="danger" id="f-delete" type="button">Delete</button>
-      <span class="row">
-        <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
-        <button class="primary" id="f-save" type="button">Save</button>
-      </span>
-    </div>
-  </form>
-</dialog>
+<!-- The flow builder (flow-builder.js): a flow runs on every backend as a native workflow. Saving
+     stores a draft only; activation is a separate, previewed step. -->
+<dialog id="flows-dialog" class="fb-dialog"></dialog>
 
 <script src="/static/chat.js"></script>
+<script src="/static/flow-builder.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
   // Chrome honours interactive-widget=resizes-content above; this covers browsers that only
@@ -877,7 +852,13 @@ function updateNewForm() {
   else $("n-production-note").textContent = "Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.";
   $("n-demo-note").hidden = $("n-agent").value !== "demo";
 }
-$("new-card").addEventListener("click", () => { updateNewForm(); loadFlows().then(updateNewForm); $("new-dialog").showModal(); pushOverlay("dialog", () => $("new-dialog").close()); });
+function openNewCard(kind) {
+  if (kind) { renderKindOptions(); if ([...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; }
+  updateNewForm();
+  loadFlows().then(() => { if (kind && [...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; updateNewForm(); });
+  $("new-dialog").showModal(); pushOverlay("dialog", () => $("new-dialog").close());
+}
+$("new-card").addEventListener("click", () => openNewCard());
 // Escape and the dialog's Close button close it natively; drop its history entry too. When Back
 // closed it, its entry is already gone and this is a no-op. Watching the `open` attribute (removed
 // synchronously on every close path) is more dependable than the "close" event, which a
@@ -909,79 +890,29 @@ $("new-form").addEventListener("submit", async (e) => {
   } catch (err) { setStatus(err.message, true); }
   finally { updateNewForm(); }
 });
-// ---------------------------------------------------------------- Flows editor
-const NEW_FLOW = `name: my-flow
-description: What this flow does
-input:
-  topic: something
-steps:
-  gather:
-    kind: program
-    run: python -c "print('gathering {{ input.topic }}')"
-  think:
-    kind: agent
-    needs: [gather]
-    agent: demo        # demo | codex | claude | opencode | opencode2 | omp | pi
-    review: false      # true: wait for "Mark done" before the flow continues
-    prompt: |
-      Work on {{ input.topic }} using:
-      {{ steps.gather.output.stdout }}
-`;
-let editing = null; // flow name being edited, or null for a new one
-let checkSerial = 0, checkTimer = null;
-
-function renderFlowList() {
-  $("f-list").replaceChildren(
-    el("button", { type: "button", "aria-pressed": String(editing === null), onclick: () => editFlow(null) }, "+ New flow"),
-    ...flows.map((f) => el("button", { type: "button", "aria-pressed": String(editing === f.name), onclick: () => editFlow(f.name) }, f.name)));
-  $("f-delete").hidden = editing === null;
-}
-
-function editFlow(name) {
-  editing = name;
-  $("f-yaml").value = name ? flows.find((f) => f.name === name).yaml : NEW_FLOW;
-  renderFlowList(); checkFlow();
-}
-
-async function checkFlow() {
-  const serial = ++checkSerial;
-  try {
-    const result = await api("POST", "/api/flows/validate", { yaml: $("f-yaml").value });
-    if (serial !== checkSerial) return null;
-    const check = $("f-check");
-    check.className = `flow-check ${result.ok ? "good" : "bad"}`;
-    check.textContent = result.ok
-      ? `Valid: ${result.flow.name} · ${Object.entries(result.flow.steps).map(([id, s]) => `${id} (${s.kind}${s.needs.length ? " ← " + s.needs.join(", ") : ""})`).join(" · ")}`
-      : result.error;
-    return result;
-  } catch (e) { if (serial === checkSerial) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; } return null; }
-}
-
-$("flows-btn").addEventListener("click", async () => { $("flows-dialog").showModal(); await loadFlows(); editFlow(flows[0]?.name ?? null); });
-$("f-yaml").addEventListener("input", () => { clearTimeout(checkTimer); checkTimer = setTimeout(checkFlow, 300); });
-$("f-yaml").addEventListener("keydown", (e) => {
-  if (e.key !== "Tab") return; e.preventDefault();
-  const t = e.target, at = t.selectionStart; t.setRangeText("  ", at, t.selectionEnd, "end");
+// ---------------------------------------------------------------- Flows (builder)
+// Draft saves never restart workers; activation is an explicit, previewed step inside the builder.
+const flowsDialog = $("flows-dialog");
+const flowBuilder = FlowBuilder.mount(flowsDialog, {
+  onClose: () => closeFlows(),
+  onActivated: () => loadFlows(),
+  // Run the active version: hide the builder (its unsaved edits stay for next time) and open New card.
+  onRun: async (name) => { flowBuilder.hide(); flowsDialog.close(); await dropOverlay("flows"); openNewCard(`flow:${name}`); },
 });
-$("f-save").addEventListener("click", async () => {
-  const result = await checkFlow();
-  if (!result?.ok) return;
-  try {
-    await api("PUT", `/api/flows/${encodeURIComponent(result.flow.name)}`, { yaml: $("f-yaml").value });
-    if (editing && editing !== result.flow.name && confirm(`Saved as ${result.flow.name}. Delete the old flow ${editing}?`))
-      await api("DELETE", `/api/flows/${encodeURIComponent(editing)}`);
-    await loadFlows(); editing = result.flow.name; renderFlowList();
-    $("f-check").textContent = `Saved ${result.flow.name}. The flow workers re-register it on every backend within a few seconds.`;
-  } catch (e) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; }
-});
-$("f-delete").addEventListener("click", async () => {
-  if (!editing || !confirm(`Delete flow ${editing}? Its past runs stay in each backend.`)) return;
-  try { await api("DELETE", `/api/flows/${encodeURIComponent(editing)}`); await loadFlows(); editFlow(flows[0]?.name ?? null); }
-  catch (e) { $("f-check").className = "flow-check bad"; $("f-check").textContent = e.message; }
-});
+function onFlowsBack() {
+  flowBuilder.confirmLeave().then((leave) => { if (leave) flowsDialog.close(); else pushOverlay("flows", onFlowsBack); });
+}
+async function closeFlows() {
+  if (!flowsDialog.open || !(await flowBuilder.confirmLeave())) return false;
+  flowsDialog.close(); await dropOverlay("flows");
+  return true;
+}
+$("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOverlay("flows", onFlowsBack); flowBuilder.open(); });
+// Escape asks before discarding unsaved edits instead of closing straight away.
+flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
 
 $("d-close").addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
 $("d-stop").addEventListener("click", () => act("stop"));
 $("d-cancel").addEventListener("click", () => act("cancel"));

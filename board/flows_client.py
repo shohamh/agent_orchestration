@@ -1,15 +1,19 @@
-"""Client for the flow host (agents/flow_host.py), which owns flows/*.yaml on the worker PC.
+"""Client for the flow host (agents/flow_host.py), which owns the flow drafts and active snapshots on the worker PC.
 
-The board runs in Docker and can't mount flows/, so it lists, validates and saves flows through
-the flow host's API (env FLOW_HOST_URL, default http://host.docker.internal:8095; FLOW_HOST_TOKEN).
+The board runs in Docker and can't mount flows/, so it lists, validates, saves and activates flows
+through the flow host's API (env FLOW_HOST_URL, default http://host.docker.internal:8095; FLOW_HOST_TOKEN).
+catalog()/flows() are the active definitions (what can be launched); the document methods return
+(HTTP status, body) so the board can pass conflicts and validation errors through unchanged.
 """
 
+import asyncio
 import os
 import time
 from typing import Any
 from urllib.parse import quote
 
 import aiohttp
+import json
 
 
 class FlowHost:
@@ -22,17 +26,27 @@ class FlowHost:
         self._down_until = 0.0
 
     async def _request(self, method: str, path: str, body: Any = None, timeout: float = 10) -> Any:
+        status, data = await self._call(method, path, body, timeout)
+        if status >= 400:
+            raise ValueError((data or {}).get("error") or f"flow host {method} {path} -> {status}")
+        return data
+
+    async def _call(self, method: str, path: str, body: Any = None, timeout: float = 10) -> tuple[int, Any]:
         if self._session is None:
             self._session = aiohttp.ClientSession(headers=self.headers, timeout=aiohttp.ClientTimeout(total=10, connect=2))
+        # The flow host only accepts JSON writes, so a cross-site form post cannot reach it.
+        headers = {} if method == "GET" else {"Content-Type": "application/json"}
         try:
-            async with self._session.request(method, self.url + path, json=body, timeout=aiohttp.ClientTimeout(total=timeout, connect=2)) as response:
+            async with self._session.request(method, self.url + path, data=None if body is None else json.dumps(body),
+                                             headers=headers, timeout=aiohttp.ClientTimeout(total=timeout, connect=2)) as response:
                 data = await response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"The flow host at {self.url} is busy: no answer within {timeout:g} s (an activation may be "
+                               "restarting workers). Reload to see whether the change was applied.") from None
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"The flow host at {self.url} is not reachable ({exc.__class__.__name__}). "
                                "Start it on the worker PC: agents/.venv/Scripts/python.exe -u agents/flow_host.py") from None
-        if response.status >= 400:
-            raise ValueError((data or {}).get("error") or f"flow host {method} {path} -> {response.status}")
-        return data
+        return response.status, data
 
     async def catalog(self, fresh: bool = False) -> dict[str, Any]:
         """{"flows": [...], "broken": {...}}, cached briefly: every board refresh asks for it."""
@@ -49,20 +63,54 @@ class FlowHost:
             return {}
         try:
             return {flow["name"]: flow for flow in (await self.catalog())["flows"]}
-        except RuntimeError:
+        except Exception:  # unreachable, busy or a bad answer: never break the card lists
             self._down_until = time.monotonic() + 5
             return {}  # board keeps working without the flow host; flow cards just lose step kinds
 
     async def validate(self, text: str) -> dict[str, Any]:
         return await self._request("POST", "/validate", {"yaml": text})
 
-    async def save(self, name: str, text: str) -> dict[str, Any]:
+    async def save(self, name: str, text: str, expected: Any = ...) -> tuple[int, Any]:
+        """The original draft save; with expected (a revision, or None to create), stale saves are 409."""
         self._cache = None
-        return await self._request("PUT", f"/flows/{quote(name, safe='')}", {"yaml": text})
+        body = {"yaml": text} if expected is ... else {"yaml": text, "expectedRevision": expected}
+        return await self._call("PUT", f"/flows/{quote(name, safe='')}", body)
 
     async def delete(self, name: str) -> None:
         self._cache = None
         await self._request("DELETE", f"/flows/{quote(name, safe='')}")
+
+    # Workflow builder documents: drafts, layouts and activation (each returns (status, body)).
+    async def documents(self) -> tuple[int, Any]:
+        return await self._call("GET", "/documents")
+
+    async def document(self, name: str) -> tuple[int, Any]:
+        return await self._call("GET", f"/documents/{quote(name, safe='')}")
+
+    async def parse_document(self, text: str) -> tuple[int, Any]:
+        return await self._call("POST", "/documents/parse", {"yaml": text})
+
+    async def serialize_document(self, document: Any) -> tuple[int, Any]:
+        return await self._call("POST", "/documents/serialize", {"document": document})
+
+    async def save_document(self, name: str, text: str, expected: str | None) -> tuple[int, Any]:
+        return await self._call("PUT", f"/documents/{quote(name, safe='')}", {"yaml": text, "expectedRevision": expected})
+
+    async def save_layout(self, name: str, layout: Any) -> tuple[int, Any]:
+        return await self._call("PUT", f"/documents/{quote(name, safe='')}/layout", {"layout": layout})
+
+    async def delete_document(self, name: str, revision: str) -> tuple[int, Any]:
+        return await self._call("DELETE", f"/documents/{quote(name, safe='')}?revision={quote(revision, safe='')}")
+
+    async def activation(self, name: str) -> tuple[int, Any]:
+        return await self._call("GET", f"/documents/{quote(name, safe='')}/activation")
+
+    async def activate(self, name: str, revision: str | None) -> tuple[int, Any]:
+        self._cache = None
+        # Each restarted worker must stay up for a few seconds before it counts as active.
+        result = await self._call("POST", f"/documents/{quote(name, safe='')}/activate", {"revision": revision}, timeout=180)
+        self._cache = None
+        return result
 
     async def restart_node(self, system: str, run_id: str, ref: str) -> dict:
         return await self._request('POST', f'/runs/{quote(system, safe="")}/{quote(run_id, safe="")}/nodes/{quote(ref, safe="")}/restart', timeout=90)

@@ -9,14 +9,37 @@ so it also shows up in each backend's own UI:
 | Prefect | Flow `<name>`, served as deployment `<name>/flows`; each step is a task run, with its dependencies recorded |
 | Trigger.dev | Parent task `flow-<name>` plus one task per step, `flow-<name>-<step>` (generated into `src/trigger/flows.generated.ts`) |
 
-Create or edit flows from the board (**Flows** button) or edit the files directly. The flow host
-(`agents/flow_host.py`) re-registers them on every backend within a few seconds.
+Create or edit flows from the board (**Flows** button) or edit the files directly. A file here is
+a **draft**: saving it changes nothing that runs. **Activating** a draft (from the board) makes the
+flow host (`agents/flow_host.py`) register that exact version on every backend; see
+[Drafts and activation](#drafts-and-activation).
 
 `multi-agent-design` is a reusable example: a brief fans out to Codex for architecture and
 OpenCode 2 for an independent risk review, then Codex combines both into an implementation
 plan. The `feature` input can be changed when starting a run. Select **Flows** or **New card**
 on the board to inspect or launch it, and click an agent node to follow its conversation and
 answer any permission requests. The real agents require working local logins.
+
+## Graphical builder
+
+**Flows** on the board opens the builder, which edits the same YAML:
+
+- **Graph** (desktop): drag a step to move it, and drag from the round handle under a step onto
+  another step to make that step wait for it. Drag the background to pan; pinch or Ctrl+scroll to
+  zoom. **Auto-layout** and **Fit** tidy large graphs. Tab, Enter, the arrow keys and Delete work
+  on the selected step.
+- **Steps** (the default on phones): steps grouped into stages that run in parallel, with an
+  **Add dependency** menu on each step. Selecting a step opens its form.
+- **YAML**: the text itself. Invalid YAML stays in the editor and never replaces the last valid
+  draft. Fields the forms don't cover, such as `environment`, are kept as written. If a file has
+  comments or custom formatting, the builder asks before its first graph edit, because graph
+  edits rewrite the file in canonical form.
+- **Insert reference** on a prompt or command offers the flow's inputs and the outputs of the
+  step's direct prerequisites, with the `{{ ... }}` syntax shown.
+- **Save draft** never touches running work. Saving over a version someone else saved since you
+  opened it shows both and lets you reload or overwrite. **Activate…** lists what each engine
+  will reload and which runs it would interrupt, and asks for explicit confirmation before
+  interrupting anything. **Run…** opens **New card** for the active version.
 
 ## Format
 
@@ -76,10 +99,35 @@ clipped UI log previews. Restart requires those files on the flow-host PC, an un
 and no active source child tasks. Historical runs made before result persistence must be replayed
 in full first. Internal `flowRestart` cannot collide with lowercase user input names.
 
+## Drafts and activation
+
+- `<name>.yaml` here is the editable draft. A hand edit just shows as a changed draft in the board.
+  Its revision is `sha256:` of the file's bytes; a save through the board names the revision it
+  edited and is refused if the file changed meanwhile (another tab, an editor), instead of
+  overwriting it. Invalid YAML is never saved over a valid draft.
+- `<name>.layout.json` (optional) holds graph positions for the builder. It is not part of the
+  revision and saving it never touches an engine.
+- Activation copies the draft into an immutable snapshot in the flow state folder (`FLOW_STATE_DIR`,
+  default `<repo>/.flow-state/`, not committed) and applies it: the Hatchet and Prefect flow workers
+  restart with the new version and the Trigger.dev tasks are regenerated when they change (the
+  `trigger dev` worker reloads them itself, so that engine stays *pending* rather than confirmed).
+  Workers, Trigger.dev code generation, card labels and launches only ever use active snapshots.
+- Before applying, the board lists the queued and running runs on every engine and board that
+  the reload would interrupt, rechecks just before applying and asks for confirmation; if an
+  engine cannot be asked, it says so. It never cancels runs itself.
+- If an engine fails (its worker does not stay up), it keeps serving the previous snapshot and the
+  board shows the failure; activating again retries only what is not active yet.
+- Deleting a draft does not stop the flow: its active version stays until the removal is activated.
+- First start without a state folder: every valid draft is activated once (the workers start then
+  anyway). Delete `.flow-state/` to repeat that import.
+- `{flow_dir}` in a step still means this folder on the worker, so helper scripts under `steps/`
+  are used as they are (they are not part of the snapshot).
+
 ## Limits
 
 - Steps run on the PC running the flow host and the native workers (they need the agent CLIs and
   this folder). On Trigger.dev that means the **local development** worker, not production.
-- Saving a flow restarts the Hatchet and Prefect flow workers; steps running on them at that
-  moment are interrupted.
+- Activating a flow restarts the Hatchet and Prefect flow workers, and changed Trigger.dev tasks
+  reload the local dev worker; steps running on them at that moment are interrupted (the board
+  asks first). Saving a draft or a layout interrupts nothing.
 - No loops, conditions or fan-out over lists yet.

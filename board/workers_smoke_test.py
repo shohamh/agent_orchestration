@@ -66,6 +66,11 @@ async def main(args):
                     data=await response.json()
                     if response.status>=400: raise RuntimeError(f'{response.status} {path}: {data}')
                     return data
+            async def activate(name):
+                # Saving is a draft; activation applies it. The disposable fixture accepts interrupting
+                # running flow steps, as re-registering did before.
+                preview=await call('GET',f'/api/flow-documents/{name}/activation')
+                return await call('POST',f'/api/flow-documents/{name}/activate',{'revision':preview['revision'],'impact':preview['impact'],'confirm':True})
             async def graph(system,run):
                 task=('flow-' if system=='trigger-dev' else '')+flow['name']
                 return await call('GET',f'/api/cards/{system}/{run}/dag?task={task}')
@@ -95,6 +100,7 @@ async def main(args):
                 raise TimeoutError(f'{system} timed out: {dag}')
             try:
                 await call('PUT','/api/flows/'+flow['name'],{'yaml':yaml.safe_dump(flow,sort_keys=False)})
+                await activate(flow['name'])
                 await asyncio.sleep(25)  # native registration / Trigger rebuild
                 for system in args.systems:
                     run=(await call('POST',f'/api/boards/{system}/workers-context-smoke/cards',{'kind':'flow','flow':flow['name'],'execution':{'default':{'pool':'smoke'}}}))['id']
@@ -128,6 +134,7 @@ async def main(args):
                     except Exception as exc: print(f'cleanup {system}: {type(exc).__name__}',file=sys.stderr)
                 try:
                     await call('DELETE','/api/flows/'+flow['name'])
+                    await activate(flow['name'])
                 finally:
                     if original is None: registry.unlink(missing_ok=True)
                     else: registry.write_bytes(original)

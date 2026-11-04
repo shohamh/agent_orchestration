@@ -1,4 +1,4 @@
-"""Native Prefect process for portable flows: every flows/*.yaml becomes a served deployment.
+"""Native Prefect process for portable flows: every active flow becomes a served deployment.
 
 Each flow is a Prefect flow named after the flow, served as deployment `<flow>/flows`, with its
 parameters as the flow's parameters. Each step is a task run named after the step; the outputs of
@@ -7,7 +7,7 @@ Step events are the task run's logs as `EVT <json>` lines. Input to an agent ste
 input whose key starts with `agentinput-<task run id>-auto`.
 
 Run from the repository root with the agents virtualenv (flow_host.py does this and restarts it
-when a flow changes):
+when a flow is activated; it loads the active snapshots, see flowkit/activation.py):
 
     agents/.venv/Scripts/python.exe -u agents/flow_worker_prefect.py
 """
@@ -24,7 +24,8 @@ os.environ.setdefault("PREFECT_API_URL", "http://localhost:4200/api")
 os.environ.setdefault("DO_NOT_TRACK", "1")  # offline: no anonymous usage data
 os.environ.setdefault("PREFECT_LOGGING_TO_API_BATCH_INTERVAL", "0.5")  # the board renders logs live
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from flowkit.definition import Flow, load_all  # noqa: E402
+from flowkit.activation import load_active  # noqa: E402
+from flowkit.definition import Flow  # noqa: E402
 from prefect_worker import InputInbox  # noqa: E402
 
 
@@ -97,15 +98,17 @@ def main() -> None:
     for name, error in BROKEN.items():
         print(f"skipping {name}: {error}", file=sys.stderr)
     if not FLOWS:
-        print("no valid flows in flows/; nothing to serve", file=sys.stderr)
-        return
+        # Exiting would make the flow host restart it every few seconds; wait for an activation instead.
+        print("no active flows; waiting for one to be activated", file=sys.stderr, flush=True)
+        import threading
+        threading.Event().wait()
     deployments = [globals()[attribute_name(flow)].to_deployment(name="flows", tags=["portable-flow"])
                    for flow in FLOWS.values()]
     print(f"serving flows: {', '.join(FLOWS)}", flush=True)
     serve(*deployments, limit=int(os.environ.get("FLOW_SLOTS", "8")))
 
 
-FLOWS, BROKEN = load_all()
+FLOWS, BROKEN = load_active("prefect")
 for _flow in FLOWS.values():
     globals()[attribute_name(_flow)] = build_flow(_flow)
 

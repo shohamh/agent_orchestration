@@ -56,7 +56,7 @@ class PrefectAdapter:
         self._deployment_ids: dict[str, str] = {}
         self.tails = TailCache()
         self.sessions = Memo()
-        self._settled: dict[str, bool] = {}  # flow run id -> finished a while ago
+        self._settled: dict[str, bool] = {}  # flow run id (or "task:" + task run id) -> finished a while ago
         self._run_boards: dict[str, str] = {}  # flow run id -> board, for routing live logs
 
     async def _request(self, method: str, path: str, body: Any = None) -> Any:
@@ -105,7 +105,8 @@ class PrefectAdapter:
         return await self._lines(run_id, {"flow_run_id": {"any_": [run_id]}}, self._settled[run_id])
 
     async def node_lines(self, ref: str) -> list[str]:
-        return await self._lines(f"task:{ref}", {"task_run_id": {"any_": [ref]}}, False)
+        # A settled step's log (as last seen by dag()) is read once more, then served from the cache.
+        return await self._lines(f"task:{ref}", {"task_run_id": {"any_": [ref]}}, self._settled.get(f"task:{ref}", False))
 
     async def run_info(self, run_id: str) -> dict:
         run = await self._request("GET", f"/flow_runs/{run_id}")
@@ -210,12 +211,30 @@ class PrefectAdapter:
                         wake()
         raise ConnectionError(f"Prefect {path} closed")
 
+    async def active_runs(self, flows: set[str]) -> list[dict[str, Any]]:
+        """Unfinished runs of the served portable-flow deployments on any board: restarting the
+        flow worker (activating a flow) interrupts them or changes what they will run."""
+        states = ["SCHEDULED", "PENDING", "RUNNING", "PAUSED", "CANCELLING"]
+        runs, offset = [], 0
+        while True:
+            page = await self._request("POST", "/flow_runs/filter", {
+                "flow_runs": {"tags": {"all_": ["portable-flow"]}, "state": {"type": {"any_": states}}},
+                "sort": "EXPECTED_START_TIME_ASC", "limit": 200, "offset": offset})
+            runs += page
+            if len(page) < 200:
+                break
+            offset += len(page)
+        return [{"system": self.system, "board": next((t[6:] for t in run.get("tags", []) if t.startswith("board:")), None),
+                 "id": run["id"], "title": run["name"], "status": run.get("state_name") or run.get("state_type") or ""}
+                for run in runs]
+
     async def dag(self, run_id: str) -> Dag:
         tasks = await self._request("POST", "/task_runs/filter",
                                     {"flow_runs": {"id": {"any_": [run_id]}}, "sort": "EXPECTED_START_TIME_ASC", "limit": 200})
         ids = {t["id"] for t in tasks}
         dag = Dag(model="dataflow")
         for task in tasks:
+            self._settled[f"task:{task['id']}"] = is_final(_column(task)) and settled(task.get("end_time"))
             dag.nodes.append(DagNode(
                 id=task["id"],
                 label=task["name"].rsplit("-", 1)[0],  # Prefect names task runs "<task>-<suffix>"

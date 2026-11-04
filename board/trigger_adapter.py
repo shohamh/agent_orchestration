@@ -32,6 +32,7 @@ _COLUMN = {
     "WAITING": "waiting",
     "COMPLETED": "done",
 }  # everything else (CANCELED, FAILED, CRASHED, SYSTEM_FAILURE, TIMED_OUT, EXPIRED) -> stopped
+ACTIVE_STATUSES = ("PENDING_VERSION", "DELAYED", "QUEUED", "DEQUEUED", "EXECUTING", "WAITING")
 
 
 def _sequence_edges(children: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -126,6 +127,26 @@ class TriggerAdapter:
                 card.output, card.error = await self._result(run["id"])
             cards.append(card)
         return sorted(cards, key=lambda c: c.created_at or "")
+
+    async def active_runs(self, flows: set[str]) -> list[dict[str, Any]]:
+        """Unfinished runs of any task on any board: the local dev worker reloads every task when
+        the generated flow tasks change, so agent sessions are interrupted too."""
+        if not self.development:
+            return []  # portable flows run on the local development worker only
+        params = {"filter[status]": ",".join(ACTIVE_STATUSES), "page[size]": "100"}
+        runs: list[dict[str, Any]] = []
+        for _ in range(20):
+            page = await self._request("GET", "/api/v1/runs", params=params)
+            runs += page.get("data") or []
+            cursor = (page.get("pagination") or {}).get("next")
+            if not cursor or cursor == params.get("page[after]"):
+                break
+            params["page[after]"] = cursor
+        else:
+            raise RuntimeError("too many active Trigger.dev runs to list")
+        return [{"system": self.system, "board": next((t[6:] for t in run.get("tags", []) if t.startswith("board:")), None),
+                 "id": run["id"], "title": (run.get("metadata") or {}).get("title") or run["taskIdentifier"], "status": run["status"]}
+                for run in runs]
 
     async def _list_runs(self, filters: dict[str, str]) -> list[dict[str, Any]]:
         params = {**filters, "page[size]": "100"}

@@ -40,6 +40,12 @@ async def main(args):
                     raise RuntimeError(f'{response.status} {path}: {data}')
                 return data
 
+        async def activate(name):
+            # Saving is a draft; activation applies it. This disposable fixture accepts the interruption
+            # of any running flow steps, as re-registering did before.
+            preview = await call('GET', f'/api/flow-documents/{name}/activation')
+            return await call('POST', f'/api/flow-documents/{name}/activate', {'revision': preview['revision'], 'impact': preview['impact'], 'confirm': True})
+
         async def graph(system, run):
             return await call('GET', f'/api/cards/{system}/{run}/dag?task=flow-step-view-smoke' if system.startswith('trigger')
                               else f'/api/cards/{system}/{run}/dag?task=step-view-smoke')
@@ -102,6 +108,7 @@ async def main(args):
 
         if not args.resume_run and not args.reuse_flow:
             await call('PUT', '/api/flows/step-view-smoke', {'yaml': FLOW})
+            await activate('step-view-smoke')
         # Workers re-register asynchronously; their startup includes SDK and deployment discovery.
             await asyncio.sleep(15)
         for system in args.systems.split(','):
@@ -125,6 +132,7 @@ async def main(args):
                 assert any('"reused": true' in line for line in logs['lines']), logs
             print(f'{system}: PASS chat, live rows, logs and restart support', flush=True)
         await call('DELETE', '/api/flows/step-view-smoke')
+        await activate('step-view-smoke')
 
 
 if __name__ == '__main__':

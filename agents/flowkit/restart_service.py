@@ -6,7 +6,7 @@ from pathlib import Path
 import aiohttp
 from dotenv import dotenv_values
 
-from .definition import load_all
+from .activation import load_active
 from .restart import build_plan
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +15,7 @@ FINAL_TRIGGER = {'COMPLETED', 'CANCELED', 'CANCELLED', 'FAILED', 'CRASHED', 'SYS
 
 async def restart_node(system, run_id, ref):
     config = {**dotenv_values(ROOT / 'board' / '.env'), **os.environ}
-    flows, _ = load_all()
+    flows, _ = load_active("prefect" if system == "prefect" else "trigger")
     if system == 'prefect':
         base = (config.get('FLOW_PREFECT_API_URL') or os.environ.get('PREFECT_API_URL') or 'http://localhost:4200/api').rstrip('/')
         headers = {}
