@@ -5,6 +5,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import shutil
 import sys
 import time
@@ -16,6 +17,25 @@ from .artifacts import restore, snapshot
 from .definition import parse
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+async def capacity_call(function, *args, deadline=None):
+    """SQLite may block briefly; retries never block the event loop."""
+    while True:
+        try: return await asyncio.to_thread(function, *args)
+        except sqlite3.OperationalError as exc:
+            if 'locked' not in str(exc).lower() and 'busy' not in str(exc).lower(): raise
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError('Capacity database unavailable; lease lost') from exc
+            await asyncio.sleep(.05)
+
+
+async def finish_despite_cancellation(task):
+    """Join a separately supervised task despite repeated cancellation requests."""
+    while not task.done():
+        try: await asyncio.shield(task)
+        except asyncio.CancelledError: continue
+    return task.result()
 
 
 class Job:
@@ -30,6 +50,16 @@ class Job:
         self.task = asyncio.create_task(self.run())
 
     async def run(self):
+        work = asyncio.create_task(self._run())
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError:
+            work.cancel()  # Exactly one cancellation reaches execution/cleanup.
+            try: await finish_despite_cancellation(work)
+            except asyncio.CancelledError: pass
+            raise
+
+    async def _run(self):
         tree = None
         lease = None
         heartbeat = None
@@ -40,7 +70,11 @@ class Job:
                 restore(self.config['files'], workspaces/self.config['runId'])
                 restore(self.config['assets'], assets)
                 while True:
-                    lease = self.app['capacity'].try_acquire(self.id)
+                    acquire = asyncio.create_task(capacity_call(self.app['capacity'].try_acquire, self.id))
+                    try: lease = await asyncio.shield(acquire)
+                    except asyncio.CancelledError:
+                        lease = await acquire  # Account for a reservation committed during cancellation.
+                        raise
                     if lease['acquired']: break
                     self.waiting_reason = lease['reason']
                     await asyncio.sleep(1)
@@ -48,7 +82,12 @@ class Job:
                 async def renew():
                     while True:
                         await asyncio.sleep(5)
-                        if not self.app['capacity'].renew(self.id, lease['fence']):
+                        try:
+                            live = await capacity_call(self.app['capacity'].renew, self.id, lease['fence'], deadline=lease['expires'])
+                            if not live: raise RuntimeError('Capacity lease expired')
+                            lease['expires'] = time.monotonic() + 30
+                        except Exception as exc:
+                            self.lease_loss = str(exc)
                             self.task.cancel()
                             return
                 heartbeat = asyncio.create_task(renew())
@@ -58,11 +97,23 @@ class Job:
                     self.started = True
                     self.events.append({'type': 'worker', 'worker': self.app['identity']})
                     env = {**os.environ, 'FLOW_WORKSPACES': str(workspaces), 'FLOW_ASSETS_DIR': str(assets), 'FLOW_MANAGED_JOB':'1', 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1'}
-                    self.process = await asyncio.create_subprocess_exec(sys.executable, '-u', '-m', 'flowkit.worker_stdio', cwd=ROOT/'agents', env=env,
+                    launch = asyncio.create_task(asyncio.create_subprocess_exec(sys.executable, '-u', '-m', 'flowkit.worker_stdio', cwd=ROOT/'agents', env=env,
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                        limit=512*1024, start_new_session=os.name != 'nt')
-                    from .executor import _own
-                    tree = _own(self.process.pid)
+                        limit=512*1024, start_new_session=os.name != 'nt'))
+                    try: self.process = await asyncio.shield(launch)
+                    except asyncio.CancelledError:
+                        self.process = await launch
+                        raise
+                    tree_name = None
+                    if os.name == 'nt':
+                        from agentdriver.process_tree import ProcessTree
+                        tree_name = 'Local\\FlowCapacity-' + lease['fence']
+                        tree = ProcessTree(self.process.pid, name=tree_name)
+                    confirm = asyncio.create_task(capacity_call(self.app['capacity'].confirm_started, self.id, lease['fence'], self.process.pid, tree_name, deadline=lease['expires']))
+                    try: await asyncio.shield(confirm)
+                    except asyncio.CancelledError:
+                        await confirm
+                        raise
                     self.process.stdin.write((json.dumps(self.config['start'])+'\n').encode())
                     await self.process.stdin.drain()
                     async def inputs():
@@ -96,7 +147,11 @@ class Job:
                                 original=self.config['files'].get(name)
                                 if original and original['data']==entry['data']: entry['mode']=original['mode']
                         from .restart import atomic_json
-                        self.app['capacity'].publish(self.id, lease['fence'], lambda: atomic_json(directory/'result-files.json', files))
+                        publication = asyncio.create_task(capacity_call(self.app['capacity'].publish, self.id, lease['fence'], lambda: atomic_json(directory/'result-files.json', files), deadline=lease['expires']))
+                        try: await asyncio.shield(publication)
+                        except asyncio.CancelledError:
+                            await publication
+                            raise
                         self.result_path = directory/'result-files.json'
                         self.config.clear()  # release transferred file payloads after execution
                         self.state = 'done'
@@ -106,7 +161,7 @@ class Job:
                         await asyncio.gather(input_task, errors, return_exceptions=True)
                 finally: self.app['stats']['active'] -= 1
         except asyncio.CancelledError:
-            self.state, self.error = 'cancelled', 'Execution cancelled'
+            self.state, self.error = 'cancelled', getattr(self, 'lease_loss', 'Execution cancelled')
             raise
         except Exception as exc:
             self.state, self.error = 'failed', str(exc)[-8000:]
@@ -120,7 +175,7 @@ class Job:
                 _kill(self.process, tree)
                 if tree: tree.close()
                 await self.process.wait()
-            if lease and lease.get('acquired'): self.app['capacity'].release(self.id)
+            if lease and lease.get('acquired'): await capacity_call(self.app['capacity'].release, self.id)
 
 
 def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None, capacity=None):
@@ -140,7 +195,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app['slots'], app['count'], app['stats'] = asyncio.Semaphore(count), count, {'active':0}
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
     from .capacity import CapacityGate
-    app['capacity'] = capacity if capacity is not None else CapacityGate(slots=count)
+    app['capacity'] = capacity
     app['jobs'] = {}
     inventory_path = app['root'] / 'capabilities.json'
     try:
@@ -176,7 +231,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             await asyncio.sleep(3600)
             from .capabilities import overdue
             if overdue(app['inventory']): await refresh_inventory()
-    async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': app['capacity'].metrics()})
+    async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': await capacity_call(app['capacity'].metrics)})
     async def create(request):
         config = await request.json()
         job_id = str(uuid.UUID(config['id']))
@@ -237,11 +292,13 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         sampler = MachineSampler()
         while True:
             try:
-                sample = sampler.sample()
-                if sample is not None: app['capacity'].observe(*sample, time.monotonic())
-            except (OSError, ValueError): pass  # Missing measurements remain unknown, never zero.
+                sample = await asyncio.to_thread(sampler.sample)
+                if sample is not None: await capacity_call(app['capacity'].observe, *sample, time.monotonic())
+            except (OSError, ValueError, sqlite3.Error): pass  # Missing measurements remain unknown, never zero.
             await asyncio.sleep(1)
     async def startup(app):
+        if app['capacity'] is None:
+            app['capacity'] = await capacity_call(lambda: CapacityGate(slots=count))
         app['capacity_task'] = asyncio.create_task(sample_capacity())
         await refresh_inventory()
         app['inventory_task'] = asyncio.create_task(daily_inventory())
