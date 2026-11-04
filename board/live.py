@@ -41,6 +41,7 @@ class Subscriber:
         self.version: str | None = None
         self.lines_end: int | None = None
         self.lines_tail: str | None = None
+        self.refreshing = False  # a refresh of the open card is in flight
 
     def send(self, message: dict[str, Any]) -> None:
         if self.closed:
@@ -65,6 +66,7 @@ class BoardWatcher:
         self.left_at = time.monotonic()
         self.feed_live = False
         self.details = {}
+        self.refreshes: set[asyncio.Task] = set()
         self.task = asyncio.create_task(self.run())
 
     def wake(self) -> None:
@@ -75,7 +77,27 @@ class BoardWatcher:
         sub.send({"type": "feed", "live": self.feed_live})
         if self.cards is not None:
             sub.send({"type": "cards", "reset": True, "cards": list(self.cards.values())})
-        self.wake()  # its open card's transcript goes out on the next pass
+            self.start_refresh(sub)  # its open card's transcript goes out now, not after the current pass
+        self.wake()
+
+    def start_refresh(self, sub: Subscriber) -> None:
+        """Refresh one browser's open card in the background. Engine reads can stall for minutes,
+        so a slow card never holds back other browsers; a browser still refreshing is skipped."""
+        if not sub.card or sub.refreshing:
+            return
+        sub.refreshing = True
+
+        async def refresh() -> None:
+            try:
+                await self.refresh_card(sub)
+            except Exception as exc:
+                sub.send({"type": "error", "message": str(exc)})
+            finally:
+                sub.refreshing = False
+
+        task = asyncio.create_task(refresh())
+        self.refreshes.add(task)
+        task.add_done_callback(self.refreshes.discard)
 
     def unsubscribe(self, sub: Subscriber) -> None:
         self.subscribers.discard(sub)
@@ -158,11 +180,7 @@ class BoardWatcher:
                         list_task = asyncio.create_task(self.refresh_cards())
                     self.details = {}  # each open run/step is read once per shared watcher pass
                     for sub in list(self.subscribers):
-                        if sub.card:
-                            try:
-                                await self.refresh_card(sub)
-                            except Exception as exc:
-                                sub.send({"type": "error", "message": str(exc)})
+                        self.start_refresh(sub)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -171,9 +189,10 @@ class BoardWatcher:
                     await asyncio.sleep(2)
         finally:
             feed.cancel()
-            if list_task is not None:
-                list_task.cancel()
-                await asyncio.gather(list_task, return_exceptions=True)
+            for task in [list_task, *self.refreshes]:
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(*(t for t in [list_task, *self.refreshes] if t is not None), return_exceptions=True)
             if self.hub.watchers.get((self.system, self.board)) is self:
                 del self.hub.watchers[(self.system, self.board)]
             for sub in list(self.subscribers):
@@ -205,17 +224,18 @@ class BoardWatcher:
             return
         if card["task"] == "agent-session":
             await self.push_rows(sub, card)
-        else:
-            await self.push_lines(sub, card)
         if sub.node:
             # Step activity may not change the parent run's status. Always refresh the selected
             # step on feed wakes and fallback ticks; it shares the board watcher and SSE socket.
+            # It goes first: it is what the browser is showing, and the run's reads can be slow.
             if sub.kind == "agent":
                 session = await self.detail(("node-session", sub.node), lambda: node_session(self.adapter, sub.node))
                 await self.push_rows(sub.node_sub, card, session, sub)
             else:
                 lines = await self.detail(("node-lines", sub.node), lambda: self.adapter.node_lines(sub.node))
                 await self.push_lines(sub.node_sub, card, lines, sub)
+        if card["task"] != "agent-session":
+            await self.push_lines(sub, card)
         if card["task"] != "agent-session" and hasattr(self.adapter, "dag"):
             final = card["column"] in ("done", "stopped")
             if not final or sub.graph_version is None or sub.graph_finished != card.get("finished_at"):
@@ -227,9 +247,11 @@ class BoardWatcher:
                 sub.graph_finished = card.get("finished_at") if final else None
 
     async def detail(self, key, fetch):
+        # Browsers refresh concurrently: share one in-flight read, and don't let one browser
+        # leaving cancel it for the others.
         if key not in self.details:
-            self.details[key] = await fetch()
-        return self.details[key]
+            self.details[key] = asyncio.ensure_future(fetch())
+        return await asyncio.shield(self.details[key])
 
     async def push_rows(self, sub: Subscriber, card: dict[str, Any], session=None, owner=None) -> None:
         session = session or await self.detail(("session", card["id"]), lambda: self.adapter.session(card["id"]))

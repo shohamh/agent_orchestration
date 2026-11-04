@@ -152,6 +152,52 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((data['node'], len(data['rows']), data['more']), ('talk', 100, True))
         watcher.unsubscribe(a); watcher.unsubscribe(b)
 
+    async def test_step_chat_does_not_wait_for_a_slow_read_of_its_run(self):
+        release = asyncio.Event()
+        async def stuck_run_lines(run_id):
+            await release.wait()
+            return []
+        self.adapter.run_lines = stuck_run_lines
+        watcher, sub = self.app['hub'].subscribe('fake', 'demo', 'run', node='talk', kind='agent')
+        try:
+            while (await asyncio.wait_for(sub.queue.get(), 3)).get('type') != 'node-rows':
+                pass
+        finally:
+            release.set()
+            watcher.unsubscribe(sub)
+
+
+class FinishedStepLogs(unittest.IsolatedAsyncioTestCase):
+    """A finished step's log is read once: the board refreshes an open step every second, and an
+    engine under load can take seconds (or minutes) to answer each read."""
+
+    async def test_hatchet_step_log_is_frozen_once_the_step_settles(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from hatchet_sdk.clients.rest.models.v1_task_status import V1TaskStatus
+        import hatchet_adapter
+        with patch.object(hatchet_adapter, 'Hatchet'):
+            adapter = hatchet_adapter.HatchetAdapter()
+        task = SimpleNamespace(step_id='s1', display_name='talk', task_external_id='talk-run', status=V1TaskStatus.COMPLETED,
+                               started_at=None, finished_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                               output=None, error_message=None)
+        adapter.hatchet.runs.get.return_value = SimpleNamespace(tasks=[task], shape=None)
+        reads = []
+        async def log_rows(ref, since=None):
+            reads.append(since)
+            return [SimpleNamespace(created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), message='EVT {}')]
+        adapter._log_rows = log_rows
+
+        await adapter.dag('run')
+        for _ in range(3):
+            self.assertEqual(await adapter.node_lines('talk-run'), ['EVT {}'])
+        self.assertEqual(len(reads), 1)
+
+        task.status, task.finished_at = V1TaskStatus.RUNNING, None  # replayed
+        await adapter.dag('run')
+        await adapter.node_lines('talk-run')
+        self.assertEqual(len(reads), 2)
+
 
 class PrefectFeeds(unittest.IsolatedAsyncioTestCase):
     async def test_failed_log_socket_cancels_event_socket_before_retry(self):

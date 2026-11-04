@@ -179,6 +179,30 @@ class Hub(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
 
+    async def test_a_stuck_read_for_one_viewer_does_not_hold_back_another_viewers_transcript(self):
+        """The engine can take minutes to answer one read; other open chats must still load."""
+        stuck, release = asyncio.Event(), asyncio.Event()
+
+        async def stuck_lines(run_id):
+            stuck.set()
+            await release.wait()
+            return self.adapter.lines
+
+        self.adapter.run_lines = stuck_lines
+        watcher, slow = self.hub.subscribe('fake', 'b', 'p1')
+        try:
+            await asyncio.wait_for(stuck.wait(), 2)
+            _, sub = self.hub.subscribe('fake', 'b', 's1')
+            rows = await asyncio.wait_for(next_message(sub, 'rows'), 1)
+            self.assertEqual((rows['reset'], len(rows['rows'])), (True, 100))
+            self.adapter.events_list.append({'type': 'user', 'text': 'next'})
+            self.hub.poke('fake')
+            update = await asyncio.wait_for(next_message(sub, 'rows'), 2)
+            self.assertEqual([r['text'] for r in update['rows']], ['next'])
+        finally:
+            release.set()
+            watcher.unsubscribe(slow)
+
     async def test_paged_older_rows_receive_patches_without_appending_unloaded_history(self):
         self.adapter.events_list.insert(0, {'type': 'tool', 'id': 'old-tool', 'status': 'running'})
         _, sub = self.hub.subscribe('fake', 'b', 's1')
