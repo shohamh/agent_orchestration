@@ -742,6 +742,7 @@
       if (spot) { c.positions[result.id] = spot; scheduleLayoutSave(); }
       notify(`Added ${result.id}.`);
       select({ type: 'step', id: result.id }, { inspect: true });
+      if (S.view === 'graph') reveal(result.id);
       if (!narrow()) inspector.querySelector('[data-focus="step:id"]')?.focus();
     }
     async function connect(from, to) {
@@ -804,6 +805,19 @@
       S.vp.x = cx - ((cx - S.vp.x) / S.vp.k) * next; S.vp.y = cy - ((cy - S.vp.y) / S.vp.k) * next; S.vp.k = next;
     }
     function zoomBy(f) { const r = svgEl.getBoundingClientRect(); zoomAt(S.vp.k * f, r.width / 2, r.height / 2); renderGraph(); }
+    // Pan just enough to show a step whole, keeping the zoom; a step wider than the canvas is centred.
+    function reveal(id) {
+      const at = positionsNow()[id], rect = svgEl.getBoundingClientRect();
+      if (!at || !rect.width || !rect.height) return;
+      const margin = 16, w = NODE_W * S.vp.k, h = NODE_H * S.vp.k;
+      const left = at.x * S.vp.k + S.vp.x, top = at.y * S.vp.k + S.vp.y;
+      const shift = (start, size, room) => size + 2 * margin > room ? (room - size) / 2 - start
+        : start < margin ? margin - start : start + size > room - margin ? room - margin - (start + size) : 0;
+      const dx = shift(left, w, rect.width), dy = shift(top, h, rect.height);
+      if (!dx && !dy) return;
+      S.vp.x += dx; S.vp.y += dy;
+      applyViewport();
+    }
     function fit() {
       const c = S.cur, rect = svgEl.getBoundingClientRect();
       if (!c?.doc || !rect.width || !rect.height) return;

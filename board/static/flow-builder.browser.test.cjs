@@ -647,6 +647,27 @@ test('closing with unsaved changes asks first (close button and Escape)', async 
   assert.equal(await saveEnabled(), false, 'discarded edits are gone');
 });
 
+test('a new step is panned into view, even when auto-layout places it off screen', async () => {
+  await openFlows();
+  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow'`, 'reopens the last flow');
+  await click('.fb-toolbar button', 'Auto-layout');
+  for (let i = 0; i < 6; i++) await click('.fb-toolbar button[aria-label="Zoom in"]');
+  const ids = () => evaluate('[...document.querySelectorAll(".fb-node")].map(n => n.dataset.step)');
+  const inView = (id) => evaluate(`(() => { const s = document.querySelector('.fb-svg').getBoundingClientRect(), b = document.querySelector('[data-step="${id}"] .box').getBoundingClientRect();
+    return b.left >= s.left && b.right <= s.right && b.top >= s.top && b.bottom <= s.bottom; })()`);
+  for (let i = 0; i < 3; i++) {
+    const before = await ids();
+    await click('.fb-toolbar button', '+ Program step');
+    await waitFor(`document.querySelectorAll(".fb-node").length === ${before.length + 1}`, 'the step is drawn');
+    const added = (await ids()).find((id) => !before.includes(id));
+    assert.equal(await inView(added), true, `${added} is fully on the canvas`);
+  }
+  assert.match(await evaluate(q('.fb-zoom') + '.textContent'), /^2\d\d%$/, 'panning keeps the zoom level');
+  await click('.fb-close');
+  await answer('Discard changes');
+  await waitFor('!document.querySelector("#flows-dialog").open');
+});
+
 test('phone: full screen, step list and form editing without sideways scrolling, 44px targets, touch graph', async () => {
   await evaluate('document.querySelector("#flows-dialog").close()');
   await call('Emulation.setDeviceMetricsOverride', { width: 375, height: 812, deviceScaleFactor: 2, mobile: true });
