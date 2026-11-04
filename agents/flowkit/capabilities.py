@@ -14,7 +14,7 @@ def _result(status):
 
 def infer_command(run):
     # Only a single, literal command can be inferred. Never evaluate shell syntax.
-    if not isinstance(run, str) or re.search(r'[\n\r|&;<>()`$%]', run):
+    if not isinstance(run, str) or re.search(r'[\n\r|&;<>()`]', run):
         return None
     try:
         parts = shlex.split(run, posix=os.name != 'nt')
@@ -23,7 +23,7 @@ def infer_command(run):
     if not parts:
         return None
     name = parts[0].strip('"')
-    if not name or any(c in name for c in '{}*?='):
+    if not name or any(c in name for c in '{}*?=$%'):
         return None
     from .template import _CMD_BUILTINS
     if name.lower() in _CMD_BUILTINS:
@@ -72,6 +72,8 @@ def refresh(inventory, commands=()):
 def overdue(inventory):
     try:
         timestamp = datetime.fromisoformat(inventory['refreshed_at'])
-        return (datetime.now(timezone.utc) - timestamp).total_seconds() >= 86400
-    except (KeyError, TypeError, ValueError):
+        if timestamp.tzinfo is None: return True
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        return age < 0 or age >= 86400
+    except (KeyError, TypeError, ValueError, OverflowError):
         return True

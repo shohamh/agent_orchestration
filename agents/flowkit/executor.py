@@ -15,6 +15,8 @@ Agent steps receive the human's input through `receive` (same messages as agent 
 import asyncio
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -115,8 +117,10 @@ async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) ->
     env = {**os.environ, "FLOW_CONTEXT": context_json, "FLOW_OUTPUT": str(output_file), "FLOW_STEP": step.id,
            "FLOW_DIR": flow_dir, "FLOW_PYTHON": sys.executable, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
     # `python` in a command means this worker's interpreter, so steps don't depend on PATH.
-    if not argv and command.startswith("python "):
-        command = f'"{sys.executable}" ' + command[len("python "):]
+    if not argv:
+        command = re.sub(r"^\s*(?:python|\"python\"|'python')(?=\s|$)",
+                         lambda _: subprocess.list2cmdline([sys.executable]) if os.name == 'nt' else shlex.quote(sys.executable),
+                         command, count=1)
     await emit("step", state="running", kind="program", command=command)
     options = dict(cwd=workspace, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                    stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt" and not os.environ.get('FLOW_MANAGED_JOB'))

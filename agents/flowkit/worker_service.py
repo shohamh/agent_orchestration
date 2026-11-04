@@ -121,23 +121,32 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
     app['jobs'] = {}
     inventory_path = app['root'] / 'capabilities.json'
-    try: app['inventory'] = json.loads(inventory_path.read_text(encoding='utf-8'))
+    try:
+        loaded = json.loads(inventory_path.read_text(encoding='utf-8'))
+        if not isinstance(loaded, dict) or not isinstance(loaded.get('commands', {}), dict): raise ValueError('invalid inventory')
+        app['inventory'] = loaded
     except (OSError, ValueError): app['inventory'] = {}
+    inventory_lock = asyncio.Lock()
     async def refresh_inventory(commands=()):
         from .capabilities import refresh
         from .restart import atomic_json
-        existing = app['inventory'].get('commands', {})
-        app['inventory'] = await asyncio.to_thread(refresh, app['inventory'], set(existing) | set(commands))
-        await asyncio.to_thread(atomic_json, inventory_path, app['inventory'])
-        return app['inventory']
+        async with inventory_lock:
+            existing = app['inventory'].get('commands', {})
+            names = {name for name in existing if isinstance(name, str) and name and len(name) <= 260}
+            updated = await asyncio.to_thread(refresh, app['inventory'], names | set(commands))
+            await asyncio.to_thread(atomic_json, inventory_path, updated)
+            app['inventory'] = updated
+            return updated
     async def inventory(request):
         from .capabilities import overdue
         if overdue(app['inventory']): await refresh_inventory()
         return web.json_response(app['inventory'])
     async def refresh_capabilities(request):
-        data = await request.json() if request.can_read_body else {}
+        try: data = await request.json() if request.can_read_body else {}
+        except (ValueError, UnicodeDecodeError): raise ValueError('Invalid JSON body') from None
+        if not isinstance(data, dict): raise ValueError('Body must be an object')
         commands = data.get('commands', [])
-        if not isinstance(commands, list) or any(not isinstance(x, str) or len(x) > 260 for x in commands):
+        if not isinstance(commands, list) or any(not isinstance(x, str) or not x or len(x) > 260 or any(c in x for c in '\x00\r\n') for x in commands):
             raise ValueError('commands must be a list of executable names')
         return web.json_response(await refresh_inventory(commands))
     async def daily_inventory():
@@ -153,7 +162,13 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             if len(app['jobs']) >= 100: raise ValueError('Execution worker has too many retained jobs; retry later')
             start = config['start']
             if not re.fullmatch(r'[A-Za-z0-9_-]{1,150}', start['runId']): raise ValueError('Invalid run id')
-            if start['step'] not in parse(start['flow']).steps: raise ValueError('Unknown step')
+            flow = parse(start['flow'])
+            if start['step'] not in flow.steps: raise ValueError('Unknown step')
+            step = flow.steps[start['step']]
+            if step.kind == 'program':
+                from .capabilities import infer_command
+                requirement = step.requires_command or infer_command(step.run)
+                if requirement: await refresh_inventory([requirement])
             from .artifacts import validate
             validate(config['files']); validate(config['assets'])
             config['runId'] = start['runId']
