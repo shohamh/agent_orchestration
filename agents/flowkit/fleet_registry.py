@@ -17,7 +17,7 @@ def _path():
 
 @contextmanager
 def _locked():
-    """Serialize readers and read-modify-write transactions across coordinator processes."""
+    """Serialize read-modify-write transactions across coordinator processes."""
     with _LOCK:
         path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
         with open(str(path) + '.lock', 'a+b') as lockfile:
@@ -76,7 +76,7 @@ def _public(w):
     return {k: w[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')} | {'engines': {}, 'online': False}
 
 def load_fleet():
-    with _locked(): return [_public(w) for w in _read()]
+    return [_public(w) for w in _read()]
 
 def _write(workers):
     path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,14 @@ def _write(workers):
         with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
             yaml.safe_dump({'version': 2, 'workers': workers}, f, sort_keys=False)
             f.flush(); os.fsync(f.fileno())
-        os.replace(name, path)
+        # Windows readers may briefly hold the old file without delete sharing.
+        for attempt in range(100):
+            try:
+                os.replace(name, path)
+                break
+            except PermissionError:
+                if os.name != 'nt' or attempt == 99: raise
+                time.sleep(0.01)
     finally:
         if os.path.exists(name): os.unlink(name)
 

@@ -110,3 +110,29 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
             return [{'id':'pc','online':True,'active':0,'slots':1}]
         with patch.object(workers,'registry',side_effect=[snapshot, AssertionError('read twice')]), patch.object(workers,'catalog',side_effect=health):
             self.assertEqual((await workers.choose({'pool':'build'}))['id'],'pc')
+
+class ReadOnlyAndConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_remote_credentials_do_not_hide_healthy_worker(self):
+        from flowkit import workers
+        from aiohttp.test_utils import TestServer
+        from flowkit.worker_service import make_app
+        with tempfile.TemporaryDirectory() as tmp:
+            app=make_app(worker_id='healthy',root=Path(tmp)/'jobs')
+            async with TestServer(app) as service:
+                path=Path(tmp)/'workers.yaml'
+                path.write_text(yaml.safe_dump({'workers':[{'id':'healthy','url':str(service.make_url(''))}, {'id':'remote','url':'https://remote.example','token_env':'UNSET_FLEET_TOKEN'}]}))
+                with patch.dict(os.environ,{'FLOW_WORKERS_FILE':str(path)},clear=False):
+                    os.environ.pop('UNSET_FLEET_TOKEN', None)
+                    result=await workers.catalog(); chosen=await workers.choose({'id':'healthy'})
+                self.assertEqual(chosen['id'],'healthy')
+                remote=next(w for w in result if w['id']=='remote')
+                self.assertFalse(remote['online']); self.assertIn('credential',remote['reason'].lower())
+                self.assertNotIn('remote.example',str(remote)); self.assertNotIn('UNSET_FLEET_TOKEN',str(remote))
+
+    async def test_catalog_does_not_open_lock_for_read(self):
+        from flowkit import workers, fleet_registry
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'workers.yaml'; path.write_text('workers:\n- {id: offline}\n')
+            with patch.dict(os.environ,{'FLOW_WORKERS_FILE':str(path)}), patch.object(fleet_registry,'_locked',side_effect=PermissionError('read only')):
+                self.assertEqual((await workers.catalog())[0]['id'],'offline')
+                self.assertEqual(fleet_registry.load_fleet()[0]['id'],'offline')

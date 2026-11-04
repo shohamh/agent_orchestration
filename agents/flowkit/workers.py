@@ -42,8 +42,8 @@ def selection_for(flow, step, configured):
 
 
 def registry():
-    from .fleet_registry import _read, _locked
-    with _locked(): entries = {'workers': _read()}
+    from .fleet_registry import _read
+    entries = {'workers': _read()}
     workers, seen = [], set()
     if not isinstance(entries, dict) or not isinstance(entries.get('workers'), list): raise ValueError('Worker registry needs a workers list')
     for item in entries['workers']:
@@ -59,7 +59,8 @@ def registry():
             raise ValueError('Invalid execution-worker endpoint')
         token = {**dotenv_values(ROOT/'workers.local.env'), **os.environ}.get(item.get('token_env', ''), '')
         if url.hostname not in ('127.0.0.1', 'localhost', '::1') and not token:
-            raise ValueError(f'Network worker {item["id"]} needs token_env credentials')
+            workers.append({**item, '_headers': {}, '_error': 'Worker credentials unavailable'})
+            continue
         workers.append({**item, 'url': item['url'].rstrip('/'), '_headers': {'Authorization': f'Bearer {token}'} if token else {}})
     return workers
 
@@ -70,6 +71,7 @@ async def catalog(snapshot=None):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
             public.update({'pool': worker['pools'][0], 'engines': {}})
             try:
+                if worker.get('_error'): return {**public, 'online': False, 'reason': worker['_error']}
                 if not worker.get('url'): return {**public, 'online': False}
                 async with client.get(worker['url'] + '/health', headers=worker['_headers']) as response:
                     data = await response.json()
