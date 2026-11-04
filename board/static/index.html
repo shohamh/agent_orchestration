@@ -40,6 +40,18 @@
   .card:hover, .card:focus-visible { border-color: var(--accent); outline: none; }
   .card .title { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
   .card .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .card.movable { cursor: grab; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+  .card.moving { opacity: .6; }
+  .drag-ghost { position: fixed; z-index: 10; margin: 0; pointer-events: none; cursor: grabbing; box-shadow: 0 12px 28px rgba(0,0,0,.28); border-color: var(--accent); will-change: transform; }
+  .drop-placeholder { border: 2px dashed var(--accent); border-radius: 8px; margin-bottom: 8px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  body.dragging, body.dragging * { cursor: grabbing !important; }
+  body.dragging .column { transition: opacity .15s ease, outline-color .15s ease; outline: 2px solid transparent; outline-offset: -2px; }
+  body.dragging .column.drop-allowed { outline-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  body.dragging .column.drop-disabled { opacity: .35; }
+  body.dragging .card.drop-dim { opacity: .3; filter: grayscale(1); transition: opacity .15s ease; }
+  .drop-action { font-size: 10px; text-transform: none; letter-spacing: 0; color: var(--accent); font-weight: 600; }
+  .drop-note { font-size: 11px; color: var(--muted); margin: 6px 4px 0; line-height: 1.35; }
+  @media (prefers-reduced-motion: reduce) { body.dragging .column, body.dragging .card.drop-dim { transition: none; } }
   .card .last { margin-top: 6px; font-size: 12px; color: var(--ink); background: var(--chip); border-radius: 4px; padding: 4px 6px; overflow-wrap: anywhere; }
   .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--chip); color: var(--muted); }
   .chip.running { color: var(--accent); } .chip.waiting { color: var(--warn); } .chip.done { color: var(--ok); } .chip.stopped { color: var(--danger); }
@@ -292,13 +304,178 @@ function renderHeader() {
   updateNewForm();
 }
 
+// Top of a column = what the engine runs first (Queued/Scheduled, by card.order), oldest running
+// first, newest finished first. Same rule as board/moves.py.
+function columnOrder(a, b) {
+  if (["queued", "scheduled"].includes(a.column)) return (a.order ?? 0) - (b.order ?? 0) || (a.created_at || "").localeCompare(b.created_at || "");
+  if (["running", "waiting"].includes(a.column)) return (a.started_at || a.created_at || "").localeCompare(b.started_at || b.created_at || "");
+  return (b.finished_at || b.created_at || "").localeCompare(a.finished_at || a.created_at || "");
+}
+
 function renderBoard() {
+  if (drag) { drag.renderPending = true; return; } // don't pull cards from under the pointer
+  const before = cardRects();
   $("columns").replaceChildren(...columns.map((col) => {
-    const inCol = cards.filter((c) => c.column === col);
-    return el("section", { class: inCol.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col] },
+    const inCol = cards.filter((c) => c.column === col).sort(columnOrder);
+    return el("section", { class: inCol.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
       el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, String(inCol.length))),
       ...(inCol.length ? inCol.map(renderCard) : [el("div", { class: "empty" }, "—")]));
   }));
+  flip(before);
+}
+
+// ---------------------------------------------------------------- Drag and drop
+// Cards move only where the engine has a matching action (card.moves, from board/moves.py):
+// target column -> reorder | restart | start_now | cancel | stop | mark_done | continue.
+const MOVE_LABELS = { reorder: "Change priority", restart: "Run again", start_now: "Start now", cancel: "Cancel run",
+  stop: "Stop gracefully", mark_done: "Mark done", continue: "Continue" };
+let drag = null;              // the drag in progress
+let suppressClick = false;    // a drag ends with a click on the card; don't open it
+const movingIds = new Set();  // cards whose move request is in flight
+
+function dragStart(event, card) {
+  if (event.button !== 0 || event.target.closest("a, button, input, textarea, select")) return;
+  const node = event.currentTarget, touch = event.pointerType === "touch";
+  const pending = { card, node, x: event.clientX, y: event.clientY, pointerId: event.pointerId, started: false };
+  // Touch: hold briefly to drag, so swiping still scrolls the board. Mouse/pen: move a few pixels.
+  const timer = touch ? setTimeout(() => begin(), 280) : null;
+  const begin = () => {
+    if (pending.started) return;
+    pending.started = true;
+    beginDrag(pending);
+  };
+  const move = (e) => {
+    if (e.pointerId !== pending.pointerId) return;
+    if (!pending.started) {
+      if (Math.hypot(e.clientX - pending.x, e.clientY - pending.y) < 6) return;
+      if (touch) { cleanup(); return; } // moved before the hold: it's a scroll
+      begin();
+    }
+    e.preventDefault();
+    dragMove(e.clientX, e.clientY);
+  };
+  const up = (e) => { if (e.pointerId !== pending.pointerId) return; cleanup(); if (pending.started) dragEnd(e.type === "pointercancel"); };
+  const key = (e) => { if (e.key === "Escape" && pending.started) { cleanup(); dragEnd(true); } };
+  const cleanup = () => {
+    clearTimeout(timer);
+    removeEventListener("pointermove", move); removeEventListener("pointerup", up); removeEventListener("pointercancel", up);
+    removeEventListener("keydown", key);
+  };
+  addEventListener("pointermove", move, { passive: false });
+  addEventListener("pointerup", up); addEventListener("pointercancel", up); addEventListener("keydown", key);
+}
+
+function beginDrag(pending) {
+  const { card, node } = pending, rect = node.getBoundingClientRect();
+  const ghost = node.cloneNode(true);
+  ghost.classList.add("drag-ghost");
+  Object.assign(ghost.style, { width: `${rect.width}px`, left: `${rect.left}px`, top: `${rect.top}px` });
+  document.body.append(ghost);
+  const placeholder = el("div", { class: "drop-placeholder", style: `height:${rect.height}px` });
+  node.replaceWith(placeholder);
+  drag = { card, ghost, placeholder, dx: pending.x - rect.left, dy: pending.y - rect.top, target: card.column, renderPending: false };
+  document.body.classList.add("dragging");
+  for (const section of document.querySelectorAll("#columns .column")) {
+    const action = card.moves[section.dataset.col];
+    section.classList.toggle("drop-allowed", !!action);
+    section.classList.toggle("drop-disabled", !action);
+    if (action) section.querySelector("h2").append(el("span", { class: "drop-action" }, MOVE_LABELS[action] || action));
+    // A run that already started can only be restarted at the top (high priority) or bottom (low).
+    if (action === "restart") {
+      section.classList.add("ends-only");
+      section.append(el("p", { class: "drop-note" }, card.system.startsWith("trigger") ? card.reorder_note
+        : "Starts again as a new run: drop at the top for high priority, at the bottom for low."));
+    } else if (action === "reorder" && card.reorder_note) section.append(el("p", { class: "drop-note" }, card.reorder_note));
+  }
+  dragMove(pending.x, pending.y);
+}
+
+function dragMove(x, y) {
+  const { ghost, placeholder, dx, dy, card } = drag;
+  ghost.style.transform = `translate(${x - dx - parseFloat(ghost.style.left)}px, ${y - dy - parseFloat(ghost.style.top)}px) rotate(1.5deg)`;
+  const section = document.elementsFromPoint(x, y).map((n) => n.closest?.("#columns .column")).find(Boolean);
+  const to = section?.dataset.col;
+  if (!section || !card.moves[to]) { drag.target = null; return; }
+  drag.target = to;
+  const others = [...section.querySelectorAll(".card[data-id]")];
+  let index = others.findIndex((n) => { const r = n.getBoundingClientRect(); return y < r.top + r.height / 2; });
+  if (index < 0) index = others.length;
+  // Started runs: only the ends of Queued; non-priority columns: always on top.
+  if (card.moves[to] === "restart") index = index <= others.length / 2 ? 0 : others.length;
+  else if (!["reorder", "restart"].includes(card.moves[to])) index = 0;
+  others.forEach((n, i) => n.classList.toggle("drop-dim", card.moves[to] === "restart" && i > 0 && i < others.length - 1 && others.length > 1));
+  const next = others[index] || section.querySelector(".drop-note") || null;
+  if (placeholder.parentNode === section && placeholder.nextElementSibling === next) return;
+  const before = cardRects();
+  section.querySelector(".empty")?.setAttribute("hidden", "");
+  if (next) next.before(placeholder); else section.append(placeholder);
+  flip(before);
+}
+
+async function dragEnd(cancelled) {
+  const { card, ghost, placeholder, target } = drag;
+  suppressClick = true; setTimeout(() => { suppressClick = false; }, 0);
+  const action = !cancelled && target ? card.moves[target] : null;
+  const section = placeholder.parentNode?.closest?.(".column");
+  const ids = section ? [...section.querySelectorAll(".card[data-id], .drop-placeholder")].map((n) => n.dataset?.id || "*") : [];
+  const at = ids.indexOf("*");
+  const above = at > 0 ? ids[at - 1] : null, below = at >= 0 && at < ids.length - 1 ? ids[at + 1] : null;
+  const unchanged = target === card.column && action === "reorder" && neighbours(card) === `${above}|${below}`;
+  const destructive = ["cancel"].includes(action) || (action === "restart" && ["running", "waiting"].includes(card.column));
+  const confirmed = !action || unchanged || !destructive ||
+    confirm(action === "cancel" ? `Cancel "${card.title}"? The engine stops it now.` : `Stop "${card.title}" and run it again from the start?`);
+  // Glide the card to where it lands (or back), then hand the board back to live updates.
+  const home = (action && confirmed && !unchanged ? placeholder : null)?.getBoundingClientRect();
+  if (home && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    ghost.style.transition = "transform .18s cubic-bezier(.2,.8,.2,1)";
+    ghost.style.transform = `translate(${home.left - parseFloat(ghost.style.left)}px, ${home.top - parseFloat(ghost.style.top)}px)`;
+    await new Promise((r) => setTimeout(r, 180));
+  }
+  ghost.remove();
+  document.body.classList.remove("dragging");
+  document.querySelectorAll(".drop-action, .drop-note").forEach((n) => n.remove());
+  drag = null;
+  if (action && confirmed && !unchanged) {
+    // Optimistic: show the card in its new column until the engine reports back.
+    const key = contextKey(), local = cards.find((c) => c.id === card.id);
+    if (local && ["reorder", "restart", "start_now"].includes(action)) local.column = target === "scheduled" ? "scheduled" : "queued";
+    if (local && action === "reorder") local.order = estimateOrder(target, above, below);
+    movingIds.add(card.id);
+    renderBoard();
+    try {
+      setStatus(`${MOVE_LABELS[action]}…`);
+      const result = await api("POST", `/api/cards/${system}/${encodeURIComponent(card.id)}/move`, { board, to: target, above, below });
+      setStatus(result.id !== card.id ? `${MOVE_LABELS[action]}: started as a new run` : `${MOVE_LABELS[action]}: done`);
+      if (openCardId === card.id && result.id !== card.id) openCardId = result.id;
+    } catch (e) { setStatus(e.message, true); }
+    finally { movingIds.delete(card.id); if (key === contextKey()) await refresh(); }
+  } else renderBoard();
+}
+
+function neighbours(card) {
+  const col = cards.filter((c) => c.column === card.column).sort(columnOrder), i = col.findIndex((c) => c.id === card.id);
+  return `${col[i - 1]?.id ?? null}|${col[i + 1]?.id ?? null}`;
+}
+
+function estimateOrder(column, above, below) {
+  const order = (id) => cards.find((c) => c.id === id)?.order;
+  const a = above ? order(above) : null, b = below ? order(below) : null;
+  return a != null && b != null ? (a + b) / 2 : b != null ? b - 1 : a != null ? a + 1 : 0;
+}
+
+// FLIP: cards that changed place glide from where they were instead of jumping.
+function cardRects() {
+  return new Map([...document.querySelectorAll("#columns .card[data-id]")].map((n) => [n.dataset.id, n.getBoundingClientRect()]));
+}
+function flip(before, except = null) {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  for (const node of document.querySelectorAll("#columns .card[data-id]")) {
+    const was = before.get(node.dataset.id);
+    if (!was || node === except) continue;
+    const now = node.getBoundingClientRect(), dx = was.left - now.left, dy = was.top - now.top;
+    if (!dx && !dy) continue;
+    node.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 220, easing: "cubic-bezier(.2,.8,.2,1)" });
+  }
 }
 
 function renderCard(card) {
@@ -306,8 +483,13 @@ function renderCard(card) {
   const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
     : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
   const q = card.column === "queued" ? queueText(card) : "";
-  return el("div", { class: "card", tabindex: "0", role: "button", onclick: () => openCard(card.id), onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); } },
-    el("div", { class: "title" }, card.title),
+  const movable = Object.keys(card.moves || {}).length > 0;
+  const priority = card.column === "queued" && card.system === "hatchet" && card.priority ? el("span", { class: "chip", title: "Hatchet priority (1 low – 3 high)" }, `P${card.priority}`) : null;
+  return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
+      "aria-roledescription": movable ? "draggable card" : "card",
+      onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
+      onpointerdown: movable ? (e) => dragStart(e, card) : null },
+    el("div", { class: "title" }, card.title, priority ? " " : null, priority),
     el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when)),
     q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
     last ? el("div", { class: "last" }, last) : null,
