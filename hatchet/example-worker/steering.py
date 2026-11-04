@@ -58,8 +58,10 @@ async def steerable_agent(input: SteerableInput, ctx: DurableContext) -> dict:
     goal = input.goal
     transcript: list[str] = []
     # Steer events sent while the agent is busy (between waits) must not be lost: each wait also
-    # considers events that arrived since the previous wait ended.
-    listening_since = datetime.now(timezone.utc)
+    # considers events that arrived since the previous wait ended. The first wait looks back a day:
+    # steer events are scoped to this run, so anything earlier was sent to it while it was queued or
+    # starting (a "stop" sent right after the run starts was lost when this began at "now").
+    listening_since = datetime.now(timezone.utc) - timedelta(days=1)
 
     for turn in range(input.turns):
         # In a real agent: call the (on-prem) LLM / tools here.

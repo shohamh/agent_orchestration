@@ -118,7 +118,9 @@ async def move_card(request: web.Request) -> web.Response:
     body = await json_object(request)
     board, to = text_field(body, "board", 200), text_field(body, "to", 20)
     run_id = request.match_info["run_id"]
-    cards = await adapter.list_cards(board, light=True)
+    # Not the light pass: a coding-agent session's column and allowed moves come from its session
+    # state, which the light pass doesn't read (it would look like a plain running card).
+    cards = await adapter.list_cards(board)
     await label_flows(request.app, cards)
     card = next((c for c in cards if c.id == run_id), None)
     if card is None:
