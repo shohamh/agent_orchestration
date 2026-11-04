@@ -108,6 +108,7 @@
 </style>
 <link rel="stylesheet" href="/static/chat.css">
 <link rel="stylesheet" href="/static/flow-builder.css">
+<link rel="stylesheet" href="/static/fleet.css">
 </head>
 <body>
 <header>
@@ -117,6 +118,7 @@
   <select id="board" aria-label="Board"></select>
   <button class="secondary" id="add-board" type="button">+ Board</button>
   <button class="secondary" id="flows-btn" type="button" title="Create and edit flows that run on every backend">Flows</button>
+  <button class="secondary" id="fleet-btn" type="button" title="Execution PCs: registration, capabilities, live CPU/RAM and limits">Fleet</button>
   <button class="primary" id="new-card" type="button">New card</button>
   <span class="spacer"></span>
   <span class="status" id="status" role="status">Loading…</span>
@@ -195,9 +197,12 @@
 <!-- The flow builder (flow-builder.js): a flow runs on every backend as a native workflow. Saving
      stores a draft only; activation is a separate, previewed step. -->
 <dialog id="flows-dialog" class="fb-dialog"></dialog>
+<!-- The fleet tab (fleet.js): registered execution PCs and their settings. -->
+<dialog id="fleet-dialog" class="fl-dialog" aria-labelledby="fl-title"></dialog>
 
 <script src="/static/chat.js"></script>
 <script src="/static/flow-builder.js"></script>
+<script src="/static/fleet.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
   // Chrome honours interactive-widget=resizes-content above; this covers browsers that only
@@ -1092,9 +1097,16 @@ async function closeFlows() {
 $("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOverlay("flows", onFlowsBack); flowBuilder.open(); });
 // Escape asks before discarding unsaved edits instead of closing straight away.
 flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
+// ---------------------------------------------------------------- Fleet
+const fleetDialog = $("fleet-dialog");
+const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet() });
+async function closeFleet() { fleet.stop(); if (fleetDialog.open) { fleetDialog.close(); await dropOverlay("fleet"); } }
+$("fleet-btn").addEventListener("click", () => { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open(); });
+// Escape closes an open form first, then the fleet tab.
+fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
 
 $("d-close").addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open && !fleetDialog.open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
 $("d-stop").addEventListener("click", () => act("stop"));
 $("d-cancel").addEventListener("click", () => act("cancel"));

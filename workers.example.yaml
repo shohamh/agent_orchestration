@@ -5,6 +5,7 @@ workers:
   - id: local
     url: http://127.0.0.1:8096
     pools: [default]
+    engines: [hatchet, prefect, trigger]  # engines that may place work on this PC
     tags: []
     slots: 1
     cpu_limit: 90

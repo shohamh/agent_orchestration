@@ -307,6 +307,11 @@ the superseded attempt can neither publish nor update the record. Parallel branc
 the same file on different PCs make the joining step fail with a workspace conflict before it is
 placed. A restart reuses the source run's exact results and places only the restarted subtree.
 
-Not yet pushed: registry `slots`, `cpu_limit` and `ram_limit` are not sent to a worker's gate. A
-worker's gate uses its own service settings, so the coordinator may see a free slot while the
-gate makes the job wait. The record then shows the gate's reason, for example `full_slots`.
+Limits: the registry's `slots`, `cpu_limit` and `ram_limit` are pushed to the worker's gate
+(authenticated `POST /capacity/settings`, limits only) when the registry entry is saved and
+whenever the coordinator finds a connected worker whose gate reports different limits, which
+covers connecting and reconnecting. The gate reads them at each admission, so a change affects
+new work only and never interrupts running jobs. Until the push succeeds (the PC is offline, or
+its service predates the route) the gate keeps its previous limits and the fleet tab says so.
+`FLOW_WORKER_SLOTS` still caps each service process. A worker's `engines` list (default: all
+three) limits which engines may place work on it.
