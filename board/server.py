@@ -134,7 +134,7 @@ async def move_card(request: web.Request) -> web.Response:
     elif action == "start_now":
         await adapter.start_now(card)
     elif action == "cancel":
-        await adapter.cancel(run_id)
+        await cancel_run(request, adapter, run_id)
     elif action == "stop":
         await adapter.steer(run_id, {"action": "stop"})
     elif action == "mark_done":
@@ -442,13 +442,13 @@ async def node_transcript(request: web.Request) -> web.Response:
 
 
 async def node_restart(request: web.Request) -> web.Response:
-    info, _, node, _ = await flow_node(request)
+    info, flow, node, _ = await flow_node(request)
     adapter = adapter_for(request)
     if info["column"] not in ("done", "stopped"):
         raise web.HTTPConflict(text="Stop or finish the flow before restarting a step")
     body = await json_object(request)
-    if 'worker' in body:
-        await request.app['flow_host'].set_selection(request.match_info['run_id'], node.step, body['worker'])
+    if 'worker' in body:  # the flow host checks the step's software too, as at launch
+        await request.app['flow_host'].set_selection(request.match_info['run_id'], node.step, body['worker'], flow)
     if not hasattr(adapter, 'restart_node'):
         if request.match_info['system'] not in ('prefect', 'trigger-dev'):
             raise NotImplementedError('This backend has no step restart support')
@@ -588,6 +588,16 @@ async def node_logs(request: web.Request) -> web.Response:
     return web.json_response(lines_page(request, await adapter_for(request).node_lines(request.match_info["ref"])))
 
 
+async def cancel_run(request: web.Request, adapter: Any, run_id: str) -> None:
+    """A user cancellation: tell the flow host first so a waiting step records `cancelled`
+    rather than an engine timeout or interruption. Never blocks the cancellation itself."""
+    try:
+        await request.app['flow_host'].mark_cancelled(run_id)
+    except Exception as exc:  # flow host down, or not a portable flow
+        log.info('could not mark %s cancelled on the flow host: %s', run_id, exc)
+    await adapter.cancel(run_id)
+
+
 async def card_action(request: web.Request) -> web.Response:
     adapter = adapter_for(request)
     run_id, action = request.match_info["run_id"], request.match_info["action"]
@@ -599,7 +609,7 @@ async def card_action(request: web.Request) -> web.Response:
     elif action == "stop":
         await adapter.steer(run_id, {"action": "stop"})
     elif action == "cancel":
-        await adapter.cancel(run_id)
+        await cancel_run(request, adapter, run_id)
     elif action == "replay":
         await adapter.replay(run_id)
     else:

@@ -242,3 +242,16 @@ Waiting therefore happens inside the step's engine task: it occupies one engine 
 the flow worker and counts toward the step's `timeout_minutes`, so it is bounded rather than
 indefinite. Raise `timeout_minutes` for steps expected to wait long. Engine scheduling timeouts do
 not apply because the task is already running. Native engine queueing remains a separate, unverified option.
+
+The default wait bound is therefore the step's `timeout_minutes`, 60 minutes unless the flow sets
+it (at most 1440). When it expires, the engine reports the step as timed out and the step's
+execution record shows `state: timed_out`, keeping the last `waiting_reason` and `message` (for
+example `offline`) so the board can show why it never ran. A cancellation through the board's
+cancel action records `state: cancelled`; any other engine-side cancellation of the task (from the
+engine's own UI or a worker shutdown) records `state: interrupted`. If the flow host is unreachable
+when the board cancels, the cancellation still happens but may be recorded as `interrupted`. A
+restart onto a selected worker is checked like a launch, including the step's software: a confirmed
+absence is refused with the explanation, while an offline, busy or unchecked worker is accepted and
+the restarted step waits for it. A worker that reports a job as started (running state, a worker
+identity or step events) is never replaced by another placement, even if it ignored start
+authorization; losing it then fails the step and the engine's retries apply.

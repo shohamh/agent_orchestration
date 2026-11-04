@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +17,7 @@ from .workers import fleet_status, routing, selection_for, selector
 
 PLACEMENT_POLL = 2.0  # seconds between placement checks while a step waits for a worker
 PROBE_INTERVAL = 15.0  # minimum seconds between on-demand capability probes of one worker
+TIMEOUT_SLACK = 5.0  # the engine's step timeout starts slightly before this coroutine does
 
 
 @contextmanager
@@ -56,6 +58,28 @@ def set_selection(run_id, step, wanted):
     path=root/'.flow-selections'/f'{step}.json'
     if wanted: atomic_json(path,wanted)
     else: path.unlink(missing_ok=True)
+
+
+def mark_cancelled(run_id):
+    """The board's cancel API records a user cancellation before cancelling the engine run."""
+    root = workspace_path(run_id)
+    if not root.is_dir(): return False
+    atomic_json(root/'.flow-cancel.json', {'at': time.time()})
+    return True
+
+
+def step_timeout_seconds(step):
+    return step.timeout_minutes * 60
+
+
+def cancellation_state(root, step, since_wall, since_monotonic):
+    """cancelled: through the board after this attempt began; timed_out: the engine's step
+    timeout (timeout_minutes) expired; interrupted: any other engine-side cancellation."""
+    try: marked = json.loads((root/'.flow-cancel.json').read_text(encoding='utf-8'))['at'] >= since_wall - 1
+    except (OSError, ValueError, KeyError, TypeError): marked = False
+    if marked: return 'cancelled'
+    if time.monotonic() - since_monotonic + TIMEOUT_SLACK >= step_timeout_seconds(step): return 'timed_out'
+    return 'interrupted'
 
 
 class _Replace(Exception):
@@ -133,6 +157,7 @@ async def execute_step(flow, step_id, context, run_id, receive, sink):
         asset_path=root/'.flow-assets.json'
         if not asset_path.exists(): atomic_json(asset_path,snapshot(FLOWS_DIR))
     assets=json.loads(await asyncio.to_thread(asset_path.read_text,encoding='utf-8'))
+    since_wall, since_monotonic = time.time(), time.monotonic()
     attempt = {'job': str(uuid.uuid4())}
     fence = root/'.flow-attempts'/f'{step_id}.json'
     with publication_lock(root, step_id): atomic_json(fence, attempt['job'])
@@ -162,7 +187,9 @@ async def execute_step(flow, step_id, context, run_id, receive, sink):
                 record(state='waiting', worker=None, job=attempt['job'], waiting_reason=exc.reason, message=str(exc))
                 await asyncio.sleep(PLACEMENT_POLL)  # no tight loop if the same worker rejects again
     except asyncio.CancelledError:
-        record(state='cancelled', waiting_reason=None)
+        # Keep the last waiting reason and message: they explain why a step never ran.
+        record(state=cancellation_state(root, flow.steps[step_id], since_wall, since_monotonic),
+               timeout_minutes=flow.steps[step_id].timeout_minutes)
         raise
     except BaseException:
         if info.get('state') != 'done': record(state='failed', waiting_reason=None)
@@ -187,6 +214,7 @@ async def _run_job(flow, step_id, context, run_id, receive, sink, root, worker, 
         input_task = None
         finished = False
         authorized, granted = False, None
+        evidence = False  # the worker reported the job started (it may ignore `authorize`)
         unreachable = f"{worker['id']} became unreachable before the step started"
         try:
             try: await call('POST', worker['url']+'/jobs', config)
@@ -196,10 +224,13 @@ async def _run_job(flow, step_id, context, run_id, receive, sink, root, worker, 
             while True:
                 try: data = await call('GET', url+f'?after={cursor}')
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RuntimeError) as exc:
-                    if authorized: raise
+                    if authorized or evidence: raise
                     raise _Replace('offline', unreachable) from exc  # never authorized, so never started
                 cursor = data['cursor']
+                if data.get('worker') or data['state'] in ('running', 'done') or data['events'] or cursor:
+                    evidence = True  # e.g. an older service that starts at once: never placed again
                 if data['state'] == 'rejected':
+                    if evidence: raise RuntimeError(data.get('error') or 'The worker rejected a step it reported as started')
                     raise _Replace(data.get('reason') or 'software_missing', data.get('error') or 'The worker rejected the step')
                 if data['state'] == 'queued' and not data.get('worker'):
                     record(waiting_reason=data.get('waiting_reason'))
@@ -229,7 +260,7 @@ async def _run_job(flow, step_id, context, run_id, receive, sink, root, worker, 
                     finished = True
                     return data['output']
                 if data['state'] in ('failed', 'cancelled'):
-                    if data['state'] == 'cancelled' and not authorized:
+                    if data['state'] == 'cancelled' and not authorized and not evidence:
                         raise _Replace('offline', data.get('error') or 'The worker cancelled the queued step')
                     raise RuntimeError(data.get('error') or 'Remote step failed')
                 if input_task.done(): input_task.result()

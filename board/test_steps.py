@@ -53,6 +53,9 @@ class Adapter:
     async def restart_node(self, run_id, ref):
         self.calls.append(('native-replay', run_id, ref))
 
+    async def cancel(self, run_id):
+        self.calls.append(('cancel', run_id))
+
 
 class StepAPI(unittest.IsolatedAsyncioTestCase):
     async def test_launch_forwards_validated_routing_to_runtime(self):
@@ -77,11 +80,28 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/launch/validate', json={'flow': 'demo-flow'})
         self.assertEqual((await response.json())['steps']['talk']['status'], 'blocked')
 
+    async def test_user_cancel_is_marked_on_the_flow_host_first(self):
+        order = []
+        async def mark(run_id): order.append(('mark', run_id))
+        self.app['flow_host'].mark_cancelled = mark
+        original = self.adapter.cancel
+        async def cancel(run_id):
+            order.append(('cancel', run_id)); await original(run_id)
+        self.adapter.cancel = cancel
+        response = await self.client.post('/api/cards/fake/run/cancel')
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(order, [('mark', 'run'), ('cancel', 'run')])
+        async def down(run_id): raise RuntimeError('flow host not reachable')
+        self.app['flow_host'].mark_cancelled = down
+        response = await self.client.post('/api/cards/fake/run/cancel')
+        self.assertEqual(response.status, 200, await response.text())  # cancel still happens
+        self.assertEqual(order[-1], ('cancel', 'run'))
+
     async def test_restart_override_forwarded_without_descendant_logic(self):
         self.app['flow_host'].set_selection = AsyncMock()
         response = await self.client.post('/api/cards/fake/run/nodes/talk/restart', json={'worker': {'id': 'pc-b'}})
         self.assertEqual(response.status, 200, await response.text())
-        self.app['flow_host'].set_selection.assert_awaited_once_with('run', 'talk', {'id': 'pc-b'})
+        self.app['flow_host'].set_selection.assert_awaited_once_with('run', 'talk', {'id': 'pc-b'}, FLOW)
         self.assertEqual(self.adapter.calls, [('native-replay', 'run', 'talk')])
 
     async def test_logical_step_identity_survives_pending_to_started(self):

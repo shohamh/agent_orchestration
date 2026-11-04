@@ -36,6 +36,20 @@ def codes(result):
 
 
 class MatchTests(unittest.TestCase):
+    def test_tags_resolution_names_pool_only_when_selected(self):
+        from flowkit.fleet_matching import validate_launch
+        fleet = [worker(tags=('linux',))]
+        unpooled = validate_launch({'tags': ['cuda']}, fleet)
+        self.assertEqual(unpooled['status'], 'blocked')
+        self.assertNotIn('pool', unpooled['resolution'])
+        self.assertIn('pool build', validate_launch({'pool': 'build', 'tags': ['cuda']}, fleet)['resolution'])
+
+    def test_malformed_inventory_is_unknown(self):
+        from flowkit.fleet_matching import match_worker
+        for inventory in ([], {'commands': ['python']}, {'commands': {'python': 'installed'}}, 'bad'):
+            result = match_worker(worker(inventory=inventory), {'command': 'python'})
+            self.assertEqual((result['status'], [r['code'] for r in result['reasons']]), ('unknown', ['software_unknown']))
+
     def test_pool_plus_all_tags_and_software_required(self):
         from flowkit.fleet_matching import match_worker
         w = worker(commands={'python': entry('installed')})
@@ -148,7 +162,7 @@ TOOL_FLOW = {'name': 'tool-flow', 'worker': {'pool': 'build'}, 'steps': {
     'go': {'kind': 'program', 'run': 'python -c "print(\'ran\')"', 'requires_command': 'fleet-test-tool'}}}
 
 
-class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
+class FleetFixture(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -157,6 +171,7 @@ class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
                                            'PATH': tool_bin(self.root) + os.pathsep + os.environ.get('PATH', '')})
         self.env.start(); self.addCleanup(self.env.stop)
         for target, value in (('flowkit.distributed.PLACEMENT_POLL', .1), ('flowkit.distributed.PROBE_INTERVAL', 0),
+                              ('flowkit.distributed.TIMEOUT_SLACK', 0),
                               ('flowkit.worker_service.AUTHORIZATION_TIMEOUT', .5), ('flowkit.worker_service.COORDINATOR_STALE', .5)):
             patcher = patch(target, value); patcher.start(); self.addCleanup(patcher.stop)
         self.events = []
@@ -176,6 +191,8 @@ class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(server.close)
         return app, server
 
+
+class WaitingLifecycleTests(FleetFixture):
     async def test_offline_worker_waits_visibly_then_starts_when_it_connects(self):
         from flowkit.distributed import execute_step
         self.write_registry([('pc-a', None)])  # saved, awaiting connection
@@ -209,7 +226,9 @@ class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         async def offline(*args, **kwargs):
             import aiohttp
             raise aiohttp.ClientConnectionError('worker offline')
+        from flowkit.distributed import mark_cancelled
         with patch('flowkit.distributed._delete_job', offline):
+            self.assertTrue(mark_cancelled('cancel-run'))  # what the board's cancel API does first
             task.cancel()
             with self.assertRaises(asyncio.CancelledError): await task
         self.assertEqual(info(self.root, 'cancel-run', 'go')['state'], 'cancelled')
@@ -263,6 +282,126 @@ class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
         flow = parse({'name': 'ambiguous-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python a.py | sort'}}})
         with self.assertRaisesRegex(ValueError, 'requires_command'):
             await asyncio.wait_for(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'ambiguous-run', self.receive, self.sink), 5)
+
+
+def fake_worker(worker_id, capabilities=None, polls=()):
+    """An execution service that may be older than this coordinator (ignores `authorize`)."""
+    from aiohttp import web
+    state = {'submitted': 0, 'polls': 0}
+    report = capabilities if capabilities is not None else {'commands': {'python': entry('installed')}, 'agents': {}, 'refreshed_at': stamp()}
+    async def health(request): return web.json_response({'id': worker_id, 'hostname': 'fake', 'active': 0, 'slots': 1})
+    async def caps(request): return web.json_response(report)
+    async def create(request):
+        state['submitted'] += 1
+        return web.json_response({'id': (await request.json())['id']})
+    async def status(request):
+        state['polls'] += 1
+        if state['polls'] <= len(polls): return web.json_response(polls[state['polls'] - 1])
+        return web.json_response({'error': 'job not found'}, status=404)  # the service restarted
+    async def ok(request): return web.json_response({'ok': True})
+    app = web.Application()
+    app.router.add_get('/health', health)
+    app.router.add_get('/capabilities', caps)
+    app.router.add_post('/capabilities/refresh', caps)
+    app.router.add_post('/jobs', create)
+    app.router.add_get('/jobs/{id}', status)
+    app.router.add_post('/jobs/{id}/input', ok)
+    app.router.add_delete('/jobs/{id}', ok)
+    return app, state
+
+
+class ReviewFixTests(FleetFixture):
+    """Round-1 review fixes; reuses the lifecycle fixture (temporary registry and workspaces)."""
+    async def serve(self, app):
+        server = TestServer(app); await server.start_server()
+        self.addAsyncCleanup(server.close)
+        return server
+
+    async def test_worker_reported_start_is_never_placed_again(self):
+        from flowkit.distributed import execute_step
+        queued = {'state': 'queued', 'events': [], 'cursor': 0, 'worker': None, 'error': None, 'waiting_reason': None}
+        evidence = {'running state': {**queued, 'state': 'running'},
+                    'worker field': {**queued, 'worker': {'id': 'old', 'hostname': 'fake'}},
+                    'step events': {**queued, 'events': [{'type': 'log', 'stream': 'stdout', 'text': 'hi'}], 'cursor': 1}}
+        flow = parse({'name': 'old-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+        for name, started in evidence.items():
+            with self.subTest(name):
+                app, state = fake_worker('old', polls=[started])
+                server = await self.serve(app)
+                self.write_registry([('old', server.make_url(''))])
+                run = 'old-run-' + name.split()[0]
+                with self.assertRaisesRegex(RuntimeError, 'job not found'):
+                    await asyncio.wait_for(execute_step(flow, 'go', {'input': {}, 'steps': {}}, run, self.receive, self.sink), 10)
+                self.assertEqual(state['submitted'], 1)  # no second placement while the first may run
+                self.assertEqual(info(self.root, run, 'go')['state'], 'failed')
+
+    async def test_engine_timeout_while_waiting_keeps_the_reason(self):
+        from flowkit.distributed import execute_step
+        self.write_registry([('pc-a', None)])
+        flow = parse({'name': 'expiring', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+        with patch('flowkit.distributed.step_timeout_seconds', lambda step: .5):
+            with self.assertRaises(asyncio.TimeoutError):  # what the engine's execution timeout does
+                await asyncio.wait_for(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'expired-run', self.receive, self.sink), .8)
+        record = info(self.root, 'expired-run', 'go')
+        self.assertEqual((record['state'], record['waiting_reason']), ('timed_out', 'offline'))
+        self.assertIn('offline', record['message'])
+        self.assertEqual(record['timeout_minutes'], 60)
+
+    async def test_user_cancel_and_engine_interruption_are_distinct(self):
+        from flowkit.distributed import execute_step, mark_cancelled
+        self.write_registry([('pc-a', None)])
+        flow = parse({'name': 'cancelled', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+        for run, by_user in (('user-run', True), ('engine-run', False)):
+            task = asyncio.create_task(execute_step(flow, 'go', {'input': {}, 'steps': {}}, run, self.receive, self.sink))
+            await until(lambda: info(self.root, run, 'go').get('waiting_reason') == 'offline', message='waiting')
+            if by_user: self.assertTrue(mark_cancelled(run))
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError): await task
+            record = info(self.root, run, 'go')
+            self.assertEqual(record['state'], 'cancelled' if by_user else 'interrupted')
+            self.assertEqual(record['waiting_reason'], 'offline')
+
+    async def test_malformed_inventory_does_not_abort_placement(self):
+        from flowkit.fleet_matching import validate_launch
+        from flowkit.workers import fleet_status
+        servers = []
+        for name, report in (('bad-list', []), ('bad-section', {'commands': ['python'], 'agents': 'x'}),
+                             ('bad-entry', {'commands': {'python': 'installed'}}), ('good', None)):
+            app, _ = fake_worker(name, capabilities=report)
+            servers.append((name, (await self.serve(app)).make_url('')))
+        self.write_registry(servers)
+        public, _ = await fleet_status([{'command': 'python'}])
+        decision = validate_launch({'command': 'python'}, public)
+        self.assertEqual((decision['status'], decision['candidates']), ('ready', ['good']))
+        statuses = {m['worker']: m['status'] for m in decision['workers']}
+        self.assertEqual(statuses, {'bad-list': 'unknown', 'bad-section': 'unknown', 'bad-entry': 'unknown', 'good': 'compatible'})
+
+    async def test_restart_selection_checks_step_software(self):
+        import threading, urllib.request, urllib.error, flow_host
+        report = {'commands': {'fleet-test-tool': entry('absent'), 'python': entry('installed')}, 'agents': {}, 'refreshed_at': stamp()}
+        app, _ = fake_worker('pc-a', capabilities=report)
+        server = await self.serve(app)
+        self.write_registry([('pc-a', server.make_url('')), ('pc-b', None)])
+        (self.root/'canonical'/'sel-run').mkdir(parents=True)
+        host = flow_host.serve(None, '127.0.0.1', 0)
+        threading.Thread(target=host.serve_forever, daemon=True).start()
+        self.addCleanup(host.server_close); self.addCleanup(host.shutdown)
+        flow = {'name': 'sel-flow', 'steps': {'go': {'kind': 'program', 'run': 'fleet-test-tool --x', 'requires_command': 'fleet-test-tool'},
+                                              'other': {'kind': 'program', 'run': 'python a.py'}}}
+        def select(step, worker, with_flow=True):
+            body = json.dumps({'step': step, 'worker': worker, **({'flow': flow} if with_flow else {})}).encode()
+            request = urllib.request.Request(f'http://127.0.0.1:{host.server_address[1]}/execution/sel-run/selection', body, {'Content-Type': 'application/json'})
+            try:
+                with urllib.request.urlopen(request, timeout=20) as response: return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as exc: return exc.code, json.loads(exc.read())
+        status, body = await asyncio.to_thread(select, 'go', {'id': 'pc-a'})
+        self.assertEqual(status, 400)
+        self.assertIn('fleet-test-tool is not installed on pc-a', body['error'])
+        self.assertIn('Install', body['error'])
+        self.assertFalse((self.root/'canonical'/'sel-run'/'.flow-selections'/'go.json').exists())
+        self.assertEqual((await asyncio.to_thread(select, 'other', {'id': 'pc-a'}))[0], 200)
+        self.assertEqual((await asyncio.to_thread(select, 'go', {'id': 'pc-b'}))[0], 200)  # offline: waits
+        self.assertEqual((await asyncio.to_thread(select, 'go', {'id': 'pc-a'}, False))[0], 200)  # legacy: selector only
 
 
 class LaunchRouteTests(unittest.TestCase):

@@ -121,17 +121,24 @@ class FlowHost:
     async def validate_routing(self, execution, steps):
         return await self._request('POST', '/workers/validate', {'execution': execution, 'steps': list(steps)})
 
-    async def validate_launch(self, flow, execution=None):
+    @staticmethod
+    def _definition(flow):
         # The definition text avoids re-expanding a synthesized setup step.
-        source = flow.get('yaml') or {k: v for k, v in flow.items() if k not in ('yaml', 'environment')}
-        body = {'flow': source, **({'execution': execution} if execution is not None else {})}
+        return flow.get('yaml') or {k: v for k, v in flow.items() if k not in ('yaml', 'environment', 'revision')}
+
+    async def validate_launch(self, flow, execution=None):
+        body = {'flow': self._definition(flow), **({'execution': execution} if execution is not None else {})}
         return await self._request('POST', '/launch/validate', body, timeout=30)
 
     async def execution(self, run_id):
         return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']
 
-    async def set_selection(self, run_id, step, worker):
-        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', {'step': step, 'worker': worker})
+    async def set_selection(self, run_id, step, worker, flow=None):
+        body = {'step': step, 'worker': worker, **({'flow': self._definition(flow)} if flow is not None else {})}
+        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', body)
+
+    async def mark_cancelled(self, run_id):
+        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/cancel', {}, timeout=3)
 
     async def close(self) -> None:
         if self._session:

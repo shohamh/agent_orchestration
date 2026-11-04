@@ -570,16 +570,28 @@ class Api(BaseHTTPRequestHandler):
                 flow = parse_text(source) if isinstance(source, str) else parse(source)
                 return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'))))
             except (ValueError, KeyError, FlowError) as exc: return self._send(400, {'error': str(exc)})
+        match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/cancel', self.path)
+        if match:
+            from flowkit.distributed import mark_cancelled
+            try: return self._send(200, {'marked': mark_cancelled(match[1])})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/selection', self.path)
         if match:
             from flowkit.distributed import set_selection
-            from flowkit.fleet_matching import validate_launch
+            from flowkit.definition import parse
+            from flowkit.fleet_matching import requirements_for, validate_launch
             from flowkit.workers import fleet_status, selector
             try:
                 body = self._json_body()
                 wanted = selector(body['worker'])
-                # An offline or busy match is accepted: the restarted step waits for it.
-                decision = validate_launch(wanted, asyncio.run(fleet_status())[0])
+                requirements = dict(wanted)
+                if body.get('flow') is not None:  # the step's software counts, as at launch
+                    source = body['flow']
+                    flow = parse_text(source) if isinstance(source, str) else parse(source)
+                    if body['step'] not in flow.steps: raise ValueError('Unknown step')
+                    requirements = requirements_for(flow, body['step'], selection=wanted)
+                # An offline, busy or unchecked match is accepted: the restarted step waits for it.
+                decision = validate_launch(requirements, asyncio.run(fleet_status([requirements]))[0])
                 if decision['status'] == 'blocked': raise ValueError(f"{decision['message']}. {decision['resolution']}")
                 set_selection(match[1], body['step'], wanted)
                 return self._send(200, {'ok': True})

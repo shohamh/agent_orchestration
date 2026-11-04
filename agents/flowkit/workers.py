@@ -96,10 +96,18 @@ async def choose(wanted):
     return min(candidates, key=lambda w: (statuses[w['id']]['active'] / statuses[w['id']]['slots'], w['id']))
 
 
+def _inventory_entry(data, kind, name):
+    """A malformed report is unknown for that entry, never an error for the fleet."""
+    section = data.get(kind + 's') if isinstance(data, dict) else None
+    value = section.get(name) if isinstance(section, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
 def _sanitized_inventory(data):
     if not isinstance(data, dict): return {}
     keep = lambda section: {name: {k: v[k] for k in ('status', 'checked_at', 'auth_status') if k in v}
-                            for name, v in (data.get(section) or {}).items() if isinstance(name, str) and isinstance(v, dict)}
+                            for name, v in (data.get(section) if isinstance(data.get(section), dict) else {}).items()
+                            if isinstance(name, str) and isinstance(v, dict)}
     return {'agents': keep('agents'), 'commands': keep('commands'), 'refreshed_at': data.get('refreshed_at')}
 
 
@@ -125,7 +133,7 @@ async def fleet_status(requirements=(), probed=None, probe_interval=0):
                 async with client.get(base + '/capabilities', headers=headers) as response:
                     data = await response.json() if response.status == 200 else {}
                 now = datetime.now(timezone.utc)
-                found = lambda kind, name: ((data.get(kind + 's') or {}).get(name) or {}) if isinstance(data, dict) else {}
+                found = lambda kind, name: _inventory_entry(data, kind, name)
                 missing = [c for c in commands if found('command', c).get('status') != 'installed' or not _fresh(found('command', c), now)]
                 stale_agent = any(found('agent', a).get('status') != 'installed' or not _fresh(found('agent', a), now) for a in agents)
                 due = probed is None or time.monotonic() - probed.get(entry['id'], float('-inf')) >= probe_interval
@@ -134,7 +142,7 @@ async def fleet_status(requirements=(), probed=None, probe_interval=0):
                     async with client.post(base + '/capabilities/refresh', json={'commands': missing}, headers=headers) as response:
                         if response.status == 200: data = await response.json()
                 entry['inventory'] = _sanitized_inventory(data)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError, AttributeError):
                 entry.pop('inventory', None)  # unknown, never absent
         await asyncio.gather(*(inventory(e) for e in public))
     return public, private

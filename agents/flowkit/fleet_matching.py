@@ -16,7 +16,6 @@ RESOLUTIONS = {
     'no_workers': 'Register a worker in the fleet tab.',
     'unknown_worker': 'Register that worker in the fleet tab or select another worker.',
     'pool': 'Add a worker to the selected pool in the fleet tab, or select another pool.',
-    'tags': 'Add the missing tags to a worker in the selected pool, or remove them from the requirement.',
     'software_absent': 'Install the required software on a matching worker, then refresh its capabilities.',
     'ambiguous_command': 'Add requires_command with the executable this program step runs.',
 }
@@ -67,8 +66,9 @@ def match_worker(worker, requirements, now=None):
     for kind in ('agent', 'command'):
         name = requirements.get(kind)
         if not name: continue
-        found = ((worker.get('inventory') or {}).get(kind + 's') or {}).get(name)
-        found = found if isinstance(found, dict) else {}
+        inventory = worker.get('inventory') if isinstance(worker.get('inventory'), dict) else {}
+        section = inventory.get(kind + 's') if isinstance(inventory.get(kind + 's'), dict) else {}
+        found = section.get(name) if isinstance(section.get(name), dict) else {}  # malformed: unknown
         fresh = _fresh(found, now)
         if found.get('status') == 'absent' and fresh:
             incompatible.append(_reason('software_absent', f"{name} is not installed on {wid} (checked {found['checked_at']})",
@@ -100,9 +100,17 @@ def match_worker(worker, requirements, now=None):
     return {'worker': wid, 'status': status, 'reasons': incompatible or unknown}
 
 
-def _blocked(reasons, matches=()):
+def _resolution(code, requirements):
+    if code == 'tags':
+        where = f" in pool {requirements['pool']}" if requirements.get('pool') else ''
+        return f'Add the missing tags to a worker{where}, or remove them from the requirement.'
+    return RESOLUTIONS.get(code)
+
+
+def _blocked(reasons, matches=(), requirements=None):
     codes = list(dict.fromkeys(r['code'] for r in reasons))
-    resolution = ' '.join(RESOLUTIONS[c] for c in codes if c in RESOLUTIONS) or RESOLUTIONS['no_workers']
+    texts = [_resolution(c, requirements or {}) for c in codes]
+    resolution = ' '.join(t for t in texts if t) or RESOLUTIONS['no_workers']
     message = 'No registered worker can run this step: ' + '; '.join(r['message'] for r in reasons)
     return {'status': 'blocked', 'reasons': reasons, 'message': message, 'resolution': resolution,
             'candidates': [], 'workers': list(matches)}
@@ -129,4 +137,4 @@ def validate_launch(requirements, workers, now=None):
         headline = next((c for c in WAITING_ORDER if c in present), waiting[0]['code'])
         return {'status': 'wait', 'reasons': waiting, 'waiting_reason': headline,
                 'message': 'Waiting: ' + '; '.join(r['message'] for r in waiting), 'candidates': [], 'workers': matches}
-    return _blocked([r for m in matches for r in m['reasons']], matches)
+    return _blocked([r for m in matches for r in m['reasons']], matches, requirements)
