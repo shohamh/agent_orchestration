@@ -25,7 +25,7 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
                 return 'run-1'
             async def input(self, run_id, message):
                 owner.calls.append((run_id, message))
-        with patch.object(server, 'load_adapters', return_value={'hatchet': Adapter()}):
+        with patch.object(server, 'load_adapters', return_value={'hatchet': Adapter(), 'trigger-dev': Adapter()}):
             self.client = TestClient(TestServer(server.make_app()))
         await self.client.start_server()
 
@@ -39,6 +39,39 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 201, await response.text())
         self.assertEqual(self.calls[0][1]['session_options'], {
             'agent': 'demo', 'workspace': 'C:/work', 'simulateFailures': 2})
+
+    async def test_card_worker_requirement_is_forwarded_to_the_engine(self):
+        response = await self.client.post('/api/boards/hatchet/demo/cards', json={
+            'kind': 'agent-session', 'goal': 'Fix test', 'agent': 'demo', 'worker': {'pool': 'build', 'tags': ['gpu']}})
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual(self.calls[0][1]['session_options'], {
+            'agent': 'demo', 'workspace': '', 'simulateFailures': 0, 'worker': {'pool': 'build', 'tags': ['gpu']}})
+
+    async def test_card_worker_requirement_is_validated(self):
+        cases = [({'worker': {'url': 'http://pc'}}, 'worker'), ({'worker': {'tags': 'gpu'}}, 'tags'),
+                 ({'worker': {'id': ''}}, 'id'), ({'worker': {'id': 'pc-b'}, 'workspace': 'C:/work'}, 'workspace'),
+                 ({'worker': {'id': 'pc-b'}, 'workspace': 'C:/work', 'resumeSessionId': 'abc'}, 'workspace')]
+        for extra, message in cases:
+            with self.subTest(extra=extra):
+                response = await self.client.post('/api/boards/hatchet/demo/cards', json={'kind': 'agent-session', 'goal': 'x', **extra})
+                self.assertEqual(response.status, 400)
+                self.assertIn(message, (await response.json())['error'])
+        response = await self.client.post('/api/boards/trigger-dev/demo/cards', json={
+            'kind': 'agent-session', 'goal': 'x', 'worker': {'id': 'pc-b'}})
+        self.assertEqual(response.status, 400)
+        self.assertIn('Hatchet and Prefect', (await response.json())['error'])
+        self.assertEqual(self.calls, [])
+
+    async def test_card_execution_record_reports_the_executing_worker(self):
+        record = {'state': 'running', 'worker': {'id': 'pc-b', 'hostname': 'pc-b'}, 'engine': 'hatchet', 'waiting_reason': None}
+        class Host:
+            async def execution(self, run_id):
+                return {'card': record} if run_id == 'run-1' else {}
+        self.client.app['flow_host'] = Host()
+        response = await self.client.get('/api/cards/hatchet/run-1/execution')
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual(await response.json(), {'execution': record})
+        self.assertEqual(await (await self.client.get('/api/cards/hatchet/run-2/execution')).json(), {'execution': None})
 
     async def test_rejects_malformed_or_unbounded_requests_with_json(self):
         cases = [[], {'goal': []}, {'kind': 'agent-session', 'goal': 'x', 'agent': 'unknown'},

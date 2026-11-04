@@ -234,6 +234,13 @@ async def create_card(request: web.Request) -> web.Response:
         if body.get('resumeSessionId'):
             if not workspace.strip(): raise ValueError('resuming a session requires its original workspace')
             options['session_options']['resumeSessionId'] = text_field(body, 'resumeSessionId', 512)
+        worker = worker_selector(body.get('worker'))
+        if worker:  # placed on the fleet by the engine adapter (agents/flowkit/distributed.py)
+            if request.match_info['system'] not in ('hatchet', 'prefect'):
+                raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
+            if workspace.strip() or body.get('resumeSessionId'):
+                raise ValueError('a card placed on a fleet worker runs in a new workspace there; clear the workspace')
+            options['session_options']['worker'] = worker
     run_id = await adapter_for(request).create(
         request.match_info["board"],
         kind,
@@ -243,6 +250,27 @@ async def create_card(request: web.Request) -> web.Response:
         **options,
     )
     return web.json_response({"id": run_id}, status=201)
+
+
+def worker_selector(value: Any) -> dict[str, Any]:
+    """A card's fleet requirement: {id?, pool?, tags?}; empty or absent runs the card as before."""
+    if value is None or value == {}:
+        return {}
+    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'tags'}:
+        raise ValueError('worker must contain id, pool and/or tags')
+    for key in ('id', 'pool'):
+        if key in value and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 100):
+            raise ValueError(f'worker {key} must be nonempty text (max 100)')
+    tags = value.get('tags', [])
+    if not isinstance(tags, list) or len(tags) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in tags):
+        raise ValueError('worker tags must be a list of at most 50 nonempty strings')
+    return dict(value)
+
+
+async def card_execution(request: web.Request) -> web.Response:
+    """Where a standalone card actually runs: executing PC, engine and waiting reason (or null)."""
+    execution = await request.app['flow_host'].execution(request.match_info['run_id'])
+    return web.json_response({'execution': execution.get('card')})
 
 
 async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -669,6 +697,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/cards/{system}/{run_id}/transcript", card_transcript)
     app.router.add_get("/api/cards/{system}/{run_id}/logs", card_logs)
     app.router.add_get("/api/cards/{system}/{run_id}/events", card_events)
+    app.router.add_get("/api/cards/{system}/{run_id}/execution", card_execution)
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/logs", node_logs)
     app.router.add_post("/api/cards/{system}/{run_id}/nodes/{ref}/input", node_input)
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/transcript", node_transcript)
