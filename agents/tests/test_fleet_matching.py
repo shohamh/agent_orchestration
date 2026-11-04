@@ -1,0 +1,299 @@
+"""Fleet requirement matching, launch validation and the cancellable waiting lifecycle."""
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from aiohttp.test_utils import TestServer
+from flowkit.definition import parse
+from agents.tests.worker_fixture import make_app
+
+
+def stamp(age_seconds=0):
+    return (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+
+
+def entry(status, age=0):
+    return {'status': status, 'checked_at': stamp(age), 'auth_status': 'unknown'}
+
+
+def worker(id='pc-a', pools=('build',), tags=('linux', 'gpu'), online=True, commands=None, agents=None, **extra):
+    data = {'id': id, 'pools': list(pools), 'tags': list(tags), 'slots': 2, 'cpu_limit': 90, 'ram_limit': 90,
+            'online': online, 'active': 0, 'capacity': {'state': 'known', 'cpu_percent': 10, 'ram_percent': 10}}
+    data['inventory'] = {'commands': commands or {}, 'agents': agents or {}, 'refreshed_at': stamp()}
+    data.update(extra)
+    return data
+
+
+def codes(result):
+    return [r['code'] for r in result['reasons']]
+
+
+class MatchTests(unittest.TestCase):
+    def test_pool_plus_all_tags_and_software_required(self):
+        from flowkit.fleet_matching import match_worker
+        w = worker(commands={'python': entry('installed')})
+        self.assertEqual(match_worker(w, {'pool': 'build', 'tags': ['linux', 'gpu'], 'command': 'python'})['status'], 'compatible')
+        result = match_worker(w, {'pool': 'build', 'tags': ['linux', 'cuda'], 'command': 'python'})
+        self.assertEqual(result['status'], 'incompatible')
+        self.assertIn('tags', codes(result))
+        self.assertIn('cuda', result['reasons'][0]['message'])
+        self.assertEqual(codes(match_worker(w, {'pool': 'other', 'command': 'python'})), ['pool'])
+
+    def test_worker_id_selection_and_step_overrides(self):
+        from flowkit.fleet_matching import requirements_for, validate_launch
+        flow = parse({'name': 'placement', 'worker': {'pool': 'build'}, 'steps': {
+            'a': {'kind': 'program', 'run': 'python a.py', 'worker': {'tags': ['gpu']}},
+            'b': {'kind': 'agent', 'agent': 'demo', 'prompt': 'x'}}})
+        self.assertEqual(requirements_for(flow, 'a'), {'pool': 'build', 'tags': ['gpu'], 'command': 'python'})
+        routed = requirements_for(flow, 'b', {'default': {'pool': 'build'}, 'steps': {'b': {'id': 'pc-b'}}})
+        self.assertEqual(routed, {'id': 'pc-b', 'agent': 'demo'})
+        fleet = [worker('pc-a', agents={'demo': entry('installed')}), worker('pc-b', pools=('other',), agents={'demo': entry('installed')})]
+        decision = validate_launch(routed, fleet)
+        self.assertEqual((decision['status'], decision['candidates']), ('ready', ['pc-b']))
+        missing = validate_launch({'id': 'pc-z'}, fleet)
+        self.assertEqual(missing['status'], 'blocked')
+        self.assertIn('pc-z', missing['message'])
+        self.assertTrue(missing['resolution'])
+
+    def test_verified_absence_blocks_but_stale_offline_and_unknown_wait(self):
+        from flowkit.fleet_matching import match_worker, validate_launch
+        req = {'pool': 'build', 'command': 'tool'}
+        absent = worker(commands={'tool': entry('absent')})
+        self.assertEqual(match_worker(absent, req)['status'], 'incompatible')
+        blocked = validate_launch(req, [absent])
+        self.assertEqual(blocked['status'], 'blocked')
+        self.assertIn('tool', blocked['message'])
+        self.assertIn('Install', blocked['resolution'])
+        stale = worker(commands={'tool': entry('absent', age=3 * 86400)})
+        self.assertEqual(match_worker(stale, req)['status'], 'unknown')
+        offline = worker(online=False, inventory={})
+        self.assertEqual(sorted(codes(match_worker(offline, req))), ['offline', 'software_unknown'])
+        unknown = worker(commands={'tool': entry('unknown')})
+        self.assertEqual(codes(match_worker(unknown, req)), ['software_unknown'])
+        for candidate in (stale, offline, unknown):
+            decision = validate_launch(req, [absent, candidate])
+            self.assertEqual(decision['status'], 'wait', decision)
+            self.assertTrue(decision['waiting_reason'])
+        self.assertEqual(validate_launch(req, [absent, offline])['waiting_reason'], 'offline')
+        self.assertEqual(validate_launch(req, [])['status'], 'blocked')
+
+    def test_busy_and_high_load_wait_with_reasons(self):
+        from flowkit.fleet_matching import match_worker, validate_launch
+        req = {'command': 'python'}
+        commands = {'python': entry('installed')}
+        cases = {'full_slots': worker(commands=commands, active=2),
+                 'high_cpu': worker(commands=commands, capacity={'state': 'known', 'cpu_percent': 90, 'ram_percent': 5}),
+                 'high_ram': worker(commands=commands, capacity={'state': 'known', 'cpu_percent': 5, 'ram_percent': 95}),
+                 'missing_metrics': worker(commands=commands, capacity={'state': 'unknown', 'cpu_percent': None, 'ram_percent': None})}
+        for code, item in cases.items():
+            result = match_worker(item, req)
+            self.assertEqual((result['status'], codes(result)), ('unknown', [code]))
+            decision = validate_launch(req, [item])
+            self.assertEqual((decision['status'], decision['waiting_reason']), ('wait', code))
+
+    def test_ambiguous_command_requires_explicit_requirement(self):
+        from flowkit.fleet_matching import requirements_for, validate_launch
+        flow = parse({'name': 'ambiguous', 'steps': {
+            'piped': {'kind': 'program', 'run': 'python a.py | sort'},
+            'declared': {'kind': 'program', 'run': 'python a.py | sort', 'requires_command': 'python'},
+            'builtin': {'kind': 'program', 'run': 'echo hello'}}})
+        piped = requirements_for(flow, 'piped')
+        self.assertTrue(piped.get('ambiguous_command'))
+        decision = validate_launch(piped, [worker(commands={'python': entry('installed')})])
+        self.assertEqual(decision['status'], 'blocked')
+        self.assertIn('ambiguous_command', codes(decision))
+        self.assertIn('requires_command', decision['resolution'])
+        self.assertEqual(requirements_for(flow, 'declared'), {'command': 'python'})
+        self.assertEqual(requirements_for(flow, 'builtin'), {})
+
+
+def tool_bin(root):
+    """A real executable so the managed executor's own recheck finds it."""
+    directory = root/'bin'; directory.mkdir()
+    if os.name == 'nt': (directory/'fleet-test-tool.cmd').write_text('@echo off\r\necho tool\r\n')
+    else:
+        path = directory/'fleet-test-tool'; path.write_text('#!/bin/sh\necho tool\n'); path.chmod(0o755)
+    return str(directory)
+
+
+def switchable(available):
+    from flowkit import capabilities
+    def probe(kind, name):
+        if kind == 'command' and name == 'fleet-test-tool':
+            return capabilities._result('installed' if available['tool'] else 'absent')
+        return capabilities.probe_agent(name) if kind == 'agent' else capabilities.probe_command(name)
+    return probe
+
+
+async def until(predicate, timeout=20, message='condition'):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline: raise AssertionError(f'timed out waiting for {message}')
+        await asyncio.sleep(.05)
+
+
+def info(root, run, step):
+    try: return json.loads((root/'canonical'/run/'.flow-workers'/f'{step}.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError): return {}
+
+
+TOOL_FLOW = {'name': 'tool-flow', 'worker': {'pool': 'build'}, 'steps': {
+    'go': {'kind': 'program', 'run': 'python -c "print(\'ran\')"', 'requires_command': 'fleet-test-tool'}}}
+
+
+class WaitingLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.registry = self.root/'workers.yaml'
+        self.env = patch.dict(os.environ, {'FLOW_WORKERS_FILE': str(self.registry), 'FLOW_WORKSPACES': str(self.root/'canonical'),
+                                           'PATH': tool_bin(self.root) + os.pathsep + os.environ.get('PATH', '')})
+        self.env.start(); self.addCleanup(self.env.stop)
+        for target, value in (('flowkit.distributed.PLACEMENT_POLL', .1), ('flowkit.distributed.PROBE_INTERVAL', 0),
+                              ('flowkit.worker_service.AUTHORIZATION_TIMEOUT', .5), ('flowkit.worker_service.COORDINATOR_STALE', .5)):
+            patcher = patch(target, value); patcher.start(); self.addCleanup(patcher.stop)
+        self.events = []
+
+    async def sink(self, event): self.events.append(event)
+
+    async def receive(self): await asyncio.Event().wait()
+
+    def write_registry(self, entries):
+        self.registry.write_text('workers:\n' + ''.join(
+            f'- id: {w}\n  pools: [build]\n' + (f'  url: {url}\n' if url else '') for w, url in entries))
+
+    async def service(self, name, available=None, slots=1):
+        kwargs = {'probe': switchable(available)} if available is not None else {}
+        app = make_app(worker_id=name, root=self.root/name, slots=slots, **kwargs)
+        server = TestServer(app); await server.start_server()
+        self.addAsyncCleanup(server.close)
+        return app, server
+
+    async def test_offline_worker_waits_visibly_then_starts_when_it_connects(self):
+        from flowkit.distributed import execute_step
+        self.write_registry([('pc-a', None)])  # saved, awaiting connection
+        flow = parse({'name': 'offline-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(\'ran\')"'}}})
+        task = asyncio.create_task(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'offline-run', self.receive, self.sink))
+        await until(lambda: info(self.root, 'offline-run', 'go').get('state') == 'waiting', message='waiting state')
+        waiting = info(self.root, 'offline-run', 'go')
+        self.assertEqual(waiting['waiting_reason'], 'offline')
+        self.assertFalse(waiting.get('intervention_needed'))
+        self.assertNotIn('url', json.dumps(waiting))
+        _, server = await self.service('pc-a')
+        self.write_registry([('pc-a', server.make_url(''))])
+        output = await asyncio.wait_for(task, 30)
+        self.assertIn('ran', output['stdout'])
+        self.assertEqual(info(self.root, 'offline-run', 'go')['state'], 'done')
+
+    async def test_cancel_while_worker_offline_never_starts_later(self):
+        from flowkit.distributed import execute_step
+        marker = self.root/'started.txt'
+        app, server = await self.service('pc-a')
+        self.write_registry([('pc-a', server.make_url(''))])
+        gate = app['capacity']
+        self.assertTrue(gate.try_acquire('blocker')['acquired'])  # the only slot is busy
+        flow = parse({'name': 'cancel-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program',
+            'run': f'python -c "open(r\'{marker.as_posix()}\', \'w\').write(\'x\')"'}}})
+        task = asyncio.create_task(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'cancel-run', self.receive, self.sink))
+        await until(lambda: any(getattr(j, 'waiting_reason', None) == 'full_slots' for j in app['jobs'].values()), message='queued job')
+        job = next(iter(app['jobs'].values()))
+        await until(lambda: info(self.root, 'cancel-run', 'go').get('waiting_reason') == 'full_slots', message='visible queue reason')
+
+        async def offline(*args, **kwargs):
+            import aiohttp
+            raise aiohttp.ClientConnectionError('worker offline')
+        with patch('flowkit.distributed._delete_job', offline):
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError): await task
+        self.assertEqual(info(self.root, 'cancel-run', 'go')['state'], 'cancelled')
+        self.assertEqual(job.state, 'queued')  # the worker never heard about the cancellation
+        gate.release('blocker')  # capacity becomes available again
+        await asyncio.sleep(3)
+        self.assertFalse(job.started)
+        self.assertFalse(marker.exists())
+        self.assertNotEqual(job.state, 'running')
+
+    async def test_software_disappearing_before_start_waits_for_another_worker(self):
+        from flowkit.distributed import execute_step
+        first = {'tool': True}
+        app_a, server_a = await self.service('pc-a', first)
+        _, server_b = await self.service('pc-b', {'tool': True})
+        self.write_registry([('pc-a', server_a.make_url('')), ('pc-b', server_b.make_url(''))])
+        self.assertTrue(app_a['capacity'].try_acquire('blocker')['acquired'])
+        task = asyncio.create_task(execute_step(parse(TOOL_FLOW), 'go', {'input': {}, 'steps': {}}, 'moved-run', self.receive, self.sink))
+        await until(lambda: any(getattr(j, 'waiting_reason', None) == 'full_slots' for j in app_a['jobs'].values()), message='placed on pc-a')
+        first['tool'] = False  # uninstalled after launch, before execution starts
+        app_a['capacity'].release('blocker')
+        output = await asyncio.wait_for(task, 30)
+        self.assertIn('ran', output['stdout'])
+        self.assertEqual([e['worker']['id'] for e in self.events if e.get('type') == 'worker'], ['pc-b'])
+        self.assertEqual([j.state for j in app_a['jobs'].values()], ['rejected'])
+        self.assertFalse(any(j.started for j in app_a['jobs'].values()))
+
+    async def test_intervention_needed_when_no_worker_can_satisfy_then_resumes(self):
+        from flowkit.distributed import execute_step
+        available = {'tool': True}
+        app, server = await self.service('pc-a', available)
+        self.write_registry([('pc-a', server.make_url(''))])
+        self.assertTrue(app['capacity'].try_acquire('blocker')['acquired'])
+        task = asyncio.create_task(execute_step(parse(TOOL_FLOW), 'go', {'input': {}, 'steps': {}}, 'stuck-run', self.receive, self.sink))
+        await until(lambda: any(getattr(j, 'waiting_reason', None) == 'full_slots' for j in app['jobs'].values()), message='queued job')
+        available['tool'] = False
+        app['capacity'].release('blocker')
+        await until(lambda: info(self.root, 'stuck-run', 'go').get('intervention_needed'), message='intervention needed')
+        stuck = info(self.root, 'stuck-run', 'go')
+        self.assertEqual((stuck['state'], stuck['waiting_reason']), ('waiting', 'intervention_needed'))
+        self.assertIn('fleet-test-tool', json.dumps(stuck['waiting']))
+        self.assertTrue(stuck['resolution'])
+        self.assertFalse(task.done())
+        available['tool'] = True  # repaired: waiting resumes automatically
+        output = await asyncio.wait_for(task, 30)
+        self.assertIn('ran', output['stdout'])
+
+    async def test_ambiguous_program_fails_before_placement(self):
+        from flowkit.distributed import execute_step
+        self.write_registry([('pc-a', None)])
+        flow = parse({'name': 'ambiguous-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python a.py | sort'}}})
+        with self.assertRaisesRegex(ValueError, 'requires_command'):
+            await asyncio.wait_for(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'ambiguous-run', self.receive, self.sink), 5)
+
+
+class LaunchRouteTests(unittest.TestCase):
+    def setUp(self):
+        import threading, flow_host
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        path = Path(self.tmp.name)/'workers.yaml'
+        path.write_text('workers:\n- {id: pc-a, pools: [build], tags: [linux]}\n', encoding='utf-8')
+        self.env = patch.dict(os.environ, {'FLOW_WORKERS_FILE': str(path), 'FLOW_HOST_TOKEN': ''})
+        self.env.start(); self.addCleanup(self.env.stop)
+        self.server = flow_host.serve(None, '127.0.0.1', 0)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close); self.addCleanup(self.server.shutdown)
+
+    def validate(self, flow, execution=None):
+        import urllib.request
+        body = json.dumps({'flow': flow, **({'execution': execution} if execution else {})}).encode()
+        request = urllib.request.Request(f'http://127.0.0.1:{self.server.server_address[1]}/launch/validate', body, {'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=20) as response: return json.loads(response.read())
+
+    def test_launch_blocks_confirmed_mismatch_and_waits_for_offline_match(self):
+        flow = {'name': 'routed', 'steps': {'go': {'kind': 'program', 'run': 'python a.py'}}}
+        waiting = self.validate(flow, {'default': {'pool': 'build', 'tags': ['linux']}})
+        self.assertEqual(waiting['status'], 'wait')
+        self.assertEqual(waiting['steps']['go']['waiting_reason'], 'offline')
+        blocked = self.validate(flow, {'default': {'pool': 'build', 'tags': ['gpu']}})
+        self.assertEqual(blocked['status'], 'blocked')
+        self.assertIn('gpu', blocked['steps']['go']['message'])
+        local = self.validate(flow)
+        self.assertEqual((local['status'], local['fleet']), ('ready', False))
+        self.assertNotIn('url', json.dumps([waiting, blocked]))
+
+
+if __name__ == '__main__': unittest.main()

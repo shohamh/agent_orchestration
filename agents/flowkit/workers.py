@@ -77,7 +77,8 @@ async def catalog(snapshot=None):
                     data = await response.json()
                     if response.status != 200 or data.get('id') != worker['id']: raise ValueError('Worker identity mismatch')
                     # Registry settings are authoritative; legacy worker-reported pool and tags are informational.
-                    return {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True}
+                    return {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True,
+                            **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {})}
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
                 return {**public, 'online': False}
         return await asyncio.gather(*(health(w) for w in (snapshot if snapshot is not None else registry())))
@@ -93,3 +94,47 @@ async def choose(wanted):
                   set(wanted.get('tags', [])) <= set(w.get('tags', []))]
     if not candidates: raise ValueError(f'No online execution worker matches {wanted or "the default selection"}')
     return min(candidates, key=lambda w: (statuses[w['id']]['active'] / statuses[w['id']]['slots'], w['id']))
+
+
+def _sanitized_inventory(data):
+    if not isinstance(data, dict): return {}
+    keep = lambda section: {name: {k: v[k] for k in ('status', 'checked_at', 'auth_status') if k in v}
+                            for name, v in (data.get(section) or {}).items() if isinstance(name, str) and isinstance(v, dict)}
+    return {'agents': keep('agents'), 'commands': keep('commands'), 'refreshed_at': data.get('refreshed_at')}
+
+
+async def fleet_status(requirements=(), probed=None, probe_interval=0):
+    """Sanitized workers with online state, capacity and software inventory for matching, plus
+    the private registry entries (endpoint and headers) by id for dispatch. A required command
+    or agent that a worker has not freshly reported installed is probed on demand, at most once
+    per `probe_interval` seconds per worker when `probed` (worker id -> monotonic time) is given."""
+    import time
+    from .fleet_matching import _fresh
+    from datetime import datetime, timezone
+    snapshot = registry()
+    public = await catalog(snapshot)
+    private = {w['id']: w for w in snapshot}
+    commands = sorted({r['command'] for r in requirements if r.get('command')})
+    agents = sorted({r['agent'] for r in requirements if r.get('agent')})
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:
+        async def inventory(entry):
+            worker = private[entry['id']]
+            if not entry.get('online'): return
+            base, headers = worker['url'], worker['_headers']
+            try:
+                async with client.get(base + '/capabilities', headers=headers) as response:
+                    data = await response.json() if response.status == 200 else {}
+                now = datetime.now(timezone.utc)
+                found = lambda kind, name: ((data.get(kind + 's') or {}).get(name) or {}) if isinstance(data, dict) else {}
+                missing = [c for c in commands if found('command', c).get('status') != 'installed' or not _fresh(found('command', c), now)]
+                stale_agent = any(found('agent', a).get('status') != 'installed' or not _fresh(found('agent', a), now) for a in agents)
+                due = probed is None or time.monotonic() - probed.get(entry['id'], float('-inf')) >= probe_interval
+                if (missing or stale_agent) and due:
+                    if probed is not None: probed[entry['id']] = time.monotonic()
+                    async with client.post(base + '/capabilities/refresh', json={'commands': missing}, headers=headers) as response:
+                        if response.status == 200: data = await response.json()
+                entry['inventory'] = _sanitized_inventory(data)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                entry.pop('inventory', None)  # unknown, never absent
+        await asyncio.gather(*(inventory(e) for e in public))
+    return public, private

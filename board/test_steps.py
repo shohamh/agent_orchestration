@@ -57,10 +57,25 @@ class Adapter:
 class StepAPI(unittest.IsolatedAsyncioTestCase):
     async def test_launch_forwards_validated_routing_to_runtime(self):
         self.app['flow_host'].validate_routing = AsyncMock(return_value={'default': {'pool': 'gpu'}, 'steps': {'talk': {'id': 'pc-b'}}})
+        self.app['flow_host'].validate_launch = AsyncMock(return_value={'status': 'wait', 'fleet': True, 'steps': {}})
         response = await self.client.post('/api/boards/fake/demo/cards', json={
             'kind': 'flow', 'flow': 'demo-flow', 'execution': {'default': {'pool': 'gpu'}, 'steps': {'talk': {'id': 'pc-b'}}}})
         self.assertEqual(response.status, 201, await response.text())
         self.assertEqual(self.adapter.calls[0][2]['flowExecution']['steps']['talk'], {'id': 'pc-b'})
+        self.assertEqual((await response.json())['launch']['status'], 'wait')
+
+    async def test_launch_blocked_by_confirmed_mismatch_is_explained(self):
+        blocked = {'status': 'blocked', 'message': 'No registered worker can run this step: pc-a lacks tags: gpu',
+                   'resolution': 'Add the missing tags to a worker in the selected pool.'}
+        self.app['flow_host'].validate_launch = AsyncMock(return_value={'status': 'blocked', 'fleet': True, 'steps': {'talk': blocked}})
+        response = await self.client.post('/api/boards/fake/demo/cards', json={'kind': 'flow', 'flow': 'demo-flow'})
+        self.assertEqual(response.status, 409)
+        data = await response.json()
+        self.assertIn('lacks tags: gpu', data['error'])
+        self.assertIn('Add the missing tags', data['error'])
+        self.assertEqual(self.adapter.calls, [])
+        response = await self.client.post('/api/launch/validate', json={'flow': 'demo-flow'})
+        self.assertEqual((await response.json())['steps']['talk']['status'], 'blocked')
 
     async def test_restart_override_forwarded_without_descendant_logic(self):
         self.app['flow_host'].set_selection = AsyncMock()

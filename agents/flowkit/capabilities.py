@@ -12,7 +12,7 @@ def _result(status):
     return {'status': status, 'checked_at': datetime.now(timezone.utc).isoformat(), 'auth_status': 'unknown'}
 
 
-def infer_command(run):
+def _first_word(run):
     # Only a single, literal command can be inferred. Never evaluate shell syntax.
     if not isinstance(run, str) or any(c in run for c in '\n\r`') or '$(' in run:
         return None
@@ -41,8 +41,19 @@ def infer_command(run):
     name = parts[0].strip('"')
     if not name or any(c in name for c in '{}*?=$%'):
         return None
+    return name
+
+
+def shell_builtin(run):
+    """A single literal shell builtin (echo, cd, ...) needs no external executable."""
     from .template import _CMD_BUILTINS
-    if name.lower() in _CMD_BUILTINS:
+    name = _first_word(run)
+    return bool(name) and name.lower() in _CMD_BUILTINS
+
+
+def infer_command(run):
+    name = _first_word(run)
+    if name is None or shell_builtin(run):
         return None
     return name
 
@@ -78,10 +89,14 @@ def probe_agent(name):
         return _result('unknown')
 
 
-def refresh(inventory, commands=()):
+def probe(kind, name):
+    return probe_agent(name) if kind == 'agent' else probe_command(name)
+
+
+def refresh(inventory, commands=(), probe=probe):
     from .definition import AGENTS
-    return {'agents': {name: probe_agent(name) for name in AGENTS},
-            'commands': {name: probe_command(name) for name in sorted(set(commands))},
+    return {'agents': {name: probe('agent', name) for name in AGENTS},
+            'commands': {name: probe('command', name) for name in sorted(set(commands))},
             'refreshed_at': datetime.now(timezone.utc).isoformat()}
 
 

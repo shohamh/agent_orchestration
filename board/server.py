@@ -267,8 +267,26 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
     title = str(body.get("title") or (f"{name}: {first}" if first else name))[:200]
     if 'execution' in body:
         params['flowExecution'] = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
+    # A confirmed mismatch blocks launch; offline, busy or unchecked matches launch and wait.
+    launch = await request.app['flow_host'].validate_launch(flow, params.get('flowExecution'))
+    if launch['status'] == 'blocked':
+        problems = [f"{sid}: {d['message']} {d['resolution']}" for sid, d in launch['steps'].items() if d['status'] == 'blocked']
+        return web.json_response({'error': 'Cannot launch: ' + ' | '.join(problems), 'launch': launch}, status=409)
     run_id = await adapter_for(request).create_flow(request.match_info["board"], name, params, title)
-    return web.json_response({"id": run_id}, status=201)
+    return web.json_response({"id": run_id, 'launch': launch}, status=201)
+
+
+async def launch_validate(request: web.Request) -> web.Response:
+    """Pre-launch check for the card and flow creation dialogs; saving is never blocked."""
+    body = await json_object(request)
+    name = text_field(body, 'flow', 100)
+    flow = (await request.app['flow_host'].flows()).get(name)
+    if flow is None:
+        raise ValueError(f'unknown flow {name!r}')
+    execution = None
+    if 'execution' in body:
+        execution = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
+    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution))
 
 
 async def json_object(request: web.Request) -> dict[str, Any]:
@@ -656,6 +674,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
     app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
     app.router.add_get('/api/workers', workers_list)
+    app.router.add_post('/api/launch/validate', launch_validate)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)
     app.router.add_delete("/api/flows/{name}", flows_delete)

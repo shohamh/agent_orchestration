@@ -121,6 +121,12 @@ class FlowHost:
     async def validate_routing(self, execution, steps):
         return await self._request('POST', '/workers/validate', {'execution': execution, 'steps': list(steps)})
 
+    async def validate_launch(self, flow, execution=None):
+        # The definition text avoids re-expanding a synthesized setup step.
+        source = flow.get('yaml') or {k: v for k, v in flow.items() if k not in ('yaml', 'environment')}
+        body = {'flow': source, **({'execution': execution} if execution is not None else {})}
+        return await self._request('POST', '/launch/validate', body, timeout=30)
+
     async def execution(self, run_id):
         return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']
 

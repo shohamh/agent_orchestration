@@ -204,3 +204,41 @@ runs remain in flight. The coordinator owns workspace publications: remote execu
 authenticated artifact access or equivalent transfer preserving locks, limits, conflict handling
 and fencing; do not assume a shared filesystem. Existing coordinator-mediated HTTP transfer and
 its authentication remain the fallback path described above.
+
+## Placement, waiting and cancellation
+
+A step placed by the fleet needs a worker in its selected pool (if any) with every required tag
+(or the selected worker ID), plus its software: the agent of an agent step, or the program's
+`requires_command`, otherwise the first executable inferred from `run`. A leading shell builtin
+such as `echo` needs no executable. A program whose executable cannot be inferred safely (pipes,
+variable executables) must declare `requires_command` before launch.
+
+Launch is blocked only when no registered worker can satisfy a step: a selection mismatch or a
+fresh `absent` capability result on every candidate. The error names the mismatch and how to
+resolve it; drafts can still be saved. If a potentially matching worker is offline, awaiting
+connection, has no usable credentials, has unknown or stale (older than one day) capability
+results, no free slot, high CPU or RAM, or missing metrics, the run launches and the step waits.
+Its execution record (`/execution/<run>`) shows `state: waiting`, a `waiting_reason` and the
+per-worker reasons; it never contains endpoints or credentials. Missing or unchecked software is
+probed on demand, at most every 15 seconds per worker while waiting. If the software disappears
+after launch, the worker rejects the job before it starts and the step waits for another suitable
+worker; when no registered worker can satisfy it, the reason becomes `intervention_needed` with a
+resolution, and the step resumes automatically once the fleet or software is repaired.
+
+The coordinator submits a job with start authorization: after the worker's capacity gate admits
+the job and immediately before launch, the job waits up to 10 seconds for the coordinator to
+confirm the attempt is still current, then rechecks its software. Without that confirmation it
+releases its reservation, and it only seeks admission again while its coordinator keeps polling.
+A step cancelled while its worker is unreachable therefore never starts later, even if the worker
+returns with free capacity; the unpolled job is cancelled after 45 seconds. A job lost before
+authorization (worker restart or disconnection) is placed again; after authorization a lost
+worker fails the step as before, and the engine's retries apply. A restarted coordinator starts a
+new attempt with a new fence, so an older attempt can neither start nor publish.
+
+Fallback constraint: the current Hatchet, Prefect and Trigger.dev adapters run each portable-flow
+step as an engine task that calls the shared execution service, and none of them offers a queued
+alternative that preserves the native DAG, step restart and the cross-engine admission gate.
+Waiting therefore happens inside the step's engine task: it occupies one engine execution slot of
+the flow worker and counts toward the step's `timeout_minutes`, so it is bounded rather than
+indefinite. Raise `timeout_minutes` for steps expected to wait long. Engine scheduling timeouts do
+not apply because the task is already running. Native engine queueing remains a separate, unverified option.

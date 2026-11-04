@@ -561,14 +561,27 @@ class Api(BaseHTTPRequestHandler):
                 body = self._json_body()
                 return self._send(200, routing(body['execution'], body['steps']))
             except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
+        if self.path == '/launch/validate':
+            from flowkit.distributed import validate_flow_launch
+            from flowkit.definition import parse
+            try:
+                body = self._json_body()
+                source = body.get('flow')
+                flow = parse_text(source) if isinstance(source, str) else parse(source)
+                return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'))))
+            except (ValueError, KeyError, FlowError) as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/selection', self.path)
         if match:
             from flowkit.distributed import set_selection
-            from flowkit.workers import choose
+            from flowkit.fleet_matching import validate_launch
+            from flowkit.workers import fleet_status, selector
             try:
                 body = self._json_body()
-                asyncio.run(choose(body['worker']))
-                set_selection(match[1], body['step'], body['worker'])
+                wanted = selector(body['worker'])
+                # An offline or busy match is accepted: the restarted step waits for it.
+                decision = validate_launch(wanted, asyncio.run(fleet_status())[0])
+                if decision['status'] == 'blocked': raise ValueError(f"{decision['message']}. {decision['resolution']}")
+                set_selection(match[1], body['step'], wanted)
                 return self._send(200, {'ok': True})
             except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/runs/(prefect|trigger-dev)/([A-Za-z0-9_-]+)/nodes/([A-Za-z0-9_-]+)/restart', self.path)

@@ -17,6 +17,8 @@ from .artifacts import restore, snapshot
 from .definition import parse
 
 ROOT = Path(__file__).resolve().parents[2]
+AUTHORIZATION_TIMEOUT = 10  # an admitted job releases its reservation if not authorized in time
+COORDINATOR_STALE = 10  # an authorizing job only seeks admission while its coordinator polls
 
 
 async def capacity_call(function, *args, deadline=None, cancelled=None):
@@ -49,7 +51,24 @@ class Job:
         self.last_seen = time.monotonic()
         self.dropped = 0
         self.started = False
+        # Coordinators that opt in must authorize each admitted start; legacy submitters do not.
+        self.authorize = bool(config.get('authorize'))
+        self.authorized = asyncio.Event()
+        self.nonce = self.reason = None
         self.task = asyncio.create_task(self.run())
+
+    async def missing_software(self):
+        """Recheck the step's software immediately before launch, as execution resolves it."""
+        requirement = self.config.get('requirement') or {}  # set by the service, never by the client
+        for kind in ('agent', 'command'):
+            name = requirement.get(kind)
+            if not name: continue
+            result = await asyncio.to_thread(self.app['probe'], kind, name)
+            if result['status'] != 'installed':
+                try: await self.app['refresh_inventory']([name] if kind == 'command' else [])  # record the absence
+                except (OSError, ValueError): pass
+                return f'Required software {name!r} is {result["status"]} on this worker'
+        return None
 
     async def run(self):
         work = asyncio.create_task(self._run())
@@ -72,6 +91,11 @@ class Job:
                 restore(self.config['files'], workspaces/self.config['runId'])
                 restore(self.config['assets'], assets)
                 while True:
+                    if self.authorize and time.monotonic() - self.last_seen > COORDINATOR_STALE:
+                        # Never take capacity for a coordinator that may have cancelled while unreachable.
+                        self.waiting_reason = 'coordinator_unreachable'
+                        await asyncio.sleep(.2)
+                        continue
                     cancel_acquire = asyncio.Event()
                     acquire = asyncio.create_task(capacity_call(self.app['capacity'].try_acquire, self.id, cancelled=cancel_acquire))
                     try: lease = await asyncio.shield(acquire)
@@ -79,9 +103,29 @@ class Job:
                         cancel_acquire.set()
                         lease = await acquire  # Account for a reservation committed during cancellation.
                         raise
-                    if lease['acquired']: break
-                    self.waiting_reason = lease['reason']
-                    await asyncio.sleep(1)
+                    if not lease['acquired']:
+                        self.waiting_reason = lease['reason']
+                        await asyncio.sleep(1)
+                        continue
+                    if self.authorize:
+                        # The coordinator must confirm, after admission, that this attempt is still wanted.
+                        # One nonce per admission: a late confirmation can never authorize a later one.
+                        self.authorized.clear()
+                        self.nonce, self.waiting_reason = uuid.uuid4().hex, 'awaiting_authorization'
+                        try: await asyncio.wait_for(self.authorized.wait(), AUTHORIZATION_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            self.nonce = None  # before any await, so no confirmation can still land
+                            await capacity_call(self.app['capacity'].release, self.id)
+                            lease = None
+                            continue
+                        finally: self.nonce = None
+                    missing = await self.missing_software()
+                    if missing:
+                        await capacity_call(self.app['capacity'].release, self.id)
+                        lease = None
+                        self.state, self.error, self.reason = ('rejected' if self.authorize else 'failed'), missing, 'software_missing'
+                        return
+                    break
                 self.waiting_reason = None
                 async def renew():
                     while True:
@@ -195,7 +239,7 @@ class Job:
             if lease and lease.get('acquired'): await capacity_call(self.app['capacity'].release, self.id)
 
 
-def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None, capacity=None):
+def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None, capacity=None, probe=None):
     token = os.environ.get('FLOW_WORKER_TOKEN', '') if token is None else token
     @web.middleware
     async def auth(request, handler):
@@ -213,6 +257,8 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
     from .capacity import CapacityGate
     app['capacity'] = capacity
+    from .capabilities import probe as default_probe
+    app['probe'] = probe or default_probe
     app['jobs'] = {}
     inventory_path = app['root'] / 'capabilities.json'
     try:
@@ -227,10 +273,11 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         async with inventory_lock:
             existing = app['inventory'].get('commands', {})
             names = {name for name in existing if isinstance(name, str) and name and len(name) <= 260}
-            updated = await asyncio.to_thread(refresh, app['inventory'], names | set(commands))
+            updated = await asyncio.to_thread(refresh, app['inventory'], names | set(commands), app['probe'])
             await asyncio.to_thread(atomic_json, inventory_path, updated)
             app['inventory'] = updated
             return updated
+    app['refresh_inventory'] = refresh_inventory
     async def inventory(request):
         from .capabilities import overdue
         if overdue(app['inventory']): await refresh_inventory()
@@ -259,10 +306,9 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             flow = parse(start['flow'])
             if start['step'] not in flow.steps: raise ValueError('Unknown step')
             step = flow.steps[start['step']]
-            if step.kind == 'program':
-                from .capabilities import infer_command
-                requirement = step.requires_command or infer_command(step.run)
-                if requirement: await refresh_inventory([requirement])
+            from .fleet_matching import software_requirement
+            config['requirement'] = software_requirement(step)
+            if config['requirement'].get('command'): await refresh_inventory([config['requirement']['command']])
             from .artifacts import validate
             validate(config['files']); validate(config['assets'])
             config['runId'] = start['runId']
@@ -278,13 +324,23 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         dropped = item.dropped
         after = max(0, int(request.query.get('after', '0')) - dropped)
         result = {'state': item.state, 'events': item.events[after:], 'cursor': dropped+len(item.events), 'error': item.error,
-                  'worker':app['identity'] if item.started else None, 'waiting_reason': getattr(item, 'waiting_reason', None)}
+                  'worker':app['identity'] if item.started else None, 'waiting_reason': getattr(item, 'waiting_reason', None),
+                  'authorization': item.nonce, 'reason': item.reason}
         if item.state == 'done': result.update(output=item.output, files=json.loads(await asyncio.to_thread(item.result_path.read_text, encoding='utf-8')))
         return web.json_response(result)
     async def receive(request):
         item = job(request)
         if item.state not in ('queued', 'running'): raise ValueError('Job has finished')
         await item.inbox.put(await request.json())
+        return web.json_response({'ok': True})
+    async def authorize(request):
+        item = job(request)
+        item.last_seen = time.monotonic()
+        body = await request.json()
+        nonce = body.get('nonce') if isinstance(body, dict) else None
+        if not isinstance(nonce, str) or not item.nonce or not hmac.compare_digest(nonce, item.nonce):
+            return web.json_response({'error': 'No start authorization is pending for this job'}, status=409)
+        item.authorized.set()
         return web.json_response({'ok': True})
     async def cancel(request):
         item = job(request)
@@ -337,6 +393,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.router.add_post('/jobs', create)
     app.router.add_get('/jobs/{id}', status)
     app.router.add_post('/jobs/{id}/input', receive)
+    app.router.add_post('/jobs/{id}/start', authorize)
     app.router.add_delete('/jobs/{id}', cancel)
     return app
 

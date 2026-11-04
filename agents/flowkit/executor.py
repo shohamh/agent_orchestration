@@ -61,17 +61,15 @@ async def run_step(flow: Flow, step_id: str, context: dict[str, Any], run_id: st
         return output
     # Managed workers recheck immediately before launch. Scheduling can retry elsewhere.
     if os.environ.get('FLOW_MANAGED_JOB'):
-        from .capabilities import infer_command, probe_agent, probe_command
-        if step.kind == 'agent':
-            requirement = step.agent
-            result = probe_agent(requirement)
-        else:
-            requirement = step.requires_command or infer_command(step.run)
-            if not requirement:
-                raise ValueError('Ambiguous program command: declare requires_command')
-            result = probe_command(requirement)
-        if result['status'] != 'installed':
-            raise RuntimeError(f"Required software {requirement!r} is {result['status']} on this worker")
+        from .capabilities import probe
+        from .fleet_matching import software_requirement
+        needed = software_requirement(step)
+        if needed.get('ambiguous_command'):
+            raise ValueError('Ambiguous program command: declare requires_command')
+        for kind, requirement in needed.items():  # shell builtins need no executable
+            result = probe(kind, requirement)
+            if result['status'] != 'installed':
+                raise RuntimeError(f"Required software {requirement!r} is {result['status']} on this worker")
     if step.kind == "agent":
         try:
             if step.setup is not None:
