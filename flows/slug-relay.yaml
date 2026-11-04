@@ -1,0 +1,52 @@
+name: slug-relay
+description: Codex writes slugify, OpenCode 2 writes test cases, Codex reconciles them for human review, then a program checks the result.
+input:
+  title: 'Crème Brûlée & Co.: 10 Best Recipes!'
+steps:
+  brief:
+    kind: program
+    run: 'python -c "print(''Write slugify(text): lowercase ASCII URL slug, accents stripped, words joined by single hyphens, no leading or trailing hyphens.'')"'
+  design:
+    kind: agent
+    needs: [brief]
+    agent: codex
+    review: false
+    prompt: |-
+      You are the implementer. Write a Python function slugify(text) for this brief:
+      {{ steps.brief.output.stdout }}
+
+      It must handle titles such as: {{ input.title }}
+      Use only the standard library. This is an analysis task: do not edit files or run commands.
+      Reply with only the function in a single python code block.
+  review:
+    kind: agent
+    needs: [brief]
+    agent: opencode2
+    review: false
+    prompt: |-
+      You are the tester. For this brief:
+      {{ steps.brief.output.stdout }}
+
+      List exactly 5 tricky (input, expected_slug) cases for slugify, including {{ input.title }}.
+      This is an analysis task: do not edit files or run commands.
+      Reply with only a Python list of tuples named CASES in a single python code block.
+  plan:
+    kind: agent
+    needs: [design, review]
+    agent: codex
+    review: true
+    prompt: |-
+      You are the reviewer. Check the implementation against every case and fix it if needed.
+
+      Implementation:
+      {{ steps.design.output }}
+
+      Cases:
+      {{ steps.review.output }}
+
+      This is an analysis task: do not edit files or run commands.
+      Reply with the final function in a single python code block, then one line exactly like RESULT: 5/5 cases pass.
+  verify:
+    kind: program
+    needs: [plan]
+    run: python -c "import sys; t=sys.argv[1]; assert 'def slugify' in t, 'no function'; r=[l for l in t.replace(chr(92)+'n', chr(10)).splitlines() if 'RESULT:' in l]; assert r, 'no RESULT line'; print(r[-1].strip())" {{ steps.plan.output }}

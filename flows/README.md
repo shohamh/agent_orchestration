@@ -20,6 +20,11 @@ plan. The `feature` input can be changed when starting a run. Select **Flows** o
 on the board to inspect or launch it, and click an agent node to follow its conversation and
 answer any permission requests. The real agents require working local logins.
 
+`slug-relay` was built in the graphical builder and checks a whole multi-agent run with a
+deterministic result: Codex writes a `slugify` function and OpenCode 2 writes test cases in
+parallel, Codex checks one against the other (you review it and **Mark done**), and a program
+step confirms the reply contains the function and its `RESULT:` line.
+
 ## Graphical builder
 
 **Flows** on the board opens the builder, which edits the same YAML:
