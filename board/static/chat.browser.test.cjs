@@ -22,6 +22,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
   const chromePath = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
   assert.ok(fs.existsSync(chromePath), 'Set CHROME_PATH to a Chromium browser');
   const posts = [], errors = [];
+  let nodeApproval = null;
   const events = [
     { type: 'acp_state', capabilities: { promptCapabilities: { image: true, embeddedContext: true } }, usage: { used: 40, size: 100 }, configOptions: [{ id: 'permissions', name: 'Permission mode', type: 'select', category: 'mode', currentValue: 'ask', options: [{ value: 'ask', name: 'Ask' }, { value: 'auto', name: 'Automatic' }] }] },
     { type: 'commands', commands: [{ name: 'test', description: 'Run tests', input: { hint: 'path' } }, { name: 'plan', description: 'Plan work' }] },
@@ -62,6 +63,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       if (request.method === 'POST') {
         let raw = ''; for await (const chunk of request) raw += chunk;
         const body = JSON.parse(raw || '{}'); posts.push({ url: url.pathname, body });
+        // Holding the reply keeps the step's approval in flight, so the test can see its buttons disabled.
+        if (url.pathname.includes('/nodes/') && body.type === 'approval') await nodeApproval?.promise;
         if (url.pathname.includes('/nodes/')) { response.end(JSON.stringify({ ok: true, id: 'flow1', replayed: url.pathname.endsWith('/restart') })); return; }
         if (body.type === 'approval') events.push({ type: 'approval_resolved', id: body.id, decision: 'allow', optionId: body.optionId });
         if (body.type === 'answer') {
@@ -257,8 +260,11 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     await waitFor('document.querySelectorAll(".dag-node").length === 2');
     await evaluate('selectNode("agent-node")');
     await waitFor('document.querySelector("#d-node .question-card")');
+    let release; nodeApproval = { promise: new Promise(resolve => { release = resolve; }) };
     await evaluate(`document.querySelector('#d-node .approval-actions button').click()`);
-    await waitFor(`document.querySelector('#d-node .approval-actions button').disabled`);
+    try { await waitFor(`document.querySelector('#d-node .approval-actions button').disabled`); }
+    finally { release(); nodeApproval = null; }
+    await waitFor(`!document.querySelector('#d-node .approval-actions button').disabled`);
     assert.equal(posts.at(-1).url, '/api/cards/hatchet/flow1/nodes/agent-ref/input');
     await evaluate(`document.querySelector('#d-node textarea[aria-label="Message to agent"]').value = 'step guidance'; document.querySelector('#d-node .chat-composer').requestSubmit()`);
     await waitFor(`document.querySelector('#d-node textarea[aria-label="Message to agent"]').value === ''`);
