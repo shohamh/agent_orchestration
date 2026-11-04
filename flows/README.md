@@ -64,8 +64,14 @@ steps:
 ```
 
 - `{{ input.<name> }}` and `{{ steps.<needed step>.output[.field] }}` are replaced in `run` and
-  `prompt`. Values that aren't text become JSON; in `run` they are quoted for the shell.
-  `{flow_dir}` is this folder on the worker.
+  `prompt`. Values that aren't text become JSON; in `run` they are quoted for the shell, so a
+  value is always one argument and never runs as a command. `{flow_dir}` is this folder on the worker.
+  On Windows, a `run` that uses values starts its program directly, without cmd.exe, unless it
+  needs cmd.exe (pipes, redirection, `%VARIABLES%`, built-in commands such as `echo`, or `.cmd`
+  tools). Values then reach the program exactly, line breaks included. A command that does need
+  cmd.exe can't take a value with a double quote, `%` or a line break, because cmd.exe can't pass
+  those on safely; the step fails with a message saying so. Read such values from `FLOW_CONTEXT`
+  instead.
 - **Program steps** run in the flow run's workspace folder (shared by all steps of the run on that
   worker). They get their context (`{"input": ..., "steps": {...}}`) as `FLOW_CONTEXT` and on
   stdin. Their result is the JSON written to the file named by `FLOW_OUTPUT`; without one it is

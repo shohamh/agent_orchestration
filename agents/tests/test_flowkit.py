@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flowkit.definition import FLOWS_DIR, FlowError, load, parse, parse_text
 from flowkit.executor import run_step, step_context
-from flowkit.template import render
+from flowkit.template import command_argv, render
 
 
 def flow(**steps):
@@ -54,6 +55,23 @@ class TemplateTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "not available"):
             render("{{ steps.missing.output }}", {"input": {}, "steps": {}})
 
+    @unittest.skipUnless(os.name == "nt", "cmd.exe rules")
+    def test_windows_commands_split_like_the_c_runtime_and_keep_values_whole(self):
+        ctx = {"input": {"v": 'a "b"\nc\\'}}
+        argv = command_argv('python -c "print(1)" x"y z" \\\\"q\\" ""{{ input.v }}', ctx)
+        self.assertEqual(argv, [sys.executable, "-c", "print(1)", "xy z", '\\q" "' + 'a "b"\nc\\'], "as CommandLineToArgvW splits it")
+        self.assertEqual(command_argv('python s.py "{{ input.v }} tail"', ctx)[2], 'a "b"\nc\\ tail')
+        for needs_cmd in ("python a.py {{ input.v }} | more", "python a.py %TEMP% {{ input.v }}", "echo {{ input.v }}", "python a.py > out {{ input.v }}"):
+            self.assertIsNone(command_argv(needs_cmd, ctx), needs_cmd)
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe rules")
+    def test_windows_shell_values_are_quoted_and_unsafe_ones_refused(self):
+        self.assertEqual(render("x {{ input.v }} y", {"input": {"v": "a&b|c\\"}}, shell=True), 'x "a&b|c\\\\" y')
+        self.assertEqual(render('x "pre {{ input.v }}" y', {"input": {"v": "a&b"}}, shell=True), 'x "pre a&b" y')
+        for unsafe in ('say "hi"', "100%", "two\nlines"):
+            with self.assertRaisesRegex(ValueError, "FLOW_CONTEXT"):
+                render("x {{ input.v }}", {"input": {"v": unsafe}}, shell=True)
+
 
 class ExecutorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -92,6 +110,24 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         f = parse(flow(a={"kind": "program", "run": 'python -c "print(\'boom\'); raise SystemExit(3)"'}))
         with self.assertRaisesRegex(RuntimeError, "code 3: boom"):
             await self.run_flow(f)
+
+    async def test_template_values_reach_a_program_exactly_and_never_run_as_commands(self):
+        marker = Path(self.tmp.name) / "injected"
+        nasty = f'line one\nline "two" & echo x > "{marker}" | more %PATH% !bang! ^caret tail\\'
+        f = parse(flow(a={"kind": "program", "run": 'python -c "import json, sys; print(json.dumps(sys.argv[1:]))" {{ input.topic }}'}))
+        outputs, _ = await self.run_flow(f, {"topic": nasty})
+        self.assertEqual(outputs["a"]["stdout"], json.dumps([nasty]))
+        self.assertFalse(marker.exists())
+
+    async def test_shell_syntax_commands_quote_values_or_refuse_ones_the_shell_would_change(self):
+        marker = Path(self.tmp.name) / "injected"
+        f = parse(flow(a={"kind": "program", "run": 'python -c "import sys; print(sys.argv[1])" {{ input.topic }} | python -c "import sys; print(sys.stdin.read().strip())"'}))
+        outputs, _ = await self.run_flow(f, {"topic": f"a&echo>{marker.name}"})
+        self.assertEqual(outputs["a"]["stdout"], f"a&echo>{marker.name}")
+        self.assertEqual(list(Path(self.tmp.name).rglob(marker.name)), [], "the value never ran as a command")
+        if os.name == "nt":
+            with self.assertRaisesRegex(ValueError, "FLOW_CONTEXT"):
+                await self.run_flow(f, {"topic": "two\nlines"})
 
     async def test_agent_review_waits_for_mark_done(self):
         f = parse(flow(a={"kind": "agent", "agent": "demo", "prompt": "hi", "review": True}))

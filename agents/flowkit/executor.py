@@ -15,6 +15,7 @@ Agent steps receive the human's input through `receive` (same messages as agent 
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -23,7 +24,7 @@ from typing import Any
 
 from agentdriver.events import Emitter, Sink
 from .definition import FLOWS_DIR, Flow, Step
-from .template import render
+from .template import _EXPR, command_argv, render
 from .restart import prepare_workspace, save_result, read_result, descendants
 
 STDOUT_TAIL = 40
@@ -91,19 +92,22 @@ async def _agent(step: Step, context: dict, workspace: Path, receive, sink) -> s
 
 async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) -> Any:
     flow_dir = os.environ.get('FLOW_ASSETS_DIR', str(FLOWS_DIR))
-    command = render(step.run, context, flow_dir, shell=True)
+    # cmd.exe cuts a command at a line break and has no reliable quoting, so on Windows a command
+    # that takes values starts its program directly whenever it doesn't need the shell.
+    argv = command_argv(step.run, context, flow_dir) if os.name == "nt" and _EXPR.search(step.run) else None
+    command = subprocess.list2cmdline(argv) if argv else render(step.run, context, flow_dir, shell=True)
     output_file = workspace / f".flow-output-{step.id}.json"
     output_file.unlink(missing_ok=True)
     context_json = json.dumps(context, ensure_ascii=False)
     env = {**os.environ, "FLOW_CONTEXT": context_json, "FLOW_OUTPUT": str(output_file), "FLOW_STEP": step.id,
            "FLOW_DIR": flow_dir, "FLOW_PYTHON": sys.executable, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
     # `python` in a command means this worker's interpreter, so steps don't depend on PATH.
-    if command.startswith("python "):
+    if not argv and command.startswith("python "):
         command = f'"{sys.executable}" ' + command[len("python "):]
     await emit("step", state="running", kind="program", command=command)
-    process = await asyncio.create_subprocess_shell(
-        command, cwd=workspace, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt" and not os.environ.get('FLOW_MANAGED_JOB'))
+    options = dict(cwd=workspace, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                   stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt" and not os.environ.get('FLOW_MANAGED_JOB'))
+    process = await (asyncio.create_subprocess_exec(*argv, **options) if argv else asyncio.create_subprocess_shell(command, **options))
     tree = _own(process.pid)
     tail: list[str] = []
 
