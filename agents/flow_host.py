@@ -547,6 +547,14 @@ class Api(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._allowed() or self._documents("POST"):
             return
+        if self.path == '/workers':
+            from flowkit.fleet_registry import save_worker
+            try: return self._send(200, save_worker(self._json_body()))
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
+        if self.path == '/workers/migrate':
+            from flowkit.fleet_registry import migrate_legacy_registry
+            try: return self._send(200, migrate_legacy_registry())
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         if self.path == '/workers/validate':
             from flowkit.workers import routing
             try:
@@ -587,6 +595,14 @@ class Api(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:  # noqa: N802
         if not self._allowed() or self._documents("PUT"):
             return
+        match = re.fullmatch(r'/workers/([A-Za-z0-9_-]+)', self.path)
+        if match:
+            from flowkit.fleet_registry import save_worker
+            try:
+                body = self._json_body()
+                if 'id' in body and body['id'] != match[1]: raise ValueError('Worker id mismatch')
+                return self._send(200, save_worker({**body, 'id': match[1]}))
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         try:  # the original save: a draft only; checks the revision only when the client sends one
             name, body = self._name(), self._body()
             text = body["yaml"]
@@ -606,6 +622,13 @@ class Api(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._allowed() or self._documents("DELETE"):
             return
+        match = re.fullmatch(r'/workers/([A-Za-z0-9_-]+)', self.path)
+        if match:
+            from flowkit.fleet_registry import delete_worker
+            try:
+                delete_worker(match[1])
+                return self._send(200, {'ok': True})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         try:
             name = self._name()
         except ValueError as exc:

@@ -42,17 +42,19 @@ def selection_for(flow, step, configured):
 
 
 def registry():
-    path = Path(os.environ.get('FLOW_WORKERS_FILE', ROOT / 'workers.local.yaml'))
-    entries = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {
-        'workers': [{'id': os.environ.get('FLOW_WORKER_ID', 'local'), 'pool': 'default', 'tags': [], 'url': 'http://127.0.0.1:8096', 'token_env': 'FLOW_WORKER_TOKEN'}]}
+    from .fleet_registry import _read
+    entries = {'workers': _read()}
     workers, seen = [], set()
     if not isinstance(entries, dict) or not isinstance(entries.get('workers'), list): raise ValueError('Worker registry needs a workers list')
     for item in entries['workers']:
         if not isinstance(item, dict): raise ValueError('Invalid registry worker')
-        selector({k: item[k] for k in ('id', 'pool', 'tags') if k in item})
+        selector({k: item[k] for k in ('id', 'tags') if k in item})
         if not item.get('id') or item['id'] in seen: raise ValueError('Worker ids must be present and unique')
         seen.add(item['id'])
         url = urlsplit(item.get('url', ''))
+        if not item.get('url'):
+            workers.append({**item, '_headers': {}})
+            continue
         if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ValueError('Invalid execution-worker endpoint')
         token = {**dotenv_values(ROOT/'workers.local.env'), **os.environ}.get(item.get('token_env', ''), '')
@@ -65,13 +67,15 @@ def registry():
 async def catalog():
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as client:
         async def health(worker):
-            public = {k: worker.get(k, [] if k == 'tags' else 'default') for k in ('id', 'pool', 'tags')}
+            public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
+            public.update({'pool': worker['pools'][0], 'engines': {}})
             try:
+                if not worker.get('url'): return {**public, 'online': False}
                 async with client.get(worker['url'] + '/health', headers=worker['_headers']) as response:
                     data = await response.json()
                     if response.status != 200 or data.get('id') != worker['id']: raise ValueError('Worker identity mismatch')
-                    if data.get('pool') != public['pool'] or sorted(data.get('tags', [])) != sorted(public['tags']): raise ValueError('Worker pool/tags differ from registry')
-                    return {**public, **{k: data[k] for k in ('hostname', 'slots', 'active')}, 'online': True}
+                    # Registry settings are authoritative; legacy worker-reported pool and tags are informational.
+                    return {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True}
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
                 return {**public, 'online': False}
         return await asyncio.gather(*(health(w) for w in registry()))
@@ -82,7 +86,7 @@ async def choose(wanted):
     statuses = {w['id']: w for w in await catalog()}
     candidates = [w for w in registry() if statuses[w['id']]['online'] and
                   (not wanted.get('id') or wanted['id'] == w['id']) and
-                  (not wanted.get('pool') or wanted['pool'] == w.get('pool', 'default')) and
+                  (not wanted.get('pool') or wanted['pool'] in w['pools']) and
                   set(wanted.get('tags', [])) <= set(w.get('tags', []))]
     if not candidates: raise ValueError(f'No online execution worker matches {wanted or "the default selection"}')
     return min(candidates, key=lambda w: (statuses[w['id']]['active'] / statuses[w['id']]['slots'], w['id']))
