@@ -175,7 +175,11 @@ surface exposes worker labels, task desired labels, and run desired worker ID/la
 default to `required=False`, so merely supplying labels is insufficient for strict matching.
 The task scheduling timeout defaults to five minutes and is configurable. In a disposable stack, a run-level required station selector caused a task to execute on a
 worker lacking the task's required kind label: task and runtime selectors cannot be assumed to
-combine. Without a run-level override, a queued task waited through disconnection and a worker label
+combine. A two-step probe placed distinct task selectors on the correct workers, but a run-level
+station selector sent both steps to that station. A separate run-level desired worker ID probe
+executed on a different worker. The SDK's public worker update request exposes pause only, and
+the runtime labels property has no setter; no in-place label-update facility was found in this
+pinned SDK. Without a run-level override, a queued task waited through disconnection and a worker label
 change, then executed on the re-registered matching worker. The queued cancellation probe did
 not execute after an eligible worker joined. A task configured with an eight-minute scheduling
 timeout did not execute within 90 seconds after an eligible worker joined following a 310-second

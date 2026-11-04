@@ -20,6 +20,8 @@ from hatchet_sdk import Hatchet
 from hatchet_sdk.runnables.workflow import Workflow
 from hatchet_sdk.types.labels import DesiredWorkerLabel
 from hatchet_sdk.types.trigger import TriggerWorkflowOptions
+from hatchet_sdk.clients.rest.models.update_worker_request import UpdateWorkerRequest
+from hatchet_sdk.worker.worker import Worker as WorkerRuntime
 
 
 class HatchetSdkSurface(unittest.TestCase):
@@ -40,6 +42,11 @@ class HatchetSdkSurface(unittest.TestCase):
         self.assertIn("desired_worker_labels", run)
         self.assertIn("desired_worker_label", TriggerWorkflowOptions.model_fields)
 
+    def test_no_public_in_place_label_update_in_pinned_sdk(self):
+        self.assertEqual(set(UpdateWorkerRequest.model_fields), {"is_paused"})
+        self.assertIsNone(WorkerRuntime.labels.fset)
+        self.assertFalse(any("label" in name and "update" in name for name in dir(WorkerRuntime)))
+
 
 def make_workflow(client, name):
     workflow = client.workflow(name=name)
@@ -55,6 +62,24 @@ def make_workflow(client, name):
     return workflow
 
 
+def make_two_step_workflow(client, name):
+    workflow = client.workflow(name=name + "-two")
+
+    def task_for(step, station, parents=None):
+        @workflow.task(name=step, parents=parents or [], schedule_timeout=timedelta(minutes=2),
+                       desired_worker_labels=[DesiredWorkerLabel(key="station", value=station, required=True)])
+        def run(input, ctx):
+            actual = os.environ["FLEET_PROBE_WORKER"]
+            with open(os.environ["FLEET_PROBE_MARKER"], "a", encoding="utf-8") as stream:
+                stream.write(step + ":" + actual + "\n")
+            return {"worker": actual}
+        return run
+
+    first = task_for("first", "station-a")
+    task_for("second", "station-b", [first])
+    return workflow
+
+
 def worker_main():
     if sys.platform == "win32":
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,10 +87,10 @@ def worker_main():
         install()
     client = Hatchet()
     workflow = make_workflow(client, os.environ["FLEET_PROBE_NAME"])
-    client.worker(os.environ["FLEET_PROBE_WORKER"], slots=1,
+    client.worker(os.environ["FLEET_PROBE_NAME"] + "-" + os.environ["FLEET_PROBE_WORKER"], slots=1,
                   labels={"kind": os.environ["FLEET_PROBE_KIND"],
                           "station": os.environ["FLEET_PROBE_WORKER"]},
-                  workflows=[workflow]).start()
+                  workflows=[workflow, make_two_step_workflow(client, os.environ["FLEET_PROBE_NAME"])]).start()
 
 
 @unittest.skipUnless(os.environ.get("FLEET_HATCHET_ISOLATED") == "1",
@@ -128,7 +153,7 @@ class HatchetLiveFeasibility(unittest.TestCase):
         self.assertEqual(self.lines(), [], "ineligible worker must not execute required task label")
         self.client.runs.cancel(ref.workflow_run_id)
 
-    def test_required_task_label_disconnection_and_label_update(self):
+    def test_required_task_label_disconnection_and_reregistration(self):
         a = self.worker("station-a", "eligible")
         b = self.worker("station-b", "ineligible")
         self.stop_worker(a)
@@ -139,6 +164,30 @@ class HatchetLiveFeasibility(unittest.TestCase):
         self.worker("station-b", "eligible")
         self.assertEqual(self.wait_lines(1), ["station-b"])
         ref.result()
+
+    def test_distinct_per_step_selectors(self):
+        self.worker("station-a", "eligible")
+        self.worker("station-b", "eligible")
+        flow = make_two_step_workflow(self.client, self.name)
+        flow.run(wait_for_result=False)
+        self.assertEqual(self.wait_lines(2), ["first:station-a", "second:station-b"])
+
+    def test_per_step_selectors_with_runtime_override(self):
+        self.worker("station-a", "eligible")
+        self.worker("station-b", "eligible")
+        flow = make_two_step_workflow(self.client, self.name)
+        flow.run(wait_for_result=False, desired_worker_labels=[
+            DesiredWorkerLabel(key="station", value="station-b", required=True)])
+        self.assertEqual(self.wait_lines(2), ["first:station-a", "second:station-b"])
+
+    def test_runtime_worker_id_selection(self):
+        self.worker("station-a", "eligible")
+        self.worker("station-b", "eligible")
+        workers = self.client.workers.list().rows or []
+        matches = [worker for worker in workers if worker.name == self.name + "-station-b"]
+        self.assertEqual(len(matches), 1, "expected one station-b registration")
+        self.workflow.run(wait_for_result=False, desired_worker_id=matches[0].metadata.id)
+        self.assertEqual(self.wait_lines(1), ["station-b"])
 
     def test_queued_cancellation(self):
         self.worker("station-a", "ineligible")

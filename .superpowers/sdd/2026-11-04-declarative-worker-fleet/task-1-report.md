@@ -41,3 +41,28 @@ fleet-feasibility-disposable -f hatchet/docker-compose.yml --env-file hatchet/.e
 three volumes. The live suite was started before the combined selector/reconnection test was
 split into separate tests; the separate reconnection test was run independently. Worker cleanup
 was subsequently strengthened for Windows process trees.
+
+## Review follow-up: step selectors, worker IDs, and in-place updates
+
+A fresh isolated project was started with the same `docker compose -p
+fleet-feasibility-disposable -f hatchet/docker-compose.yml --env-file hatchet/.env.example up -d`
+command and isolated port environment as above, with fresh project volumes and token. Ran:
+`python -m unittest agents.tests.test_fleet_engine_feasibility.HatchetLiveFeasibility.test_distinct_per_step_selectors agents.tests.test_fleet_engine_feasibility.HatchetLiveFeasibility.test_per_step_selectors_with_runtime_override agents.tests.test_fleet_engine_feasibility.HatchetLiveFeasibility.test_runtime_worker_id_selection agents.tests.test_fleet_engine_feasibility.HatchetSdkSurface.test_no_public_in_place_label_update_in_pinned_sdk -v`
+using the parent workspace agents venv and isolated client environment, with 90-second bounded
+execution-marker waits. Output: `Ran 4 tests in 78.580s`, `FAILED (failures=2)`.
+
+- Distinct required task selectors passed: first:station-a, second:station-b.
+- Runtime required station-b override failed the per-step contract: actual first:station-b,
+  second:station-b; expected first:station-a, second:station-b.
+- Runtime desired_worker_id targeting the registered station-b ID ran on station-a instead;
+  this run does not establish strict worker-ID routing. The reason is not proven.
+- The pinned SDK's `UpdateWorkerRequest.model_fields` contains only `is_paused`, the runtime
+  `Worker.labels` property has no setter, and the runtime has no update-label method. The
+  capability check passed; this is evidence about the inspected public SDK surface, not proof
+  that no internal server or protocol mechanism exists. The existing re-registration test was
+  renamed to describe what it actually exercises; in-place mutation remains unverified.
+
+Afterwards stopped probe worker process trees and ran `docker compose -p
+fleet-feasibility-disposable -f hatchet/docker-compose.yml --env-file hatchet/.env.example down
+--volumes --remove-orphans`: exit 0, removed project containers, network and three volumes. Default
+unittest invocation: four SDK tests passed and seven live tests skipped without explicit opt-in.
