@@ -115,7 +115,7 @@ class ReadOnlyAndConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_remote_credentials_do_not_hide_healthy_worker(self):
         from flowkit import workers
         from aiohttp.test_utils import TestServer
-        from flowkit.worker_service import make_app
+        from agents.tests.worker_fixture import make_app
         with tempfile.TemporaryDirectory() as tmp:
             app=make_app(worker_id='healthy',root=Path(tmp)/'jobs')
             async with TestServer(app) as service:

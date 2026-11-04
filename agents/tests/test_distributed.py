@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from flowkit.definition import parse
 from flowkit.artifacts import snapshot, restore, ancestor_files, publish
-from flowkit.worker_service import make_app
+from agents.tests.worker_fixture import make_app
 from flowkit.distributed import execute_step
 from aiohttp.test_utils import TestServer
 

@@ -14,8 +14,24 @@ def _result(status):
 
 def infer_command(run):
     # Only a single, literal command can be inferred. Never evaluate shell syntax.
-    if not isinstance(run, str) or re.search(r'[\n\r|&;<>()`]', run):
+    if not isinstance(run, str) or any(c in run for c in '\n\r`') or '$(' in run:
         return None
+    quote = None
+    escaped = False
+    for char in run:
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\' and os.name != 'nt' and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if char == quote: quote = None
+        elif char in ('"', "'") and (os.name != 'nt' or char == '"'):
+            quote = char
+        elif char in '|&;<>()':
+            return None
+    if quote: return None
     try:
         parts = shlex.split(run, posix=os.name != 'nt')
     except ValueError:

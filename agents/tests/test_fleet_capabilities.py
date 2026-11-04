@@ -9,6 +9,10 @@ class CapabilitiesTest(unittest.TestCase):
     def test_inference(self):
         self.assertEqual(infer_command('python script.py'), 'python')
         self.assertIsNone(infer_command('python a.py | cat'))
+    def test_quoted_python_code_is_not_shell_control(self):
+        self.assertEqual(infer_command('python -c "print(1); print(2)"'), 'python')
+        self.assertIsNone(infer_command('python -c "print(1)"; echo unsafe'))
+        self.assertIsNone(infer_command('python -c "print(1)" | other'))
     def test_python(self):
         self.assertEqual(probe_command('python')['status'], 'installed')
     def test_demo(self):
@@ -37,7 +41,7 @@ import json
 import tempfile
 import uuid
 from aiohttp.test_utils import TestClient, TestServer
-from flowkit.worker_service import make_app
+from agents.tests.worker_fixture import make_app
 
 class InventoryHTTPTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

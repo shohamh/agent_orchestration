@@ -31,17 +31,32 @@ class Job:
 
     async def run(self):
         tree = None
+        lease = None
+        heartbeat = None
         try:
             async with self.app['slots']:
+                directory = self.app['root'] / self.id
+                workspaces, assets = directory/'workspaces', directory/'assets'
+                restore(self.config['files'], workspaces/self.config['runId'])
+                restore(self.config['assets'], assets)
+                while True:
+                    lease = self.app['capacity'].try_acquire(self.id)
+                    if lease['acquired']: break
+                    self.waiting_reason = lease['reason']
+                    await asyncio.sleep(1)
+                self.waiting_reason = None
+                async def renew():
+                    while True:
+                        await asyncio.sleep(5)
+                        if not self.app['capacity'].renew(self.id, lease['fence']):
+                            self.task.cancel()
+                            return
+                heartbeat = asyncio.create_task(renew())
                 self.app['stats']['active'] += 1
                 try:
                     self.state = 'running'
                     self.started = True
                     self.events.append({'type': 'worker', 'worker': self.app['identity']})
-                    directory = self.app['root'] / self.id
-                    workspaces, assets = directory/'workspaces', directory/'assets'
-                    restore(self.config['files'], workspaces/self.config['runId'])
-                    restore(self.config['assets'], assets)
                     env = {**os.environ, 'FLOW_WORKSPACES': str(workspaces), 'FLOW_ASSETS_DIR': str(assets), 'FLOW_MANAGED_JOB':'1', 'PYTHONUTF8': '1', 'PYTHONUNBUFFERED': '1'}
                     self.process = await asyncio.create_subprocess_exec(sys.executable, '-u', '-m', 'flowkit.worker_stdio', cwd=ROOT/'agents', env=env,
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -81,7 +96,7 @@ class Job:
                                 original=self.config['files'].get(name)
                                 if original and original['data']==entry['data']: entry['mode']=original['mode']
                         from .restart import atomic_json
-                        await asyncio.to_thread(atomic_json, directory/'result-files.json', files)
+                        self.app['capacity'].publish(self.id, lease['fence'], lambda: atomic_json(directory/'result-files.json', files))
                         self.result_path = directory/'result-files.json'
                         self.config.clear()  # release transferred file payloads after execution
                         self.state = 'done'
@@ -97,13 +112,18 @@ class Job:
             self.state, self.error = 'failed', str(exc)[-8000:]
         finally:
             self.last_seen = time.monotonic()
+            if heartbeat:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
             if self.process:
                 from .executor import _kill
                 _kill(self.process, tree)
                 if tree: tree.close()
+                await self.process.wait()
+            if lease and lease.get('acquired'): self.app['capacity'].release(self.id)
 
 
-def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None):
+def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None, capacity=None):
     token = os.environ.get('FLOW_WORKER_TOKEN', '') if token is None else token
     @web.middleware
     async def auth(request, handler):
@@ -119,6 +139,8 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     if not 1 <= count <= 100: raise ValueError('Worker slots must be from 1 to 100')
     app['slots'], app['count'], app['stats'] = asyncio.Semaphore(count), count, {'active':0}
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
+    from .capacity import CapacityGate
+    app['capacity'] = capacity if capacity is not None else CapacityGate(slots=count)
     app['jobs'] = {}
     inventory_path = app['root'] / 'capabilities.json'
     try:
@@ -154,7 +176,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             await asyncio.sleep(3600)
             from .capabilities import overdue
             if overdue(app['inventory']): await refresh_inventory()
-    async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active']})
+    async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': app['capacity'].metrics()})
     async def create(request):
         config = await request.json()
         job_id = str(uuid.UUID(config['id']))
@@ -184,7 +206,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         dropped = item.dropped
         after = max(0, int(request.query.get('after', '0')) - dropped)
         result = {'state': item.state, 'events': item.events[after:], 'cursor': dropped+len(item.events), 'error': item.error,
-                  'worker':app['identity'] if item.started else None}
+                  'worker':app['identity'] if item.started else None, 'waiting_reason': getattr(item, 'waiting_reason', None)}
         if item.state == 'done': result.update(output=item.output, files=json.loads(await asyncio.to_thread(item.result_path.read_text, encoding='utf-8')))
         return web.json_response(result)
     async def receive(request):
@@ -210,11 +232,23 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
                 elif item.task.done() and now-item.last_seen>300:
                     app['jobs'].pop(jid,None)
                     await asyncio.to_thread(shutil.rmtree,app['root']/jid,ignore_errors=True)
+    async def sample_capacity():
+        from .capacity import MachineSampler
+        sampler = MachineSampler()
+        while True:
+            try:
+                sample = sampler.sample()
+                if sample is not None: app['capacity'].observe(*sample, time.monotonic())
+            except (OSError, ValueError): pass  # Missing measurements remain unknown, never zero.
+            await asyncio.sleep(1)
     async def startup(app):
+        app['capacity_task'] = asyncio.create_task(sample_capacity())
         await refresh_inventory()
         app['inventory_task'] = asyncio.create_task(daily_inventory())
         app['reaper']=asyncio.create_task(reap())
     async def cleanup(app):
+        app['capacity_task'].cancel()
+        await asyncio.gather(app['capacity_task'], return_exceptions=True)
         app['inventory_task'].cancel()
         await asyncio.gather(app['inventory_task'], return_exceptions=True)
         app['reaper'].cancel()
