@@ -160,3 +160,43 @@ Cancelled or superseded jobs cannot publish new results. Remote jobs expire afte
 without coordinator polling, including when an engine kills the coordinator process abruptly.
 Finished service workspaces expire after five minutes without polling. Canonical publications
 remain in `FLOW_WORKSPACES` on the coordinator PC for selective restart.
+
+## Fleet placement feasibility decision (2026-11-04)
+
+For the current deployment modes, retain the shared execution service for Hatchet portable
+flows, Prefect served deployments, and Trigger.dev's local development worker. This is a
+conservative adapter decision, not proof that native placement cannot work. The existing
+service supports the documented flow and step selectors, but does not yet implement the new
+fleet contract: in particular, offline selections currently fail, and cross-engine admission,
+metrics, cooldown, leases and fencing still need implementation.
+
+The installed Hatchet SDK is 1.44.0; the isolated Compose stack used server image v0.114.2. The SDK
+surface exposes worker labels, task desired labels, and run desired worker ID/labels. Labels
+default to `required=False`, so merely supplying labels is insufficient for strict matching.
+The task scheduling timeout defaults to five minutes and is configurable. In a disposable stack, a run-level required station selector caused a task to execute on a
+worker lacking the task's required kind label: task and runtime selectors cannot be assumed to
+combine. Without a run-level override, a queued task waited through disconnection and a worker label
+change, then executed on the re-registered matching worker. The queued cancellation probe did
+not execute after an eligible worker joined. A task configured with an eight-minute scheduling
+timeout did not execute within 90 seconds after an eligible worker joined following a 310-second
+wait; the engine logged a slot-replenishment timeout, so the cause is undetermined. These
+limited observations do not establish all cancellation and restart behavior. Native placement
+must not be enabled without resolving selector composition and verifying the complete lifecycle,
+including a timeout strategy that supports the intended indefinite wait.
+
+Prefect's current `serve()` process registers deployments and executes the flow and its tasks
+on the serving host; the repository dispatches each step through the shared service. Trigger
+currently generates flow and task code for the local `trigger dev` worker and uses the same
+service for step execution. Neither configured mode establishes direct per-step remote PC
+placement or the required cross-engine admission guarantees. Trigger production deployment is
+outside the current supported mode and requires a separate design and verification.
+
+For any future native route, engine assignment must still pass a single per-PC admission gate
+shared with service routes, with crash-safe leases and fencing. A queued engine task must remain
+cancellable and must not silently fail at an engine scheduling timeout; waiting inside an engine
+slot can consume capacity, so queue behavior must be measured. Remote native workers also need
+immutable, versioned flow definitions, safe registration and update failure handling while old
+runs remain in flight. The coordinator owns workspace publications: remote execution needs
+authenticated artifact access or equivalent transfer preserving locks, limits, conflict handling
+and fencing; do not assume a shared filesystem. Existing coordinator-mediated HTTP transfer and
+its authentication remain the fallback path described above.
