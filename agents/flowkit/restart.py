@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -29,7 +30,14 @@ def atomic_json(path, value):
         temporary = Path(file.name)
         json.dump(value, file, ensure_ascii=False, allow_nan=False)
     try:
-        temporary.replace(path)
+        for attempt in range(40):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:  # Windows: a reader (the board polling execution info) has the target open
+                if attempt == 39:
+                    raise
+                time.sleep(0.05)
     finally:
         temporary.unlink(missing_ok=True)
 

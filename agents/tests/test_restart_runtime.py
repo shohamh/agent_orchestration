@@ -49,6 +49,18 @@ class RestartRuntime(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'result.*unavailable'):
             build_plan(self.flow, 'b', self.nodes, 'source')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows refuses to replace a file another process has open')
+    def test_atomic_json_waits_out_a_reader_holding_the_file(self):
+        import threading
+        from flowkit.restart import atomic_json
+        path = Path(self.temp.name) / 'state.json'
+        atomic_json(path, {'v': 1})
+        reader = open(path, encoding='utf-8')  # like the board polling a step's execution info
+        threading.Timer(.3, reader.close).start()
+        atomic_json(path, {'v': 2})
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')), {'v': 2})
+        self.assertEqual([p.name for p in path.parent.iterdir() if p.is_file()], ['state.json'], 'no temporary file is left behind')
+
     def test_changed_definition_and_missing_workspace_are_rejected(self):
         self.flow.steps['a'].run = 'echo changed'
         with self.assertRaisesRegex(ValueError, 'definition.*changed'):
