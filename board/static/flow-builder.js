@@ -805,17 +805,17 @@
       S.vp.x = cx - ((cx - S.vp.x) / S.vp.k) * next; S.vp.y = cy - ((cy - S.vp.y) / S.vp.k) * next; S.vp.k = next;
     }
     function zoomBy(f) { const r = svgEl.getBoundingClientRect(); zoomAt(S.vp.k * f, r.width / 2, r.height / 2); renderGraph(); }
-    // Pan just enough to show a step whole, keeping the zoom; a step wider than the canvas is centred.
+    // Pan just enough to show a step whole. The zoom stays unless the step can't fit at it.
     function reveal(id) {
       const at = positionsNow()[id], rect = svgEl.getBoundingClientRect();
       if (!at || !rect.width || !rect.height) return;
-      const margin = 16, w = NODE_W * S.vp.k, h = NODE_H * S.vp.k;
+      const margin = 16, fits = Math.min((rect.width - 2 * margin) / NODE_W, (rect.height - 2 * margin) / NODE_H);
+      if (S.vp.k > fits) zoomAt(fits, rect.width / 2, rect.height / 2);
+      const w = NODE_W * S.vp.k, h = NODE_H * S.vp.k;
       const left = at.x * S.vp.k + S.vp.x, top = at.y * S.vp.k + S.vp.y;
       const shift = (start, size, room) => size + 2 * margin > room ? (room - size) / 2 - start
         : start < margin ? margin - start : start + size > room - margin ? room - margin - (start + size) : 0;
-      const dx = shift(left, w, rect.width), dy = shift(top, h, rect.height);
-      if (!dx && !dy) return;
-      S.vp.x += dx; S.vp.y += dy;
+      S.vp.x += shift(left, w, rect.width); S.vp.y += shift(top, h, rect.height);
       applyViewport();
     }
     function fit() {

@@ -664,6 +664,17 @@ test('a new step is panned into view, even when auto-layout places it off screen
     assert.equal(await inView(added), true, `${added} is fully on the canvas`);
   }
   assert.match(await evaluate(q('.fb-zoom') + '.textContent'), /^2\d\d%$/, 'panning keeps the zoom level');
+  // A canvas narrower than the zoomed step: zoom out just enough to show it whole.
+  await call('Emulation.setDeviceMetricsOverride', { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+  await sleep(200);
+  for (let i = 0; i < 6; i++) await click('.fb-toolbar button[aria-label="Zoom in"]');
+  const before = await ids();
+  await click('.fb-toolbar button', '+ Program step');
+  await waitFor(`document.querySelectorAll(".fb-node").length === ${before.length + 1}`, 'the step is drawn');
+  const added = (await ids()).find((id) => !before.includes(id));
+  assert.equal(await inView(added), true, `${added} is fully on the narrow canvas`);
+  assert.ok(parseInt(await evaluate(q('.fb-zoom') + '.textContent')) < 250, 'the zoom drops only because the step could not fit');
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   await click('.fb-close');
   await answer('Discard changes');
   await waitFor('!document.querySelector("#flows-dialog").open');
