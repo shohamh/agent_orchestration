@@ -400,7 +400,7 @@ function renderDrawer() {
   if (session) chat.render(card, runKey());
   $("d-title").textContent = card.title;
   $("d-backend").replaceChildren(...[backendLink(card.backend_url)].filter(Boolean));
-  const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", card.created_at], ["Started", card.started_at], ["Finished", card.finished_at]];
+  const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", AgentChat.localTime(card.created_at)], ["Started", AgentChat.localTime(card.started_at)], ["Finished", AgentChat.localTime(card.finished_at)]];
   $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
   $("d-steer-section").hidden = session || !card.steerable;
   $("d-queue").replaceChildren(queueText(card), ...[backendLink(card.queue?.backend_url)].filter(Boolean));
@@ -615,7 +615,7 @@ function renderNodePanel() {
   if (!node) { panel.hidden = true; return; }
   panel.hidden = false;
   if (node.kind) { renderFlowNode(panel, node); return; }
-  const facts = [["Status", node.status], ["Started", node.started_at], ["Finished", node.finished_at],
+  const facts = [["Status", node.status], ["Started", AgentChat.localTime(node.started_at)], ["Finished", AgentChat.localTime(node.finished_at)],
     ["Took", node.started_at && node.finished_at ? secs(node.started_at, node.finished_at) : null], ["Run id", node.ref]];
   panel.replaceChildren(...[
     el("h5", {}, node.label),

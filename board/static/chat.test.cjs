@@ -3,6 +3,18 @@ const assert = require('node:assert/strict');
 let chat = {};
 try { chat = require('./chat.js'); } catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error; }
 
+test('engine times show in the viewer\'s timezone, whatever offset and precision they arrive with', () => {
+  assert.equal(typeof chat.localTime, 'function', 'local time formatter is available');
+  const zone = { locale: 'en-GB', timeZone: 'Asia/Jerusalem' };
+  // Hatchet and Prefect send microseconds and a UTC offset; Trigger.dev sends milliseconds and Z.
+  assert.equal(chat.localTime('2026-11-03T19:07:52.728953+00:00', zone), '3 Nov 2026, 21:07:52 GMT+2');
+  assert.equal(chat.localTime('2026-11-03T19:07:52.728Z', zone), '3 Nov 2026, 21:07:52 GMT+2');
+  assert.equal(chat.localTime('2026-11-03T19:07:52', zone), '3 Nov 2026, 21:07:52 GMT+2', 'no offset means UTC');
+  assert.equal(chat.localTime('2026-07-01T09:00:00+00:00', zone), '1 Jul 2026, 12:00:00 GMT+3');
+  assert.equal(chat.localTime('not a time', zone), 'not a time');
+  assert.equal(chat.localTime(null, zone), '');
+});
+
 test('slash suggestions filter agent commands only at the start of a prompt', () => {
   const commands = [{ name: 'test', description: 'Run tests' }, { name: 'plan', description: 'Plan work' }];
   assert.deepEqual(chat.commandMatches(commands, '/TE').map(c => c.name), ['test']);

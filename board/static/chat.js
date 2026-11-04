@@ -168,6 +168,17 @@
     return out;
   }
 
+  // Engines report UTC ISO times (Hatchet and Prefect with microseconds); show them in the viewer's
+  // own timezone and locale. Some browsers reject more than 3 fractional digits, and an ISO time
+  // without an offset would otherwise be read as local time.
+  function localTime(iso, { locale, timeZone } = {}) {
+    if (!iso) return '';
+    const text = String(iso).replace(/(\.\d{3})\d+/, '$1');
+    const date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
+    if (Number.isNaN(date.getTime())) return String(iso);
+    return date.toLocaleString(locale, { timeZone, year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' });
+  }
   function choices(schema = {}) {
     const variants = schema.oneOf || schema.anyOf;
     if (variants) return variants.filter(x => Object.hasOwn(x, 'const')).map(x => ({ value: x.const, label: x.title || String(x.const), description: x.description || '' }));
@@ -599,7 +610,7 @@
     focus() { if (!text.disabled) text.focus(); } };
   }
 
-  const api = { transcript, commandMatches, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish };
+  const api = { transcript, commandMatches, choices, answers, stateView, mount, markdown, jsonView, diffView, toolPreview, parseJsonish, localTime };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AgentChat = api;
 })(typeof window !== 'undefined' ? window : globalThis);
