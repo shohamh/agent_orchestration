@@ -255,3 +255,58 @@ absence is refused with the explanation, while an offline, busy or unchecked wor
 the restarted step waits for it. A worker that reports a job as started (running state, a worker
 identity or step events) is never replaced by another placement, even if it ignored start
 authorization; losing it then fails the step and the engine's retries apply.
+
+## Engine adapters and workspace integrity
+
+Native engine placement is not enabled for any engine. Hatchet's run-level selectors did not
+compose with task-level ones in the feasibility probes, routing by worker ID and waits longer than
+five minutes were not proven, and Prefect `serve()` and the Trigger.dev local development worker
+offer no per-step remote PC placement (see the feasibility decision above). Every supported mode
+therefore uses the shared execution service: Hatchet portable flows, Prefect served deployments,
+the Trigger.dev local development worker, and standalone agent cards on Hatchet and Prefect.
+
+Each adapter computes the same requirement object (selection plus software), waits with the same
+lifecycle, and submits the job to the chosen worker's service, whose capacity gate admits it. So
+one PC's slots, CPU/RAM limits and start cooldown apply to work from every engine at once. The
+execution record shows `engine` (`hatchet`, `prefect` or `trigger`), the executing `worker`
+(the identity reported by the service that started the job: id, hostname, pool, tags), `state`,
+and `waiting_reason`. For a flow step, the record is under `/execution/<run>` (`steps.<step>`).
+For a card, it is under `steps.card`, which the board serves at
+`GET /api/cards/<system>/<run>/execution`. The record never contains endpoints or credentials.
+
+A standalone card is placed only when it has a `worker` selection (`id`, `pool`, `tags`); its
+requirement adds the card's agent. Without a selection it runs on the engine worker exactly as
+before. A placed card runs in a new workspace on the executing PC, as a blank-workspace card does.
+A host workspace path or a resumed session (bound to its original workspace) is refused for a
+placed card, both when it is created and by the worker service, rather than assumed to exist on
+another PC. A card transcript keeps its event schema: the executing PC is in the record, not the
+transcript. Placed cards on Trigger.dev are not supported; that board backend refuses a selection.
+
+Queue timeouts: work waits for a fleet worker inside its engine task, which counts toward the
+step's `timeout_minutes`. Steps queued behind waiting ones at the engine must not expire first, so
+Hatchet flow tasks and the card task set a 24-hour `schedule_timeout` (the SDK default is five
+minutes). Trigger.dev flow and step tasks set a one-day `ttl` (development runs otherwise leave
+the queue after ten minutes). Neither setting has been verified against a live server here.
+Trigger.dev's configuration disables retries in development (`enabledInDev: false`), so a step's
+`retries` applies only on Hatchet and Prefect.
+
+Revisions: each job carries the exact flow definition and the run's asset snapshot, so a worker
+never reads flows or assets from its own disk, and a worker update cannot change a running job. The
+first step of a run pins the definition hash, for placed and local flows alike. If the flow is
+updated while an old run is in flight, an engine worker serving the new revision may still receive
+the old run's remaining or parallel steps. They fail with "The flow definition has changed; start
+a new flow run" before anything is placed or published, so revisions never mix. If activating
+the new revision failed for an engine, that engine keeps serving the old revision and old runs
+finish on it.
+
+Workspaces and artifacts: the coordinator owns the run workspace. Each job receives its files
+over the authenticated service API, within the existing transfer limits, and runs in its own
+job directory on the executing PC, never at the coordinator's path. Results are published only
+while the attempt's fence is current. An engine retry or replay starts a new attempt, after which
+the superseded attempt can neither publish nor update the record. Parallel branches that change
+the same file on different PCs make the joining step fail with a workspace conflict before it is
+placed. A restart reuses the source run's exact results and places only the restarted subtree.
+
+Not yet pushed: registry `slots`, `cpu_limit` and `ram_limit` are not sent to a worker's gate. A
+worker's gate uses its own service settings, so the coordinator may see a free slot while the
+gate makes the job wait. The record then shows the gate's reason, for example `full_slots`.

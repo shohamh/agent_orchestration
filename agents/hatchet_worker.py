@@ -52,11 +52,16 @@ class InputInbox:
         return self.queue.get_nowait()
 
 
+# Work waits for a fleet worker inside its task run; a task queued behind waiting ones must not be
+# cancelled by the SDK's five-minute default scheduling timeout (engine queue wait, not run time).
+SCHEDULE_TIMEOUT = timedelta(hours=24)
+
+
 def build_task(hatchet: Any) -> Any:
     from hatchet_sdk import Context
     from pydantic import BaseModel, Field
     from typing import Literal
-    from agentdriver.session import run_session
+    from flowkit.distributed import execute_session
 
     class SessionInput(BaseModel):
         goal: str = Field(min_length=1, max_length=20000)
@@ -64,9 +69,11 @@ def build_task(hatchet: Any) -> Any:
         workspace: str = Field(default="", max_length=4096)
         simulateFailures: int = Field(default=0, ge=0, le=20)
         resumeSessionId: str = Field(default="", max_length=512)
+        # Fleet requirement {id, pool, tags}; None runs the card on this worker as before.
+        worker: dict | None = None
 
     @hatchet.task(name="agent-session", input_validator=SessionInput, retries=0,
-                  execution_timeout=timedelta(hours=24))
+                  schedule_timeout=SCHEDULE_TIMEOUT, execution_timeout=timedelta(hours=24))
     async def agent_session(payload: SessionInput, ctx: Context) -> dict:
         inbox = InputInbox(hatchet.event, ctx.workflow_run_id)
 
@@ -75,7 +82,7 @@ def build_task(hatchet: Any) -> Any:
             # Wakes the board's live subscription; the transcript itself is read from the log.
             await ctx.aio_put_stream(event.get("type") or "event")
 
-        return await run_session(payload.model_dump(), inbox.receive, sink)
+        return await execute_session(payload.model_dump(), ctx.workflow_run_id, inbox.receive, sink, engine="hatchet")
 
     return agent_session
 

@@ -303,11 +303,14 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             if len(app['jobs']) >= 100: raise ValueError('Execution worker has too many retained jobs; retry later')
             start = config['start']
             if not re.fullmatch(r'[A-Za-z0-9_-]{1,150}', start['runId']): raise ValueError('Invalid run id')
-            flow = parse(start['flow'])
-            if start['step'] not in flow.steps: raise ValueError('Unknown step')
-            step = flow.steps[start['step']]
-            from .fleet_matching import software_requirement
-            config['requirement'] = software_requirement(step)
+            from .fleet_matching import card_session, software_requirement
+            if 'session' in start:  # a standalone card; it never uses a coordinator path
+                if set(start) != {'session', 'runId'}: raise ValueError('Invalid card job')
+                config['requirement'] = {'agent': card_session(start['session']).get('agent', 'codex')}
+            else:
+                flow = parse(start['flow'])
+                if start['step'] not in flow.steps: raise ValueError('Unknown step')
+                config['requirement'] = software_requirement(flow.steps[start['step']])
             if config['requirement'].get('command'): await refresh_inventory([config['requirement']['command']])
             from .artifacts import validate
             validate(config['files']); validate(config['assets'])

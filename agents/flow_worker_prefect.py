@@ -56,7 +56,8 @@ def build_flow(flow: Flow) -> Any:
                         logger.info("EVT " + json.dumps(event, ensure_ascii=False))
 
                     context = step_context(flow, step, params, upstream)
-                    return await run_step(flow, step.id, context, str(flow_run.get_id()), inbox.receive, sink)
+                    return await run_step(flow, step.id, context, str(flow_run.get_id()), inbox.receive, sink,
+                                          engine="prefect")
 
             run.__name__ = step.id
             return task(name=step.id, task_run_name=step.id, retries=step.retries, persist_result=False,

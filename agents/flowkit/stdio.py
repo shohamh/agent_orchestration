@@ -39,7 +39,7 @@ async def main() -> None:
     if start.get("type") != "start":
         raise ValueError("First input must be a start message")
     flow = parse(start["flow"])
-    output = await run_step(flow, start["step"], start["context"], start["runId"], receive, sink)
+    output = await run_step(flow, start["step"], start["context"], start["runId"], receive, sink, engine="trigger")
     write({"type": "result", "output": output})
 
 

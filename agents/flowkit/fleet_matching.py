@@ -37,6 +37,35 @@ def requirements_for(flow, step_id, configured=None, selection=None):
     return {**{k: v for k, v in wanted.items() if v}, **software_requirement(flow.steps[step_id])}
 
 
+CARD_FIELDS = {'goal', 'agent', 'workspace', 'simulateFailures', 'resumeSessionId'}
+
+
+def card_session(config):
+    """A standalone card's session options as a placed worker accepts them. A placed card runs in
+    a new workspace on that PC, so a host path or a resumed session (bound to its original
+    workspace) is refused rather than assumed to exist there."""
+    from .definition import AGENTS
+    if not isinstance(config, dict) or set(config) - CARD_FIELDS:
+        raise ValueError('A card session contains only goal, agent, workspace, simulateFailures and resumeSessionId')
+    if config.get('workspace') or config.get('resumeSessionId'):
+        raise ValueError('A card placed on a fleet worker runs in a new workspace on that worker; '
+                         'clear the workspace (host paths and resumed sessions are not available on other PCs)')
+    if not isinstance(config.get('goal'), str) or not config['goal'].strip() or len(config['goal']) > 20000:
+        raise ValueError('A card needs a goal of at most 20000 characters')
+    if config.get('agent', 'codex') not in AGENTS:
+        raise ValueError(f"agent must be one of {', '.join(AGENTS)}")
+    failures = config.get('simulateFailures', 0)
+    if type(failures) is not int or not 0 <= failures <= 20:
+        raise ValueError('simulateFailures must be a whole number from 0 to 20')
+    return config
+
+
+def card_requirements(config, selection):
+    """The requirement object of a standalone card: its worker selection plus its agent."""
+    card_session(config)
+    return {**{k: v for k, v in selection.items() if v}, 'agent': config.get('agent', 'codex')}
+
+
 def _reason(code, message, **extra):
     return {'code': code, 'message': message, **extra}
 

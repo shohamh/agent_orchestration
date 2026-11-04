@@ -1,43 +1,21 @@
 """Step placement and transfer extension. Native engines still invoke tasks in DAG order."""
 import asyncio
 import json
-import os
 import time
 import uuid
-from contextlib import contextmanager
-from pathlib import Path
+from types import SimpleNamespace
 
 import aiohttp
 
 from .artifacts import ancestor_files, snapshot, publish
 from .definition import FLOWS_DIR
-from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, definition_hash
+from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, pin_definition, publication_lock
 from .fleet_matching import requirements_for, validate_launch
 from .workers import fleet_status, routing, selection_for, selector
 
 PLACEMENT_POLL = 2.0  # seconds between placement checks while a step waits for a worker
 PROBE_INTERVAL = 15.0  # minimum seconds between on-demand capability probes of one worker
 TIMEOUT_SLACK = 5.0  # the engine's step timeout starts slightly before this coroutine does
-
-
-@contextmanager
-def publication_lock(root, step):
-    directory = root/'.flow-locks'
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory/f'{step}.lock').open('a+b') as file:
-        file.seek(0)
-        file.write(b'0'); file.flush(); file.seek(0)
-        if os.name == 'nt':
-            import msvcrt
-            msvcrt.locking(file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
-        try: yield
-        finally:
-            file.seek(0)
-            if os.name == 'nt': msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
-            else: fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 def execution_info(run_id):
@@ -131,15 +109,15 @@ async def validate_flow_launch(flow, configured=None):
     return {'status': status, 'fleet': True, 'steps': steps}
 
 
-async def execute_step(flow, step_id, context, run_id, receive, sink):
+async def execute_step(flow, step_id, context, run_id, receive, sink, engine=None):
+    """Run one flow step: here for flows without fleet placement, otherwise on a placed worker.
+    `engine` names the engine adapter that runs the step's task (hatchet, prefect, trigger)."""
     from .executor import run_step
     configured = context.get('_flow_execution')
     if not uses_fleet(flow, configured):
         return await run_step(flow, step_id, context, run_id, receive, sink)
     root = prepare_workspace(flow, run_id, context.get('_flow_restart'))
-    manifest=root/'.flow-results/_definition.json'
-    if manifest.exists() and json.loads(manifest.read_text(encoding='utf-8')).get('hash')!=definition_hash(flow):
-        raise ValueError('The flow definition has changed; start a new flow run')
+    pin_definition(root, flow)  # one run, one revision, whichever engine worker serves its steps
     plan = context.get('_flow_restart')
     if plan and step_id not in descendants(flow, plan['step']):
         output = read_result(root, step_id)
@@ -157,118 +135,162 @@ async def execute_step(flow, step_id, context, run_id, receive, sink):
         asset_path=root/'.flow-assets.json'
         if not asset_path.exists(): atomic_json(asset_path,snapshot(FLOWS_DIR))
     assets=json.loads(await asyncio.to_thread(asset_path.read_text,encoding='utf-8'))
+    # The job carries this exact revision and the run's files: a worker never reads either locally.
+    native_context = {**context, '_flow_restart': None, '_flow_execution': None}
+    payload = {'files': before, 'assets': assets,
+               'start': {'flow': flow.to_json(), 'step': step_id, 'context': native_context, 'runId': run_id}}
+
+    def finish(data):
+        publish(root, step_id, before, data['files'])
+        save_result(flow, run_id, step_id, data['output'])
+
+    return await _placed(root, step_id, requirements, wanted, payload, flow.steps[step_id], receive, sink, engine, finish)
+
+
+CARD = 'card'  # execution record key of a standalone card (`/execution/<run>` -> steps.card)
+CARD_TIMEOUT = SimpleNamespace(timeout_minutes=1440)  # the engines bound a card at 24 hours
+
+
+async def execute_session(config, run_id, receive, sink, engine=None):
+    """Run a standalone agent card. Without a `worker` selection it runs here exactly as before;
+    with one it is placed like a flow step: same requirement object, wait, admission gate and
+    fencing, and its execution record shows the executing PC, engine and waiting reason. A placed
+    card runs in a new workspace on that PC: host paths and resumed sessions are refused."""
+    from .fleet_matching import card_requirements
+    config = dict(config)
+    wanted = selector(config.pop('worker', None))
+    if not wanted:
+        from agentdriver.session import run_session
+        return await run_session(config, receive, sink)
+    requirements = card_requirements(config, wanted)
+    root = workspace_path(run_id)
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {'files': {}, 'assets': {}, 'start': {'session': config, 'runId': run_id}}
+    return await _placed(root, CARD, requirements, wanted, payload, CARD_TIMEOUT, receive, sink, engine, lambda data: None,
+                         announce=False)  # a card transcript keeps its event schema; the PC is in the record
+
+
+async def _placed(root, key, requirements, wanted, payload, bound, receive, sink, engine, finish, announce=True):
+    """Wait for a compatible worker, submit through its admission gate and follow the job.
+    `finish(data)` publishes a finished job's results while this attempt's fence is held."""
     since_wall, since_monotonic = time.time(), time.monotonic()
     attempt = {'job': str(uuid.uuid4())}
-    fence = root/'.flow-attempts'/f'{step_id}.json'
-    with publication_lock(root, step_id): atomic_json(fence, attempt['job'])
-    info = {'state': 'queued', 'requested': wanted, 'worker': None, 'job': attempt['job'], 'waiting_reason': None}
-    info_path = root/'.flow-workers'/f'{step_id}.json'
+    fence = root/'.flow-attempts'/f'{key}.json'
+    with publication_lock(root, key): atomic_json(fence, attempt['job'])
+    info = {'state': 'queued', 'requested': wanted, 'worker': None, 'job': attempt['job'], 'waiting_reason': None, 'engine': engine}
+    info_path = root/'.flow-workers'/f'{key}.json'
 
     def record(changes=None, **fields):
         """Persist visible state for the current attempt only (a superseded attempt writes nothing)."""
         updated = {**info, **(changes or {}), **fields}
-        with publication_lock(root, step_id):
+        with publication_lock(root, key):
             if json.loads(fence.read_text()) != attempt['job']: return
             if updated != info or not info_path.exists():
                 info.clear(); info.update(updated)
                 atomic_json(info_path, info)
 
+    job = _Job(root, key, fence, info, record, payload, receive, sink, finish, announce)
     record()
     try:
         while True:
             worker = await wait_for_worker(requirements, record)
             try:
-                return await _run_job(flow, step_id, context, run_id, receive, sink, root, worker, attempt['job'], fence, info, record, before, assets)
+                return await job.run(worker, attempt['job'])
             except _Replace as exc:
                 previous, attempt['job'] = attempt['job'], str(uuid.uuid4())
-                with publication_lock(root, step_id):
+                with publication_lock(root, key):
                     if json.loads(fence.read_text()) != previous: raise RuntimeError('Execution superseded by another attempt') from None
                     atomic_json(fence, attempt['job'])
                 record(state='waiting', worker=None, job=attempt['job'], waiting_reason=exc.reason, message=str(exc))
                 await asyncio.sleep(PLACEMENT_POLL)  # no tight loop if the same worker rejects again
     except asyncio.CancelledError:
         # Keep the last waiting reason and message: they explain why a step never ran.
-        record(state=cancellation_state(root, flow.steps[step_id], since_wall, since_monotonic),
-               timeout_minutes=flow.steps[step_id].timeout_minutes)
+        record(state=cancellation_state(root, bound, since_wall, since_monotonic), timeout_minutes=bound.timeout_minutes)
         raise
     except BaseException:
         if info.get('state') != 'done': record(state='failed', waiting_reason=None)
         raise
 
 
-async def _run_job(flow, step_id, context, run_id, receive, sink, root, worker, job_id, fence, info, record, before, assets):
-    url = worker['url']+'/jobs/'+job_id
-    native_context = {**context, '_flow_restart': None, '_flow_execution': None}
-    # `authorize`: after admission the service waits for this coordinator to confirm the start.
-    config = {'id': job_id, 'authorize': True, 'files': before, 'assets': assets, 'start': {
-        'flow': flow.to_json(), 'step': step_id, 'context': native_context, 'runId': run_id}}
-    record(state='queued', worker=None, waiting_reason=None, intervention_needed=False, waiting=[], message=None, resolution=None)
-    async with aiohttp.ClientSession(headers=worker['_headers'], timeout=aiohttp.ClientTimeout(total=120, connect=5)) as client:
-        async def call(method, endpoint, data=None):
-            async with client.request(method, endpoint, json=data) as response:
-                result = await response.json(content_type=None)
-                if response.status >= 400: raise RuntimeError((result or {}).get('error') or f'Execution worker returned {response.status}')
-                return result
-        async def inputs():
-            while True: await call('POST', url+'/input', await receive())
-        input_task = None
-        finished = False
-        authorized, granted = False, None
-        evidence = False  # the worker reported the job started (it may ignore `authorize`)
-        unreachable = f"{worker['id']} became unreachable before the step started"
-        try:
-            try: await call('POST', worker['url']+'/jobs', config)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc: raise _Replace('offline', unreachable) from exc
-            input_task = asyncio.create_task(inputs())
-            cursor = 0
-            while True:
-                try: data = await call('GET', url+f'?after={cursor}')
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RuntimeError) as exc:
-                    if authorized or evidence: raise
-                    raise _Replace('offline', unreachable) from exc  # never authorized, so never started
-                cursor = data['cursor']
-                if data.get('worker') or data['state'] in ('running', 'done') or data['events'] or cursor:
-                    evidence = True  # e.g. an older service that starts at once: never placed again
-                if data['state'] == 'rejected':
-                    if evidence: raise RuntimeError(data.get('error') or 'The worker rejected a step it reported as started')
-                    raise _Replace(data.get('reason') or 'software_missing', data.get('error') or 'The worker rejected the step')
-                if data['state'] == 'queued' and not data.get('worker'):
-                    record(waiting_reason=data.get('waiting_reason'))
-                if data.get('authorization') and data['authorization'] != granted:
-                    # Each admission shows a fresh nonce; confirm it only while this attempt is current.
-                    with publication_lock(root, step_id):
-                        if json.loads(fence.read_text()) != job_id: raise RuntimeError('Execution superseded by another attempt')
-                    previously, authorized, granted = authorized, True, data['authorization']  # may start: never placed again
-                    try: await call('POST', url+'/start', {'nonce': granted})
-                    except RuntimeError: authorized, granted = previously, None  # explicitly refused: not started by this
-                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError): pass  # may have arrived: assume it did
-                if data.get('worker') and info.get('worker')!=data['worker']:
-                    record(state='running', worker=data['worker'], waiting_reason=None)
-                    await sink({'type':'worker','worker':data['worker']})
-                for event in data['events']:
-                    if event.get('type') == 'worker':
-                        if info.get('worker')==event['worker']: continue
-                        record(state='running', worker=event['worker'], waiting_reason=None)
-                    await sink(event)
-                if data['state'] == 'done':
-                    with publication_lock(root, step_id):
-                        if json.loads(fence.read_text()) != job_id: raise RuntimeError('Execution superseded by another attempt')
-                        publish(root, step_id, before, data['files'])
-                        save_result(flow, run_id, step_id, data['output'])
-                        info['state'] = 'done'
-                        atomic_json(root/'.flow-workers'/f'{step_id}.json', info)
-                    finished = True
-                    return data['output']
-                if data['state'] in ('failed', 'cancelled'):
-                    if data['state'] == 'cancelled' and not authorized and not evidence:
-                        raise _Replace('offline', data.get('error') or 'The worker cancelled the queued step')
-                    raise RuntimeError(data.get('error') or 'Remote step failed')
-                if input_task.done(): input_task.result()
-                await asyncio.sleep(.2)
-        finally:
-            if input_task:
-                input_task.cancel()
-                await asyncio.gather(input_task, return_exceptions=True)
-            if not finished:
-                try: await asyncio.wait_for(_delete_job(client, url), timeout=10)
-                except Exception: pass
+class _Job:
+    def __init__(self, root, key, fence, info, record, payload, receive, sink, finish, announce):
+        self.root, self.key, self.fence, self.info, self.record = root, key, fence, info, record
+        self.payload, self.receive, self.sink, self.finish, self.announce = payload, receive, sink, finish, announce
+
+    def current(self, job_id):
+        if json.loads(self.fence.read_text()) != job_id: raise RuntimeError('Execution superseded by another attempt')
+
+    async def run(self, worker, job_id):
+        root, key, info, record, sink = self.root, self.key, self.info, self.record, self.sink
+        url = worker['url']+'/jobs/'+job_id
+        # `authorize`: after admission the service waits for this coordinator to confirm the start.
+        config = {'id': job_id, 'authorize': True, **self.payload}
+        record(state='queued', worker=None, waiting_reason=None, intervention_needed=False, waiting=[], message=None, resolution=None)
+        async with aiohttp.ClientSession(headers=worker['_headers'], timeout=aiohttp.ClientTimeout(total=120, connect=5)) as client:
+            async def call(method, endpoint, data=None):
+                async with client.request(method, endpoint, json=data) as response:
+                    result = await response.json(content_type=None)
+                    if response.status >= 400: raise RuntimeError((result or {}).get('error') or f'Execution worker returned {response.status}')
+                    return result
+            async def inputs():
+                while True: await call('POST', url+'/input', await self.receive())
+            input_task = None
+            finished = False
+            authorized, granted = False, None
+            evidence = False  # the worker reported the job started (it may ignore `authorize`)
+            unreachable = f"{worker['id']} became unreachable before the step started"
+            try:
+                try: await call('POST', worker['url']+'/jobs', config)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc: raise _Replace('offline', unreachable) from exc
+                input_task = asyncio.create_task(inputs())
+                cursor = 0
+                while True:
+                    try: data = await call('GET', url+f'?after={cursor}')
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RuntimeError) as exc:
+                        if authorized or evidence: raise
+                        raise _Replace('offline', unreachable) from exc  # never authorized, so never started
+                    cursor = data['cursor']
+                    if data.get('worker') or data['state'] in ('running', 'done') or data['events'] or cursor:
+                        evidence = True  # e.g. an older service that starts at once: never placed again
+                    if data['state'] == 'rejected':
+                        if evidence: raise RuntimeError(data.get('error') or 'The worker rejected a step it reported as started')
+                        raise _Replace(data.get('reason') or 'software_missing', data.get('error') or 'The worker rejected the step')
+                    if data['state'] == 'queued' and not data.get('worker'):
+                        record(waiting_reason=data.get('waiting_reason'))
+                    if data.get('authorization') and data['authorization'] != granted:
+                        # Each admission shows a fresh nonce; confirm it only while this attempt is current.
+                        with publication_lock(root, key): self.current(job_id)
+                        previously, authorized, granted = authorized, True, data['authorization']  # may start: never placed again
+                        try: await call('POST', url+'/start', {'nonce': granted})
+                        except RuntimeError: authorized, granted = previously, None  # explicitly refused: not started by this
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError): pass  # may have arrived: assume it did
+                    if data.get('worker') and info.get('worker')!=data['worker']:
+                        record(state='running', worker=data['worker'], waiting_reason=None)
+                        if self.announce: await sink({'type':'worker','worker':data['worker']})
+                    for event in data['events']:
+                        if event.get('type') == 'worker':
+                            if info.get('worker')==event['worker']: continue
+                            record(state='running', worker=event['worker'], waiting_reason=None)
+                            if not self.announce: continue
+                        await sink(event)
+                    if data['state'] == 'done':
+                        with publication_lock(root, key):
+                            self.current(job_id)
+                            self.finish(data)
+                            info['state'] = 'done'
+                            atomic_json(root/'.flow-workers'/f'{key}.json', info)
+                        finished = True
+                        return data['output']
+                    if data['state'] in ('failed', 'cancelled'):
+                        if data['state'] == 'cancelled' and not authorized and not evidence:
+                            raise _Replace('offline', data.get('error') or 'The worker cancelled the queued step')
+                        raise RuntimeError(data.get('error') or 'Remote step failed')
+                    if input_task.done(): input_task.result()
+                    await asyncio.sleep(.2)
+            finally:
+                if input_task:
+                    input_task.cancel()
+                    await asyncio.gather(input_task, return_exceptions=True)
+                if not finished:
+                    try: await asyncio.wait_for(_delete_job(client, url), timeout=10)
+                    except Exception: pass

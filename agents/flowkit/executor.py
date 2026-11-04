@@ -27,7 +27,7 @@ from typing import Any
 from agentdriver.events import Emitter, Sink
 from .definition import FLOWS_DIR, Flow, Step
 from .template import _EXPR, command_argv, render
-from .restart import prepare_workspace, save_result, read_result, descendants
+from .restart import prepare_workspace, save_result, read_result, descendants, pin_definition
 
 STDOUT_TAIL = 40
 
@@ -54,6 +54,8 @@ async def run_step(flow: Flow, step_id: str, context: dict[str, Any], run_id: st
     step = flow.steps[step_id]
     plan = context.get('_flow_restart')
     workspace = prepare_workspace(flow, run_id, plan)
+    if not os.environ.get('FLOW_MANAGED_JOB'):  # a managed job's workspace is new; its coordinator pinned the run
+        pin_definition(workspace, flow)  # a newer revision never runs the rest of an older run
     emit = Emitter(sink)
     if plan and step_id not in descendants(flow, plan['step']):
         output = read_result(workspace, step_id)

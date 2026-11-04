@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -40,6 +41,40 @@ def atomic_json(path, value):
                 time.sleep(0.05)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def publication_lock(root, step):
+    directory = root/'.flow-locks'
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory/f'{step}.lock').open('a+b') as file:
+        file.seek(0)
+        file.write(b'0'); file.flush(); file.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        try: yield
+        finally:
+            file.seek(0)
+            if os.name == 'nt': msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)
+            else: fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+def pin_definition(workspace, flow):
+    """The first step of a run pins its definition; any later step with another one fails before it runs.
+
+    An engine worker restarted on a newer revision may still receive an older run's remaining (or
+    parallel) steps: they never mix the revisions, whatever finished first."""
+    expected = definition_hash(flow)
+    path = workspace / '.flow-results' / '_definition.json'
+    with publication_lock(workspace, '_definition'):
+        try: pinned = json.loads(path.read_text(encoding='utf-8')).get('hash')
+        except FileNotFoundError: pinned = None
+        if pinned is None: atomic_json(path, {'hash': expected})
+        elif pinned != expected: raise ValueError('The flow definition has changed; start a new flow run')
 
 
 def save_result(flow, run_id, step, output):

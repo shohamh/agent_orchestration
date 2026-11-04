@@ -49,12 +49,13 @@ def build_flow() -> Any:
     from prefect import flow, get_client, get_run_logger
     from prefect.runtime import flow_run
 
-    from agentdriver.session import run_session
+    from flowkit.distributed import execute_session
 
     @flow(name="agent-session", retries=0, log_prints=False, persist_result=False)
     async def agent_session(goal: str,
                             agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"] = "codex",
-                            workspace: str = "", simulateFailures: int = 0, resumeSessionId: str = "") -> dict:
+                            workspace: str = "", simulateFailures: int = 0, resumeSessionId: str = "",
+                            worker: dict | None = None) -> dict:
         logger = get_run_logger()
         async with get_client() as client:
             inbox = InputInbox(client, flow_run.get_id())
@@ -62,8 +63,10 @@ def build_flow() -> Any:
             async def sink(event: dict) -> None:
                 logger.info("EVT " + json.dumps(event, ensure_ascii=False))
 
-            config = {"goal": goal, "agent": agent, "workspace": workspace, "simulateFailures": simulateFailures, "resumeSessionId": resumeSessionId}
-            return await run_session(config, inbox.receive, sink)
+            config = {"goal": goal, "agent": agent, "workspace": workspace, "simulateFailures": simulateFailures,
+                      "resumeSessionId": resumeSessionId, "worker": worker}
+            # worker (fleet requirement {id, pool, tags}) None: the card runs here as before.
+            return await execute_session(config, str(flow_run.get_id()), inbox.receive, sink, engine="prefect")
 
     return agent_session
 

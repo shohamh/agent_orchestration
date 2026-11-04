@@ -21,7 +21,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from flowkit.activation import load_active  # noqa: E402
 from flowkit.definition import Flow  # noqa: E402
-from hatchet_worker import InputInbox  # noqa: E402
+from hatchet_worker import SCHEDULE_TIMEOUT, InputInbox  # noqa: E402
 
 
 def input_model(flow: Flow) -> Any:
@@ -53,10 +53,15 @@ def build_workflow(hatchet: Any, flow: Flow) -> Any:
                     await ctx.aio_put_stream(event.get("type") or "event")
 
                 context = step_context(flow, step, payload.model_dump(), outputs)
-                return {"output": await run_step(flow, step.id, context, ctx.workflow_run_id, inbox.receive, sink)}
+                return {"output": await run_step(flow, step.id, context, ctx.workflow_run_id, inbox.receive, sink,
+                                                 engine="hatchet")}
 
             run.__name__ = step.id
+            # A task waits for a fleet worker inside its run (bounded by execution_timeout), so many
+            # waiting steps can fill this worker's slots; queued tasks must then outlast the SDK's
+            # five-minute default scheduling timeout instead of being cancelled by it.
             return workflow.task(name=step.id, parents=[tasks[n] for n in step.needs], retries=step.retries,
+                                 schedule_timeout=SCHEDULE_TIMEOUT,
                                  execution_timeout=timedelta(minutes=step.timeout_minutes))(run)
 
         tasks[step.id] = make()
