@@ -2,6 +2,9 @@
 import os
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
+from dotenv import dotenv_values
 from pathlib import Path
 from urllib.parse import urlsplit
 import yaml
@@ -11,6 +14,32 @@ _LOCK = threading.RLock()
 
 def _path():
     return Path(os.environ.get('FLOW_WORKERS_FILE', ROOT / 'workers.local.yaml'))
+
+@contextmanager
+def _locked():
+    """Serialize readers and read-modify-write transactions across coordinator processes."""
+    with _LOCK:
+        path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(path) + '.lock', 'a+b') as lockfile:
+            if os.name == 'nt':
+                import msvcrt
+                lockfile.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        time.sleep(0.05)
+            else:
+                import fcntl
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == 'nt':
+                    lockfile.seek(0); msvcrt.locking(lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
 
 def _default():
     return {'id': os.environ.get('FLOW_WORKER_ID', 'local'), 'pool': 'default', 'tags': [],
@@ -47,7 +76,7 @@ def _public(w):
     return {k: w[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')} | {'engines': {}, 'online': False}
 
 def load_fleet():
-    with _LOCK: return [_public(w) for w in _read()]
+    with _locked(): return [_public(w) for w in _read()]
 
 def _write(workers):
     path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +90,7 @@ def _write(workers):
         if os.path.exists(name): os.unlink(name)
 
 def migrate_legacy_registry():
-    with _LOCK:
+    with _locked():
         workers = _read(); path = _path()
         if path.exists():
             data = yaml.safe_load(path.read_text(encoding='utf-8'))
@@ -73,15 +102,20 @@ def save_worker(worker):
     if not isinstance(worker, dict): raise ValueError('Invalid worker')
     allowed = {'id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
     if set(worker) - allowed: raise ValueError('Unknown worker fields')
-    with _LOCK:
+    with _locked():
         workers = _read(); existing = next((w for w in workers if w['id'] == worker.get('id')), {})
         updated = _normalize({**existing, **worker})
+        if updated.get('url'):
+            u = urlsplit(updated['url'])
+            tokens = {**dotenv_values(ROOT / 'workers.local.env'), **os.environ}
+            if u.hostname not in ('127.0.0.1', 'localhost', '::1') and not tokens.get(updated.get('token_env', '')):
+                raise ValueError('Network worker needs token_env credentials')
         workers = [w for w in workers if w['id'] != updated['id']] + [updated]
         _write(workers)
         return _public(updated)
 
 def delete_worker(worker_id):
-    with _LOCK:
+    with _locked():
         workers = _read(); remaining = [w for w in workers if w['id'] != worker_id]
         if len(workers) == len(remaining): raise ValueError('Unknown worker')
         _write(remaining)

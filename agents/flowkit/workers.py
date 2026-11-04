@@ -42,8 +42,8 @@ def selection_for(flow, step, configured):
 
 
 def registry():
-    from .fleet_registry import _read
-    entries = {'workers': _read()}
+    from .fleet_registry import _read, _locked
+    with _locked(): entries = {'workers': _read()}
     workers, seen = [], set()
     if not isinstance(entries, dict) or not isinstance(entries.get('workers'), list): raise ValueError('Worker registry needs a workers list')
     for item in entries['workers']:
@@ -64,7 +64,7 @@ def registry():
     return workers
 
 
-async def catalog():
+async def catalog(snapshot=None):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as client:
         async def health(worker):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
@@ -78,13 +78,14 @@ async def catalog():
                     return {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True}
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
                 return {**public, 'online': False}
-        return await asyncio.gather(*(health(w) for w in registry()))
+        return await asyncio.gather(*(health(w) for w in (snapshot if snapshot is not None else registry())))
 
 
 async def choose(wanted):
     wanted = selector(wanted)
-    statuses = {w['id']: w for w in await catalog()}
-    candidates = [w for w in registry() if statuses[w['id']]['online'] and
+    snapshot = registry()
+    statuses = {w['id']: w for w in await catalog(snapshot)}
+    candidates = [w for w in snapshot if statuses[w['id']]['online'] and
                   (not wanted.get('id') or wanted['id'] == w['id']) and
                   (not wanted.get('pool') or wanted['pool'] in w['pools']) and
                   set(wanted.get('tags', [])) <= set(w.get('tags', []))]
