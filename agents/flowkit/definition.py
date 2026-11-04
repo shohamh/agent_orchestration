@@ -43,6 +43,7 @@ class Step:
     kind: str  # program | agent
     needs: list[str] = field(default_factory=list)
     run: str = ""  # program: shell command
+    requires_command: str = ""
     agent: str = "demo"  # agent
     prompt: str = ""  # agent
     review: bool = False  # agent: wait for "Mark done" before the flow continues
@@ -55,6 +56,7 @@ class Step:
         data = {"kind": self.kind, "needs": self.needs, "retries": self.retries, "timeout_minutes": self.timeout_minutes}
         if self.kind == "program":
             data["run"] = self.run
+            if self.requires_command: data["requires_command"] = self.requires_command
         else:
             data.update(agent=self.agent, prompt=self.prompt, review=self.review)
         if self.worker: data['worker'] = self.worker
@@ -135,7 +137,7 @@ def parse(data: Any) -> Flow:
             continue
         kind = raw.get("kind")
         allowed = {"kind", "needs", "retries", "timeout_minutes", "description", "worker"} | (
-            {"run"} if kind == "program" else {"agent", "prompt", "review", "setup"})
+            {"run", "requires_command"} if kind == "program" else {"agent", "prompt", "review", "setup"})
         extra = set(raw) - allowed
         if kind not in ("program", "agent"):
             errors.add(f"{where}: kind must be program or agent", sid, "kind")
@@ -160,6 +162,11 @@ def parse(data: Any) -> Flow:
         except ValueError as exc: errors.add(f'{where}: {exc}', sid, 'worker')
         if kind == "program":
             step.run = raw.get("run")
+            requirement = raw.get("requires_command", "")
+            if not isinstance(requirement, str) or (requirement and (requirement != requirement.strip() or any(c in requirement for c in "\x00\r\n"))):
+                errors.add(f"{where}: requires_command must be an executable name", sid, "requires_command")
+            else:
+                step.requires_command = requirement
             if not isinstance(step.run, str) or not step.run.strip():
                 errors.add(f"{where}: a program step needs a run command", sid, "run")
         else:

@@ -120,6 +120,31 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app['slots'], app['count'], app['stats'] = asyncio.Semaphore(count), count, {'active':0}
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
     app['jobs'] = {}
+    inventory_path = app['root'] / 'capabilities.json'
+    try: app['inventory'] = json.loads(inventory_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError): app['inventory'] = {}
+    async def refresh_inventory(commands=()):
+        from .capabilities import refresh
+        from .restart import atomic_json
+        existing = app['inventory'].get('commands', {})
+        app['inventory'] = await asyncio.to_thread(refresh, app['inventory'], set(existing) | set(commands))
+        await asyncio.to_thread(atomic_json, inventory_path, app['inventory'])
+        return app['inventory']
+    async def inventory(request):
+        from .capabilities import overdue
+        if overdue(app['inventory']): await refresh_inventory()
+        return web.json_response(app['inventory'])
+    async def refresh_capabilities(request):
+        data = await request.json() if request.can_read_body else {}
+        commands = data.get('commands', [])
+        if not isinstance(commands, list) or any(not isinstance(x, str) or len(x) > 260 for x in commands):
+            raise ValueError('commands must be a list of executable names')
+        return web.json_response(await refresh_inventory(commands))
+    async def daily_inventory():
+        while True:
+            await asyncio.sleep(3600)
+            from .capabilities import overdue
+            if overdue(app['inventory']): await refresh_inventory()
     async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active']})
     async def create(request):
         config = await request.json()
@@ -170,8 +195,13 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
                 elif item.task.done() and now-item.last_seen>300:
                     app['jobs'].pop(jid,None)
                     await asyncio.to_thread(shutil.rmtree,app['root']/jid,ignore_errors=True)
-    async def startup(app): app['reaper']=asyncio.create_task(reap())
+    async def startup(app):
+        await refresh_inventory()
+        app['inventory_task'] = asyncio.create_task(daily_inventory())
+        app['reaper']=asyncio.create_task(reap())
     async def cleanup(app):
+        app['inventory_task'].cancel()
+        await asyncio.gather(app['inventory_task'], return_exceptions=True)
         app['reaper'].cancel()
         await asyncio.gather(app['reaper'],return_exceptions=True)
         for item in app['jobs'].values(): item.task.cancel()
@@ -179,6 +209,8 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.on_cleanup.append(cleanup)
     app.on_startup.append(startup)
     app.router.add_get('/health', health)
+    app.router.add_get('/capabilities', inventory)
+    app.router.add_post('/capabilities/refresh', refresh_capabilities)
     app.router.add_post('/jobs', create)
     app.router.add_get('/jobs/{id}', status)
     app.router.add_post('/jobs/{id}/input', receive)
