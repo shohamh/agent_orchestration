@@ -155,18 +155,26 @@ class CapacityGate:
     def _metrics(self,s,now):
         rows=s['samples']
         result={'state':'unknown','cpu_percent':None,'ram_percent':None,'sampled_at':rows[-1][0] if rows else None,
-                'observed_at':time.time(),'window_seconds':10,'ram_basis':'physical total minus available'}
-        if not rows or not 0<=now-rows[-1][0]<=3 or rows[0][0]>rows[-1][0]-10: return result
+                'observed_at':time.time(),'window_seconds':10,'ram_basis':'physical total minus available',
+                # Monotonic age of the newest sample, so readers need no clock agreement with this PC.
+                'sample_age_seconds':now-rows[-1][0] if rows else None}
+        if not rows: return {**result,'reason':'no_samples'}
+        if not 0<=now-rows[-1][0]<=3: return {**result,'reason':'stale'}
+        if rows[0][0]>rows[-1][0]-10: return {**result,'reason':'incomplete_window'}
         end=rows[-1][0]; start=end-10
         totals=[0.,0.]
         for a,b in zip(rows,rows[1:]):
             dt=max(0,b[0]-max(start,a[0]))
             for j in range(2): totals[j]+=b[j+1]*dt
-        result.update(state='known',cpu_percent=totals[0]/10,ram_percent=totals[1]/10)
+        result.update(state='known',reason=None,cpu_percent=totals[0]/10,ram_percent=totals[1]/10)
         return result
 
     def metrics(self):
-        with self.transaction() as db: return self._metrics(self._state(db),self.clock())
+        """The current window plus the enforced settings and the PC-wide reservation count."""
+        with self.transaction() as db:
+            s=self._state(db)
+            return {**self._metrics(s,self.clock()),'settings':s['settings'],
+                    'leases':db.execute('SELECT COUNT(*) FROM leases').fetchone()[0]}
 
     def try_acquire(self,job_id):
         with self.transaction() as db:

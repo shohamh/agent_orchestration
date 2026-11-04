@@ -296,7 +296,8 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
     if 'execution' in body:
         params['flowExecution'] = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
     # A confirmed mismatch blocks launch; offline, busy or unchecked matches launch and wait.
-    launch = await request.app['flow_host'].validate_launch(flow, params.get('flowExecution'))
+    launch = await request.app['flow_host'].validate_launch(flow, params.get('flowExecution'),
+                                                           engine=SYSTEM_ENGINES.get(request.match_info['system']))
     if launch['status'] == 'blocked':
         problems = [f"{sid}: {d['message']} {d['resolution']}" for sid, d in launch['steps'].items() if d['status'] == 'blocked']
         return web.json_response({'error': 'Cannot launch: ' + ' | '.join(problems), 'launch': launch}, status=409)
@@ -314,7 +315,10 @@ async def launch_validate(request: web.Request) -> web.Response:
     execution = None
     if 'execution' in body:
         execution = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
-    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution))
+    system = body.get('system')
+    if system is not None and system not in SYSTEM_ENGINES:
+        raise ValueError('unknown system')
+    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution, engine=SYSTEM_ENGINES.get(system)))
 
 
 async def json_object(request: web.Request) -> dict[str, Any]:
@@ -491,6 +495,95 @@ async def flows_list(request: web.Request) -> web.Response:
 
 async def workers_list(request: web.Request) -> web.Response:
     return web.json_response(await request.app['flow_host'].workers())
+
+
+# ---------------------------------------------------------------- fleet tab
+# The flow host owns the registry and talks to the workers; the board only passes requests on.
+# Its answers are filtered once more here, so a fleet listing in the browser can never carry an
+# endpoint, a token name or a token, whatever a flow host version returns.
+SYSTEM_ENGINES = {'hatchet': 'hatchet', 'prefect': 'prefect', 'trigger-dev': 'trigger', 'trigger': 'trigger'}
+FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
+PUBLIC_WORKER = {'id', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
+                 'status', 'hostname', 'active'}
+PUBLIC_CAPACITY = {'state', 'reason', 'cpu_percent', 'ram_percent', 'sample_age_seconds', 'window_seconds', 'ram_basis',
+                   'leases', 'settings'}
+PUBLIC_RESULT = {'status', 'checked_at', 'auth_status'}
+
+
+def public_inventory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    section = lambda name: {k: {f: v[f] for f in PUBLIC_RESULT if f in v} for k, v in (value.get(name) or {}).items()
+                            if isinstance(k, str) and isinstance(v, dict)} if isinstance(value.get(name), dict) else {}
+    return {'agents': section('agents'), 'commands': section('commands'), 'refreshed_at': value.get('refreshed_at'),
+            'cached': bool(value.get('cached'))}
+
+
+def public_worker(worker: Any) -> dict[str, Any]:
+    if not isinstance(worker, dict):
+        return {}
+    result = {k: worker[k] for k in PUBLIC_WORKER if k in worker}
+    if isinstance(worker.get('capacity'), dict):
+        result['capacity'] = {k: worker['capacity'][k] for k in PUBLIC_CAPACITY if k in worker['capacity']}
+    if 'inventory' in worker:
+        result['inventory'] = public_inventory(worker['inventory'])
+    if isinstance(worker.get('engine_status'), dict):
+        result['engine_status'] = {e: {k: s[k] for k in ('route', 'coordinator', 'connected') if k in s}
+                                   for e, s in worker['engine_status'].items() if isinstance(s, dict)}
+    if isinstance(worker.get('settings_sync'), dict):
+        result['settings_sync'] = {k: str(worker['settings_sync'][k])[:300] for k in ('state', 'message') if k in worker['settings_sync']}
+    return result
+
+
+def fleet_answer(result: tuple[int, Any]) -> web.Response:
+    status, body = result
+    if status < 400 and isinstance(body, dict):
+        body = dict(body)
+        if isinstance(body.get('workers'), list):
+            body['workers'] = [public_worker(w) for w in body['workers']]
+        if 'worker' in body:
+            body['worker'] = public_worker(body['worker'])
+        if 'inventory' in body:
+            body['inventory'] = public_inventory(body['inventory'])
+        if isinstance(body.get('settings_sync'), dict):
+            body['settings_sync'] = public_worker({'settings_sync': body['settings_sync']}).get('settings_sync')
+    return web.json_response(body, status=status)
+
+
+async def fleet_worker_body(request: web.Request) -> dict[str, Any]:
+    body = await json_object(request)
+    unknown = set(body) - FLEET_FIELDS
+    if unknown:
+        raise ValueError('unknown worker fields: ' + ', '.join(sorted(unknown)))
+    return body
+
+
+async def fleet_list(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].fleet())
+
+
+async def fleet_metrics(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].fleet_metrics())
+
+
+async def fleet_tags(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].fleet_tags())
+
+
+async def fleet_add_tag(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].add_fleet_tag(text_field(await json_object(request), 'name', 100)))
+
+
+async def fleet_register(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].register_worker(await fleet_worker_body(request)))
+
+
+async def fleet_update(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
+
+
+async def fleet_refresh(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].refresh_capabilities(request.match_info['worker_id']))
 
 
 async def flows_validate(request: web.Request) -> web.Response:
@@ -713,6 +806,13 @@ def make_app() -> web.Application:
     app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
     app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
     app.router.add_get('/api/workers', workers_list)
+    app.router.add_get('/api/fleet', fleet_list)
+    app.router.add_get('/api/fleet/metrics', fleet_metrics)
+    app.router.add_get('/api/fleet/tags', fleet_tags)
+    app.router.add_post('/api/fleet/tags', fleet_add_tag)
+    app.router.add_post('/api/fleet/workers', fleet_register)
+    app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
+    app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)
     app.router.add_post('/api/launch/validate', launch_validate)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)

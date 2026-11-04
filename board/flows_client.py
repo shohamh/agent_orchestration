@@ -126,9 +126,32 @@ class FlowHost:
         # The definition text avoids re-expanding a synthesized setup step.
         return flow.get('yaml') or {k: v for k, v in flow.items() if k not in ('yaml', 'environment', 'revision')}
 
-    async def validate_launch(self, flow, execution=None):
-        body = {'flow': self._definition(flow), **({'execution': execution} if execution is not None else {})}
+    async def validate_launch(self, flow, execution=None, engine=None):
+        body = {'flow': self._definition(flow), **({'execution': execution} if execution is not None else {}),
+                **({'engine': engine} if engine else {})}
         return await self._request('POST', '/launch/validate', body, timeout=30)
+
+    # Fleet management (the board's fleet tab). Each returns (HTTP status, body) for pass-through.
+    async def fleet(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet', timeout=30)
+
+    async def fleet_metrics(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet/metrics')
+
+    async def fleet_tags(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet/tags')
+
+    async def add_fleet_tag(self, name: str) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/tags', {'name': name})
+
+    async def register_worker(self, worker: dict) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/workers', worker, timeout=30)
+
+    async def update_worker(self, worker_id: str, worker: dict) -> tuple[int, Any]:
+        return await self._call('PUT', f'/fleet/workers/{quote(worker_id, safe="")}', worker, timeout=30)
+
+    async def refresh_capabilities(self, worker_id: str) -> tuple[int, Any]:
+        return await self._call('POST', f'/fleet/workers/{quote(worker_id, safe="")}/capabilities/refresh', {}, timeout=90)
 
     async def execution(self, run_id):
         return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']

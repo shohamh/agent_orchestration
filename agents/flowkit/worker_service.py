@@ -296,6 +296,20 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             from .capabilities import overdue
             if overdue(app['inventory']): await refresh_inventory()
     async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': await capacity_call(app['capacity'].metrics)})
+    async def configure(request):
+        """The coordinator's registry pushes this PC's admission limits. Only limits are accepted;
+        they apply to future admissions, never to running work (the gate reads them per admission)."""
+        try: data = await request.json()
+        except (ValueError, UnicodeDecodeError): raise ValueError('Invalid JSON body') from None
+        number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+        if not isinstance(data, dict) or set(data) != {'slots', 'cpu_limit', 'ram_limit'}:
+            raise ValueError('Body must contain exactly slots, cpu_limit and ram_limit')
+        if not isinstance(data['slots'], int) or isinstance(data['slots'], bool) or not 1 <= data['slots'] <= 100:
+            raise ValueError('slots must be a whole number from 1 to 100')
+        if not all(number(data[k]) and 0 < data[k] <= 100 for k in ('cpu_limit', 'ram_limit')):
+            raise ValueError('cpu_limit and ram_limit must be percentages above 0 and at most 100')
+        await capacity_call(lambda: app['capacity'].configure(**data))
+        return web.json_response({'settings': (await capacity_call(app['capacity'].metrics))['settings']})
     async def create(request):
         config = await request.json()
         job_id = str(uuid.UUID(config['id']))
@@ -393,6 +407,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.router.add_get('/health', health)
     app.router.add_get('/capabilities', inventory)
     app.router.add_post('/capabilities/refresh', refresh_capabilities)
+    app.router.add_post('/capacity/settings', configure)
     app.router.add_post('/jobs', create)
     app.router.add_get('/jobs/{id}', status)
     app.router.add_post('/jobs/{id}/input', receive)

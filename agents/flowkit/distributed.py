@@ -10,7 +10,7 @@ import aiohttp
 from .artifacts import ancestor_files, snapshot, publish
 from .definition import FLOWS_DIR
 from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, pin_definition, publication_lock
-from .fleet_matching import requirements_for, validate_launch
+from .fleet_matching import requirements_for, validate_launch, with_engine
 from .workers import fleet_status, routing, selection_for, selector
 
 PLACEMENT_POLL = 2.0  # seconds between placement checks while a step waits for a worker
@@ -96,12 +96,12 @@ async def wait_for_worker(requirements, record):
         await asyncio.sleep(PLACEMENT_POLL)
 
 
-async def validate_flow_launch(flow, configured=None):
+async def validate_flow_launch(flow, configured=None, engine=None):
     """Launch check for every step that the fleet places: blocked, wait or ready."""
     if not uses_fleet(flow, configured):
         return {'status': 'ready', 'fleet': False, 'steps': {}}
     routes = routing(configured or {}, flow.steps)
-    needs = {sid: requirements_for(flow, sid, routes) for sid in flow.steps}
+    needs = {sid: with_engine(requirements_for(flow, sid, routes), engine) for sid in flow.steps}
     public, _ = await fleet_status(list(needs.values()))
     steps = {sid: validate_launch(req, public) for sid, req in needs.items()}
     states = {d['status'] for d in steps.values()}
@@ -126,7 +126,7 @@ async def execute_step(flow, step_id, context, run_id, receive, sink, engine=Non
     wanted = selection_for(flow,step_id,configured)
     override = root/'.flow-selections'/f'{step_id}.json'
     if override.exists(): wanted = json.loads(override.read_text(encoding='utf-8'))
-    requirements = requirements_for(flow, step_id, selection=wanted)
+    requirements = with_engine(requirements_for(flow, step_id, selection=wanted), engine)
     if requirements.get('ambiguous_command'):
         raise ValueError(f'Step {step_id}: the program executable cannot be determined safely; declare requires_command')
     before = await asyncio.to_thread(ancestor_files, flow, step_id, root)
@@ -162,7 +162,7 @@ async def execute_session(config, run_id, receive, sink, engine=None):
     if not wanted:
         from agentdriver.session import run_session
         return await run_session(config, receive, sink)
-    requirements = card_requirements(config, wanted)
+    requirements = with_engine(card_requirements(config, wanted), engine)
     root = workspace_path(run_id)
     root.mkdir(parents=True, exist_ok=True)
     payload = {'files': {}, 'assets': {}, 'start': {'session': config, 'runId': run_id}}

@@ -1,6 +1,8 @@
 """Trusted execution-worker registry; public catalog deliberately omits URLs and tokens."""
 import asyncio
+import json
 import os
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -9,6 +11,7 @@ import yaml
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[2]
+_CACHE_LOCK = threading.Lock()  # the flow host serves requests on threads
 
 
 def selector(value):
@@ -65,23 +68,148 @@ def registry():
     return workers
 
 
+class _Mismatch(ValueError):
+    pass
+
+
+def limits(worker):
+    """The registry's admission limits for a worker: the only settings pushed to its gate."""
+    return {k: worker.get(k, default) for k, default in (('slots', 1), ('cpu_limit', 90), ('ram_limit', 90))}
+
+
+async def push_limits(client, worker, capacity):
+    """Bring a connected worker's capacity gate in line with the registry. The gate applies
+    limits to future admissions only; running work is never interrupted."""
+    wanted = limits(worker)
+    if isinstance(capacity, dict) and capacity.get('settings') == wanted:
+        return {'state': 'applied'}
+    try:
+        async with client.post(worker['url'] + '/capacity/settings', json=wanted, headers=worker['_headers']) as response:
+            if response.status == 404:
+                return {'state': 'unsupported', 'message': 'This execution service is older than limit settings; update it on the PC'}
+            data = await response.json(content_type=None)
+            if response.status != 200:
+                return {'state': 'failed', 'message': str((data or {}).get('error') or f'status {response.status}')[:300]}
+        if isinstance(capacity, dict): capacity['settings'] = wanted
+        return {'state': 'applied'}
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return {'state': 'failed', 'message': 'The worker did not accept the limits; retried on the next check'}
+
+
 async def catalog(snapshot=None):
+    """Sanitized registry entries with verified online state. `status` is online,
+    awaiting_connection (no endpoint yet), credentials_unavailable, unauthorized,
+    identity_mismatch or unreachable. Connected workers get the registry limits pushed when
+    their gate reports different ones (on connect, reconnect or after a registry save)."""
+    from .fleet_registry import ENGINES
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as client:
         async def health(worker):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
-            public.update({'pool': worker['pools'][0], 'engines': {}})
+            public.update({'pool': worker['pools'][0], 'engines': list(worker.get('engines') or ENGINES),
+                           'connection': 'configured' if worker.get('url') else 'awaiting'})
+            pending = {'settings_sync': {'state': 'pending'}}
             try:
-                if worker.get('_error'): return {**public, 'online': False, 'reason': worker['_error']}
-                if not worker.get('url'): return {**public, 'online': False}
+                if worker.get('_error'): return {**public, 'online': False, 'reason': worker['_error'], 'status': 'credentials_unavailable', **pending}
+                if not worker.get('url'): return {**public, 'online': False, 'status': 'awaiting_connection', **pending}
                 async with client.get(worker['url'] + '/health', headers=worker['_headers']) as response:
+                    if response.status in (401, 403):
+                        return {**public, 'online': False, 'status': 'unauthorized', **pending}
                     data = await response.json()
-                    if response.status != 200 or data.get('id') != worker['id']: raise ValueError('Worker identity mismatch')
+                    if response.status != 200: raise ValueError('Worker health failed')
+                    if data.get('id') != worker['id']: raise _Mismatch('Worker identity mismatch')
                     # Registry settings are authoritative; legacy worker-reported pool and tags are informational.
-                    return {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True,
-                            **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {})}
+                    result = {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True, 'status': 'online',
+                              **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {})}
+                result['settings_sync'] = await push_limits(client, worker, result.get('capacity'))
+                return result
+            except _Mismatch:
+                return {**public, 'online': False, 'status': 'identity_mismatch', **pending}
             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
-                return {**public, 'online': False}
+                return {**public, 'online': False, 'status': 'unreachable', **pending}
         return await asyncio.gather(*(health(w) for w in (snapshot if snapshot is not None else registry())))
+
+
+async def sync_limits(worker_id):
+    """After a registry save: verify the worker's identity, then push its limits if it is connected."""
+    entry = next((w for w in registry() if w['id'] == worker_id), None)
+    if entry is None: return {'state': 'pending'}
+    return (await catalog([entry]))[0]['settings_sync']
+
+
+def _cache_path():
+    from .fleet_registry import _path
+    return Path(str(_path()) + '.inventory.json')
+
+
+def _cached_inventory():
+    try:
+        data = json.loads(_cache_path().read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def remember_inventory(worker_id, inventory):
+    """Keep the last sanitized capability results so an offline PC still shows when it was checked."""
+    from .fleet_registry import _read
+    from .restart import atomic_json
+    try:
+        with _CACHE_LOCK:
+            known = {w['id'] for w in _read()}
+            cache = {k: v for k, v in _cached_inventory().items() if k in known}
+            cache[worker_id] = {k: v for k, v in inventory.items() if k != 'cached'}
+            atomic_json(_cache_path(), cache)
+    except (OSError, ValueError):
+        pass  # a read-only registry folder only loses the offline history
+
+
+def engine_status(worker, engine, coordinators):
+    """Every engine reaches the PC through its execution service (native placement is not
+    enabled): connected when the PC is online and that engine's coordinator worker is up."""
+    coordinator = (coordinators or {}).get(engine, 'unknown')
+    connected = bool(worker.get('online')) and coordinator not in ('stopped', 'not_enabled')
+    return {'route': 'shared_service', 'coordinator': coordinator, 'connected': connected}
+
+
+async def fleet_view(coordinators=None, inventory=True):
+    """The board's fleet listing: sanitized workers with online state, live capacity, limits
+    sync, per-engine status and (unless only metrics are wanted) capability results, the last
+    known ones when a PC is offline. Never endpoints, token names or tokens."""
+    from .fleet_registry import ENGINES, tag_catalog
+    if inventory:
+        public, _ = await fleet_status()
+        cache = _cached_inventory()
+    else:
+        public = await catalog()
+    for worker in public:
+        worker.pop('reason', None)  # status carries it as a code
+        worker['engine_status'] = {e: engine_status(worker, e, coordinators) for e in worker['engines']}
+        if not inventory: continue
+        if 'inventory' in worker:
+            worker['inventory'] = {**worker['inventory'], 'cached': False}
+            remember_inventory(worker['id'], worker['inventory'])
+        elif isinstance(cache.get(worker['id']), dict):
+            worker['inventory'] = {**_sanitized_inventory(cache[worker['id']]), 'cached': True}
+    result = {'workers': public, 'engines': list(ENGINES)}
+    if inventory:
+        result.update(tags=tag_catalog(), pools=sorted({p for w in public for p in w['pools']}))
+    return result
+
+
+async def refresh_capabilities(worker_id):
+    """Run a capability check on one connected worker now; returns the sanitized inventory."""
+    entry = next((w for w in registry() if w['id'] == worker_id), None)
+    if entry is None: raise LookupError(f'Unknown worker {worker_id}')
+    status = (await catalog([entry]))[0]
+    if not status['online']:
+        raise ConnectionError(f'{worker_id} is not connected ({status["status"].replace("_", " ")}); '
+                              'its capabilities are checked when it connects')
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as client:
+        async with client.post(entry['url'] + '/capabilities/refresh', json={'commands': []}, headers=entry['_headers']) as response:
+            if response.status != 200: raise ConnectionError(f'{worker_id} could not refresh its capabilities (status {response.status})')
+            inventory = _sanitized_inventory(await response.json())
+    remember_inventory(worker_id, inventory)
+    return {**inventory, 'cached': False}
 
 
 async def choose(wanted):

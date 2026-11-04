@@ -295,8 +295,9 @@ class SharedGateTests(ServiceFixture):
         now = time.monotonic()
         for i in range(11): gate.observe(1, 1, now - 10 + i)
         app, server = await self.service('pc-a', slots=4, gate=gate)
-        # The registry claims two slots; the worker's gate is authoritative and admits one.
-        write_registry(self.registry, [('pc-a', server.make_url(''), ['pools: [build]', 'slots: 2'])])
+        # The registry's one slot is pushed to the PC's gate, which enforces it across engines
+        # (the service itself would run four jobs at once).
+        write_registry(self.registry, [('pc-a', server.make_url(''), ['pools: [build]', 'slots: 1'])])
         inbox, card_events = asyncio.Queue(), []
         card = asyncio.create_task(execute_session({'goal': 'hold the slot', 'agent': 'demo', 'worker': {'id': 'pc-a'}}, 'gate-card',
                                                    inbox.get, responder(inbox, card_events, finish=False), engine='prefect'))

@@ -3,7 +3,8 @@ verified absence: only a fresh `absent` result or a selection mismatch makes a w
 
 A requirement object is a worker selector (`id`, `pool`, `tags`) plus the step's detected
 software (`agent` or `command`), or `ambiguous_command` when a program's executable cannot be
-determined safely. Worker objects are the sanitized fleet entries (no URL or credentials) with
+determined safely, and `engine` when the engine running the task is known: a worker serves only
+the engines registered for it (legacy entries without `engines` serve every engine). Worker objects are the sanitized fleet entries (no URL or credentials) with
 `online`, `active`, `capacity` and `inventory` where known.
 """
 from datetime import datetime, timezone
@@ -19,6 +20,12 @@ RESOLUTIONS = {
     'software_absent': 'Install the required software on a matching worker, then refresh its capabilities.',
     'ambiguous_command': 'Add requires_command with the executable this program step runs.',
 }
+ENGINE_LABELS = {'hatchet': 'Hatchet', 'prefect': 'Prefect', 'trigger': 'Trigger.dev'}
+
+
+def with_engine(requirements, engine):
+    """The requirement object for a task that a known engine runs."""
+    return {**requirements, 'engine': engine} if engine else dict(requirements)
 
 
 def software_requirement(step):
@@ -92,6 +99,9 @@ def match_worker(worker, requirements, now=None):
         incompatible.append(_reason('tags', f"{wid} lacks tags: {', '.join(missing)}", missing=missing))
     if requirements.get('ambiguous_command'):
         incompatible.append(_reason('ambiguous_command', 'The program executable cannot be determined safely'))
+    engine, engines = requirements.get('engine'), worker.get('engines')
+    if engine and isinstance(engines, list) and engine not in engines:
+        incompatible.append(_reason('engine', f'{wid} is not registered for {ENGINE_LABELS.get(engine, engine)}', engine=engine))
     for kind in ('agent', 'command'):
         name = requirements.get(kind)
         if not name: continue
@@ -133,6 +143,9 @@ def _resolution(code, requirements):
     if code == 'tags':
         where = f" in pool {requirements['pool']}" if requirements.get('pool') else ''
         return f'Add the missing tags to a worker{where}, or remove them from the requirement.'
+    if code == 'engine':
+        label = ENGINE_LABELS.get(requirements.get('engine'), requirements.get('engine'))
+        return f'Add {label} to a matching worker in the fleet tab, or run this on an engine the worker serves.'
     return RESOLUTIONS.get(code)
 
 
