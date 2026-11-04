@@ -8,12 +8,16 @@ from typing import Any
 
 
 class InputInbox:
-    """Poll a run's persisted input events, preserving order and avoiding redelivery."""
-    def __init__(self, events: Any, run_id: str) -> None:
+    """Poll a run's persisted input events, preserving order and avoiding redelivery.
+
+    `since` drops events created before it: a replayed task keeps its id, so without it a restarted
+    step would receive (and act on) everything sent to its earlier attempts."""
+    def __init__(self, events: Any, run_id: str, since: datetime | None = None) -> None:
         self.events, self.run_id = events, run_id
         self.queue: asyncio.Queue[dict] = asyncio.Queue()
         self.seen: set[str] = set()
-        self.since: datetime | None = None
+        self.start = since
+        self.since: datetime | None = since
 
     async def poll(self) -> None:
         rows, offset = [], 0
@@ -30,11 +34,15 @@ class InputInbox:
             if event.metadata.id in self.seen:
                 continue
             self.seen.add(event.metadata.id)
+            if self.start and event.metadata.created_at < self.start:
+                continue
             if isinstance(event.payload, dict):
                 self.queue.put_nowait(event.payload)
         if rows:
             # Inclusive overlap tolerates events sharing timestamps and late visibility.
             self.since = max(event.metadata.created_at for event in rows) - timedelta(seconds=1)
+            if self.start:
+                self.since = max(self.since, self.start)
 
     async def receive(self) -> dict:
         while self.queue.empty():

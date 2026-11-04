@@ -14,7 +14,7 @@ when a flow is activated; it loads the active snapshots, see flowkit/activation.
 import json
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +45,8 @@ def build_workflow(hatchet: Any, flow: Flow) -> Any:
         def make(step=step):
             async def run(payload: Any, ctx: Context) -> dict:
                 outputs = {need: ctx.task_output(tasks[need])["output"] for need in step.needs}
-                inbox = InputInbox(hatchet.event, ctx.step_run_id)
+                # A restart replays this task under the same id; only this attempt's input counts.
+                inbox = InputInbox(hatchet.event, ctx.step_run_id, since=datetime.now(timezone.utc))
 
                 async def sink(event: dict) -> None:
                     await ctx.aio_log("EVT " + json.dumps(event, ensure_ascii=False), raise_on_error=True)
