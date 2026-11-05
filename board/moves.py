@@ -63,12 +63,12 @@ def moves_for(card: Card) -> dict[str, str]:
     return moves
 
 
-def annotate(cards: list[Card]) -> list[Card]:
-    """Fill each card's moves and reorder mode, and sort every column top = runs first / newest."""
+def annotate(cards: list[Card], *, sort: bool = True) -> list[Card]:
+    """Fill each card's moves and reorder mode; optionally return cards in display order."""
     for card in cards:
         card.moves = moves_for(card)
         card.reorder, card.reorder_note = REORDER.get(card.system, (None, None))
-    return sorted(cards, key=_position)
+    return sorted(cards, key=_position) if sort else cards
 
 
 def _position(card: Card) -> tuple:

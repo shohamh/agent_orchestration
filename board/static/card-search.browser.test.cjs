@@ -27,7 +27,11 @@ test('the filter box, hide finished and column paging work on a live board', { t
     if (url.pathname === '/api/live') {
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
       response.write(`data: ${JSON.stringify({ type: 'feed', live: true })}\n\n`);
-      response.write(`data: ${JSON.stringify({ type: 'cards', reset: true, cards: CARDS })}\n\n`);
+      const fields = [...new Set(CARDS.flatMap((card) => Object.keys(card)))];
+      const message = url.searchParams.get('compact') === '1'
+        ? { type: 'cards', reset: true, fields, rows: CARDS.map((card) => fields.map((key) => card[key] ?? null)) }
+        : { type: 'cards', reset: true, cards: CARDS };
+      response.write(`data: ${JSON.stringify(message)}\n\n`);
       return;
     }
     response.setHeader('Content-Type', 'application/json');
@@ -126,11 +130,25 @@ test('the filter box, hide finished and column paging work on a live board', { t
     assert.deepEqual((await ids()).sort(), ['q1', 'r1']);
     await evaluate(`document.getElementById('hide-finished').click()`);
 
+    // The next page loads when its sentinel is scrolled into view, including on narrow screens.
+    for (const width of [1440, 390]) {
+      await call('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: width < 700 });
+      await search('');
+      await waitFor(`document.querySelector('[data-col="done"] .show-more')`);
+      await evaluate(`document.querySelector('[data-col="done"] .show-more').scrollIntoView()`);
+      await waitFor(`document.querySelector('[data-col="done"]').querySelectorAll('.card').length >= 100`);
+    }
+
     // The drawer shows the run's input and its execution workers.
     await evaluate(`document.querySelector('[data-id="r1"]').click()`);
     await waitFor(`document.getElementById('drawer').classList.contains('open')`);
     assert.match(await evaluate(`document.getElementById('d-input').textContent`), /compare schedulers/);
     assert.match(await evaluate(`document.getElementById('d-facts').textContent`), /fetch: gpu-02 · pool gpu · cuda/);
+    await evaluate(`document.getElementById('d-close').click(); onLive({ type: 'cards', reset: true, cards: [
+      { id: 'newer', column: 'running', title: 'Newer', task: 't', system: 'hatchet', status: 'RUNNING', created_at: '2026-01-02', started_at: '2026-01-03', moves: {} },
+      { id: 'older', column: 'running', title: 'Older', task: 't', system: 'hatchet', status: 'RUNNING', created_at: '2026-01-01', started_at: '2026-01-03', moves: {} }
+    ] })`);
+    assert.deepEqual(await ids(), ['older', 'newer'], 'equal start times retain the created-time tie break');
     assert.deepEqual(errors, []);
   } finally {
     socket?.close();

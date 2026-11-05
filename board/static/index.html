@@ -325,15 +325,15 @@ function renderHeader() {
 // compare correctly as plain strings (and far faster than localeCompare on big boards).
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 function columnOrder(a, b) {
-  if (["queued", "scheduled"].includes(a.column)) return (a.order ?? 0) - (b.order ?? 0) || cmp(a.created_at || "", b.created_at || "");
-  if (["running", "waiting"].includes(a.column)) return cmp(a.started_at || a.created_at || "", b.started_at || b.created_at || "");
-  return cmp(b.finished_at || b.created_at || "", a.finished_at || a.created_at || "");
+  if (a.column === "queued" || a.column === "scheduled") return (a.order ?? 0) - (b.order ?? 0) || cmp(a.created_at || "", b.created_at || "");
+  if (a.column === "running" || a.column === "waiting") return cmp(a.started_at || a.created_at || "", b.started_at || b.created_at || "") || cmp(a.created_at || "", b.created_at || "");
+  return cmp(b.finished_at || b.created_at || "", a.finished_at || a.created_at || "") || cmp(a.created_at || "", b.created_at || "");
 }
 
 // ---------------------------------------------------------------- Filtering
 // The search box filters with CardSearch (card-search.js); "Hide done / failed" empties those
-// columns but keeps them as drop targets. Columns render PAGE cards at a time, so a board of
-// thousands of runs stays responsive.
+// columns but keeps them as drop targets. Search covers every card; only the rendering is paged:
+// columns render PAGE cards at a time, so a board of thousands of runs stays responsive.
 const PAGE = 50;
 const FLIP_MAX = 300;          // above this many cards on screen, skip the glide animation
 const FINISHED = new Set(["done", "stopped"]);
@@ -386,14 +386,43 @@ function renderBoard() {
     renderedCount += shown.length;
     const rest = inCol.length - shown.length;
     const count = query ? `${inCol.length} / ${total[col]}` : String(inCol.length);
-    const more = !hidden && rest > 0 ? el("button", { type: "button", class: "secondary show-more", onclick: () => {
-      shownLimit[col] = (shownLimit[col] || PAGE) + PAGE; renderBoard(); } }, `Show ${Math.min(PAGE, rest)} more · ${rest} not shown`) : null;
+    sortedColumns[col] = hidden ? [] : inCol;
+    const more = !hidden && rest > 0 ? moreButton(col, rest) : null;
     const note = hidden && inCol.length ? el("div", { class: "hidden-note" }, `${inCol.length} hidden`)
       : !inCol.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : "—") : null;
     return el("section", { class: shown.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
       el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, count)), ...shown.map(cardNode), more, note);
   }));
   if (renderedCount <= FLIP_MAX) flip(before);
+  moreObserver?.disconnect();
+  document.querySelectorAll("#columns .show-more").forEach((b) => moreObserver?.observe(b));
+}
+
+// Scrolling near the end of a column loads its next page; the button remains a fallback.
+const sortedColumns = {};      // column -> its filtered, sorted cards as last rendered
+const moreObserver = typeof IntersectionObserver === "function" ? new IntersectionObserver((entries) => {
+  for (const entry of entries) if (entry.isIntersecting) loadMore(entry.target.dataset.col);
+}, { rootMargin: "0px 0px 800px 0px" }) : null;
+
+function moreButton(col, rest) {
+  return el("button", { type: "button", class: "secondary show-more", "data-col": col, onclick: () => loadMore(col) },
+    `Show ${Math.min(PAGE, rest)} more · ${rest} not shown`);
+}
+
+// Appends the column's next page in place: no re-render of the board.
+function loadMore(col) {
+  const list = sortedColumns[col], button = document.querySelector(`#columns .show-more[data-col="${col}"]`);
+  if (drag || !list || !button) return;
+  const from = shownLimit[col] || PAGE, to = Math.min(from + PAGE, list.length);
+  shownLimit[col] = from + PAGE;
+  button.before(...list.slice(from, to).map(cardNode));
+  renderedCount += to - from;
+  moreObserver?.unobserve(button);
+  if (to < list.length) {
+    const next = moreButton(col, list.length - to);
+    button.replaceWith(next);
+    moreObserver?.observe(next);
+  } else button.remove();
 }
 
 $("hide-finished").checked = hideFinished;
@@ -1017,7 +1046,7 @@ function refresh() {
   live?.source.close();
   clearTimeout(retryTimer);
   const card = openCardId, context = contextKey();
-  const params = new URLSearchParams({ system, board });
+  const params = new URLSearchParams({ system, board, compact: "1" });
   if (card) params.set("card", card);
   const node = selectedStep();
   if (card && node?.ref && node.kind) { params.set("node", node.ref); params.set("kind", node.kind); }
@@ -1060,12 +1089,18 @@ function onLive(message) {
   if (message.type === "lines") { if (message.card === openCardId && cardLog.state.id === message.card) cardLog.apply(message); return; }
   if (message.type !== "cards") return;
   const before = cards.find((c) => c.id === openCardId);
-  if (message.reset) cards = message.cards;
+  if (message.reset) {
+    if (message.cards) cards = message.cards;
+    else cards = message.rows.map((row) => {
+      const card = {};
+      for (let i = 0; i < message.fields.length; i++) card[message.fields[i]] = row[i];
+      return card;
+    });
+  }
   else {
     const changed = new Map(message.upsert.map((c) => [c.id, c])), removed = new Set(message.remove);
     cards = [...cards.filter((c) => !changed.has(c.id) && !removed.has(c.id)), ...changed.values()];
   }
-  cards.sort((a, b) => cmp(a.created_at || "", b.created_at || ""));
   renderBoard();
   indexSoon();
   if (pendingOpen && cards.some((c) => c.id === pendingOpen)) { const id = pendingOpen; pendingOpen = null; openCard(id); }

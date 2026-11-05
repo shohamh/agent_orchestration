@@ -121,8 +121,9 @@ failed** empties those two columns but keeps them as drop targets; the choice is
 
 ## Big boards
 
-Columns show 50 cards at a time, with **Show more** for the rest, so the page stays responsive however
-many runs a board has. Off-screen cards skip layout and paint, unchanged cards keep their elements
+Columns initially show 50 cards at a time and load more as you scroll near the end. The **Show more**
+button remains available for keyboard use and browsers without intersection observers. Search covers
+all cards received from the backend, including cards that have not been rendered yet. Off-screen cards skip layout and paint, unchanged cards keep their elements
 between updates, and the glide animation is skipped when more than 300 cards are on screen.
 
 To try it, start a copy of the board with a synthetic backend (`loadtest_adapter.py`) and open the
@@ -133,10 +134,24 @@ To try it, start a copy of the board with a synthetic backend (`loadtest_adapter
 BOARD_LOADTEST_CARDS=10000 BOARD_HOST=127.0.0.1 BOARD_PORT=8097 python board/server.py
 ```
 
-`node board/loadtest_ui.cjs 1000,5000,10000,20000` measures the same in headless Chrome at each size.
-Measured on 2026-11-05 (headless Chrome, software rendering, on the worker PC while its stacks ran):
+`node board/loadtest_ui.cjs 1000,5000,10000,20000` measures the same in headless Chrome at each size;
+add `--compare=<git-ref>` to test the older HTML against the same current server and synthetic data.
+For example, a 10,000-card comparison against `93c9411` on 2026-11-05 did not observe the old
+page's card elements before a 30-second browser-call timeout. The current page reached that state in
+3.3 seconds; search keystrokes took a median 107 ms (worst 142 ms) to the next frame, and 20 scroll
+loads had a median of 181 ms (worst 323 ms). These are single headless runs on the same machine,
+using the current backend for both pages; card-ready time is a DOM measurement, not paint timing.
 
-| Cards | Snapshot sent to the browser | First paint (cold board) | Main thread busy with live updates | Search keystroke, median (worst) | Hide done / failed | JS heap |
+Subsequent optimizations remove a redundant server sort, skip the initial event debounce, and send
+an opt-in compact snapshot to current browser clients. A 10,000-card full run sent 6.3 MB and
+reached the first complete render at about 1.06 s on a warmed board; search keystrokes were 71 ms
+median (107 ms worst). Later cold-start samples took about 1.5 to 3.2 s, with a 5.5 s outlier under
+heavy machine load, so sub-second cold startup has not been established. `--startup-only --cold` measures startup without
+warming the board; `--legacy-snapshot` uses the old wire format for comparison.
+
+Earlier measurements on 2026-11-05 (headless Chrome, software rendering, on the worker PC while its stacks ran):
+
+| Cards | Snapshot sent to the browser | Cards ready | Time in long tasks during live updates | Search keystroke, median (worst) | Hide done / failed | JS heap |
 |---|---|---|---|---|---|---|
 | 1,000 | 0.9 MB | 1.5 s | 1% | 42 ms (85 ms) | 25–31 ms | 4 MB |
 | 5,000 | 4.6 MB | 1.7 s | 0% | 46 ms (97 ms) | 51–57 ms | 10 MB |

@@ -49,6 +49,13 @@ class MovesTests(unittest.TestCase):
         self.assertEqual(ordered, ["q2", "q1", "d2", "d1"])
         self.assertEqual(q1.reorder, "coarse")
 
+    def test_annotation_can_preserve_input_order_when_caller_sorts_columns(self):
+        cards = [card("done", id="d"), card("queued", id="q", order=1)]
+        result = moves.annotate(cards, sort=False)
+        self.assertEqual([c.id for c in result], ["d", "q"])
+        self.assertEqual(cards[0].moves, {"queued": "restart"})
+        self.assertEqual(cards[1].moves, {"queued": "reorder", "stopped": "cancel"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -152,7 +152,8 @@ class BoardWatcher:
                 try:
                     await asyncio.wait_for(self.event.wait(), max(0.05, timeout))
                     woke = True
-                    await asyncio.sleep(DEBOUNCE)
+                    if self.cards is not None:
+                        await asyncio.sleep(DEBOUNCE)
                 except asyncio.TimeoutError:
                     woke = False
                 self.event.clear()

@@ -111,7 +111,7 @@ async def label_flows(app: web.Application, cards: list[Any]) -> None:
     for card in cards:
         card.flow = flow_for_task(card.task, flows)
         card.backend_url = backend_url(card.system, card.id, tenant=tenant_id(app['adapters'].get(card.system)))
-    moves.annotate(cards)  # drag-and-drop targets per card; the UI sorts columns by card.order
+    moves.annotate(cards, sort=False)  # the UI sorts each column; no need to sort here too
     await label_workers(app, [c for c in cards if c.flow])
 
 
@@ -186,6 +186,12 @@ async def live(request: web.Request) -> web.StreamResponse:
                 continue
             if message is None:
                 break
+            if request.query.get("compact") == "1" and message.get("type") == "cards" and message.get("reset"):
+                cards = message["cards"]
+                fields = tuple(cards[0]) if cards else ()
+                if all(tuple(card) == fields for card in cards):
+                    message = {"type": "cards", "reset": True, "fields": fields,
+                               "rows": [list(card.values()) for card in cards]}
             await response.write(f"data: {json.dumps(message, ensure_ascii=False, default=str)}\n\n".encode())
     except (ConnectionResetError, asyncio.CancelledError):
         pass

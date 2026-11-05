@@ -109,6 +109,12 @@ async def next_message(sub, kind):
 
 
 class Hub(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_snapshot_does_not_wait_for_event_debounce(self):
+        with patch.object(live, 'DEBOUNCE', 2):
+            _, sub = self.hub.subscribe('fake', 'b', None)
+            message = await asyncio.wait_for(next_message(sub, 'cards'), 1)
+            self.assertEqual(len(message['cards']), 2)
+
     async def test_open_card_logs_do_not_wait_for_other_cards_to_load(self):
         """An open card's results should arrive while the board's full refresh is slow."""
         started, release = asyncio.Event(), asyncio.Event()
@@ -296,6 +302,20 @@ class Routes(unittest.IsolatedAsyncioTestCase):
                 messages.append(json.loads(line[6:]))
         response.close()
         self.assertEqual(len(next(m for m in messages if m['type'] == 'cards')['cards']), 2)
+
+    async def test_compact_snapshot_round_trips_every_card_field(self):
+        response = await self.client.get('/api/live?system=fake&board=b&compact=1')
+        while True:
+            line = (await asyncio.wait_for(response.content.readline(), 5)).decode()
+            if line.startswith('data: '):
+                message = json.loads(line[6:])
+                if message['type'] == 'cards':
+                    break
+        response.close()
+        self.assertTrue(message['reset'])
+        cards = [dict(zip(message['fields'], row)) for row in message['rows']]
+        watcher = self.client.app['hub'].watchers[('fake', 'b')]
+        self.assertEqual(cards, list(watcher.cards.values()))
 
 
 if __name__ == '__main__':
