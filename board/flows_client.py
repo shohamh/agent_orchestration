@@ -24,6 +24,7 @@ class FlowHost:
         self._session: aiohttp.ClientSession | None = None
         self._cache: tuple[float, dict[str, Any]] | None = None
         self._down_until = 0.0
+        self._executions: dict[str, dict[str, Any]] = {}  # run id -> {step: execution}, see executions()
 
     async def _request(self, method: str, path: str, body: Any = None, timeout: float = 10) -> Any:
         status, data = await self._call(method, path, body, timeout)
@@ -123,6 +124,21 @@ class FlowHost:
 
     async def execution(self, run_id):
         return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']
+
+    async def executions(self, runs: dict[str, bool]) -> dict[str, dict[str, Any]]:
+        """{run id: {step: execution}} for many runs ({run id: finished}). A finished run's workers
+        don't change, so it is read once; failures leave the run out (or at its last answer)."""
+        limit = asyncio.Semaphore(8)
+
+        async def read(run_id: str) -> None:
+            async with limit:
+                try:
+                    self._executions[run_id] = await self.execution(run_id)
+                except Exception:
+                    pass
+        if self._down_until <= time.monotonic():
+            await asyncio.gather(*(read(r) for r, final in runs.items() if not (final and r in self._executions)))
+        return {r: self._executions[r] for r in runs if r in self._executions}
 
     async def set_selection(self, run_id, step, worker):
         return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', {'step': step, 'worker': worker})

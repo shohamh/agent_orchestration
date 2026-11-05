@@ -182,6 +182,7 @@ class PrefectAdapter:
             created_at=run.get("created"),
             started_at=run.get("start_time"),
             finished_at=run.get("end_time"),
+            input=params or None,
             error=state.get("message") if column == "stopped" else None,
             steerable=task in ("steerable-agent", "agent-session") and not is_final(column),
             agent=params.get("agent"),

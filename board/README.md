@@ -94,6 +94,63 @@ The rules are in `moves.py`; the server checks them again before acting.
 - The priority the board chose is kept in the run's metadata (`priority`), because neither Hatchet's
   nor Trigger.dev's run list reports it.
 
+## Filtering
+
+The box in the header filters the board as you type (`/` focuses it, Escape clears it). **Hide done /
+failed** empties those two columns but keeps them as drop targets; the choice is remembered.
+
+| Query | Matches cards where |
+|---|---|
+| `gpu report` | every word appears somewhere: title, task, status, agent, flow, run id, latest line, error, execution workers, run input and output |
+| `"rust async"` | the phrase appears |
+| `worker:gpu-02` | a field contains the value. Fields: `title` `task` `status` `agent` `flow` `id` `last` `error` `system`, and from the execution workers `worker` (id or hostname) `pool` `tag` `step` |
+| `goal:vector`, `output.summary:ok` | a key inside the run's input or output contains it. A bare key matches at any depth; `input:` / `output:` search all of one side |
+| `-status:failed` | leave matching cards out |
+| `pool:` | the card has the field at all |
+
+- Matching is case-insensitive substring search. `status:` also knows the column's everyday names
+  (`completed`, `failed`, `cancelled`).
+- **Input** is the run's input on Hatchet and its parameters on Prefect. Trigger.dev's runs list
+  doesn't return payloads, so Trigger.dev cards search only what the board shows. The drawer now
+  shows a card's input next to its output.
+- **Workers** are the execution workers that ran a portable flow's steps, read from the flow host
+  (`/execution/<run>`) on each refresh; a finished run's workers are read once. Cards show them as
+  `on <worker>`.
+- Each card is indexed once per version (in idle time after it arrives), and typing further into a
+  query only re-checks the previous matches.
+
+## Big boards
+
+Columns show 50 cards at a time, with **Show more** for the rest, so the page stays responsive however
+many runs a board has. Off-screen cards skip layout and paint, unchanged cards keep their elements
+between updates, and the glide animation is skipped when more than 300 cards are on screen.
+
+To try it, start a copy of the board with a synthetic backend (`loadtest_adapter.py`) and open the
+**Load test** tab. Its cards have generated input, output and workers, and 20 of them change every
+2 s through the normal live-update path:
+
+```bash
+BOARD_LOADTEST_CARDS=10000 BOARD_HOST=127.0.0.1 BOARD_PORT=8097 python board/server.py
+```
+
+`node board/loadtest_ui.cjs 1000,5000,10000,20000` measures the same in headless Chrome at each size.
+Measured on 2026-11-05 (headless Chrome, software rendering, on the worker PC while its stacks ran):
+
+| Cards | Snapshot sent to the browser | First paint (cold board) | Main thread busy with live updates | Search keystroke, median (worst) | Hide done / failed | JS heap |
+|---|---|---|---|---|---|---|
+| 1,000 | 0.9 MB | 1.5 s | 1% | 42 ms (85 ms) | 25–31 ms | 4 MB |
+| 5,000 | 4.6 MB | 1.7 s | 0% | 46 ms (97 ms) | 51–57 ms | 10 MB |
+| 10,000 | 9.2 MB | 2.5 s | 2% | 64 ms (105 ms) | 52–170 ms | 17 MB |
+| 20,000 | 18.4 MB | 3.3 s | 1% | 72 ms (384 ms) | 38–44 ms | 37 MB |
+
+Keystroke times run from the input event to the next painted frame. In the page itself, filtering
+10,000 cards takes 3–19 ms and rebuilding the columns another 15–30 ms. Before these changes, at
+1,000 cards each live update blocked the page for up to 1.2 s, and at 5,000 it stopped responding.
+
+The board scales further than the engines' listings: real backends still return at most 200 runs per
+board on Hatchet and Prefect and 100 on Trigger.dev (see [Limits](#limits-of-this-prototype)). The
+server's cost per refresh grows with the board: about 0.4 s of CPU for 10,000 cards.
+
 ## Live updates
 
 The browser holds one server-sent event stream per tab (`GET /api/live?system=&board=&card=`) and
@@ -175,7 +232,8 @@ To show other tasks, add their name to `AGENT_TASK` handling in the adapters, or
 - **Board refreshes are still full listings.** A feed event triggers one listing of the board's runs (up to 200), shared by every viewer. Logs are read incrementally, but the run list itself is not.
 - **Connections per tab.** Each open board tab holds one stream. Over plain HTTP (`http://localhost:8090`), browsers allow six connections per site, so more than about five visible board tabs can stall other requests. The Funnel's HTTPS address doesn't have this limit.
 - **Trigger.dev latency comes from Trigger.dev.** The feed wakes the board within about half a second of a run's metadata changing. Delivering an input to a dev-mode run and seeing its new metadata can take several seconds on this setup.
-- **Window and size.** Each board shows runs from the last 7 days: up to 200 per board on Hatchet and 100 on Trigger.dev.
+- **Window and size.** Each board shows runs from the last 7 days: up to 200 per board on Hatchet and
+  Prefect and 100 on Trigger.dev. The UI itself handles 20,000 cards (see [Big boards](#big-boards)).
 - **Environments.** Trigger.dev production and local development use separate keys and tabs; Hatchet uses one tenant.
 - **Queue position is computed, not promised.** It's the order of currently queued runs of the same task. Priority, concurrency keys and delays can reorder actual execution, and neither engine exposes an ETA.
 - **Board names live in the browser.** The list of boards is kept in `localStorage`. A board exists as soon as one card is tagged with its name.

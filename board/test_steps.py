@@ -69,6 +69,13 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
         self.app['flow_host'].set_selection.assert_awaited_once_with('run', 'talk', {'id': 'pc-b'})
         self.assertEqual(self.adapter.calls, [('native-replay', 'run', 'talk')])
 
+    async def test_flow_cards_carry_their_execution_workers_read_once_when_finished(self):
+        for _ in range(2):
+            cards = await self.adapter.list_cards('demo')
+            await server.label_flows(self.app, cards)
+        self.assertEqual(cards[0].workers, [{'step': 'talk', 'id': 'pc-b', 'hostname': 'pc-b.lan', 'pool': 'gpu', 'tags': ['cuda']}])
+        self.app['flow_host'].execution.assert_awaited_once_with('run')
+
     async def test_logical_step_identity_survives_pending_to_started(self):
         pending = server.fit_flow_dag(Dag('declared'), 'demo-flow', FLOW)
         started = server.fit_flow_dag(await Adapter().dag('run'), 'demo-flow', FLOW)
@@ -80,6 +87,8 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
             self.app = server.make_app()
         async def flows(): return {'demo-flow': FLOW}
         self.app['flow_host'].flows = flows
+        self.app['flow_host'].execution = AsyncMock(return_value={
+            'talk': {'state': 'done', 'worker': {'id': 'pc-b', 'hostname': 'pc-b.lan', 'pool': 'gpu', 'tags': ['cuda']}}})
         self.client = TestClient(TestServer(self.app))
         await self.client.start_server()
 

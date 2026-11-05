@@ -37,6 +37,8 @@
   .column { background: var(--chip); border-radius: 10px; padding: 8px; min-height: 120px; }
   .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 4px 6px 8px; display: flex; justify-content: space-between; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); }
+  /* Off-screen cards skip layout and paint: long columns cost about as much as short ones. */
+  #columns .card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
   .card:hover, .card:focus-visible { border-color: var(--accent); outline: none; }
   .card .title { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
   .card .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -56,6 +58,12 @@
   .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--chip); color: var(--muted); }
   .chip.running { color: var(--accent); } .chip.waiting { color: var(--warn); } .chip.done { color: var(--ok); } .chip.stopped { color: var(--danger); }
   .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 0; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; flex: 1 1 320px; max-width: 640px; }
+  #search { flex: 1 1 220px; min-width: min(260px, 100%); }
+  .filters label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+  .filters label input { margin: 0; }
+  .show-more { width: 100%; font-size: 12px; }
+  .hidden-note { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0; }
   aside { position: fixed; top: 0; right: 0; width: min(520px, 100vw); height: 100vh; height: 100dvh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .15s ease; z-index: 3; display: flex; flex-direction: column; }
   aside.open { transform: none; }
   aside .head { padding: 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: start; }
@@ -63,7 +71,7 @@
   aside .body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
   aside h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
-  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+  dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
   ol.progress { margin: 0; padding: 8px 8px 8px 32px; background: var(--chip); border-radius: 6px; font-size: 13px; max-height: 260px; overflow-y: auto; overflow-wrap: anywhere; }
   ol.progress li { padding: 2px 0; }
   pre { margin: 0; background: var(--chip); border-radius: 6px; padding: 8px; font-size: 12px; overflow: auto; max-height: 200px; }
@@ -104,6 +112,7 @@
     .column.is-empty { padding: 4px 8px; }
     .column.is-empty h2 { margin: 4px 0; }
     .column.is-empty .empty { display: none; }
+    .filters { flex: 1 1 100%; max-width: none; }
   }
 </style>
 <link rel="stylesheet" href="/static/chat.css">
@@ -118,6 +127,11 @@
   <button class="secondary" id="add-board" type="button">+ Board</button>
   <button class="secondary" id="flows-btn" type="button" title="Create and edit flows that run on every backend">Flows</button>
   <button class="primary" id="new-card" type="button">New card</button>
+  <div class="filters" role="search">
+    <input type="search" id="search" placeholder="Filter cards  (/)" aria-label="Filter cards" autocomplete="off" spellcheck="false"
+      title="Words match anything on a card: title, status, agent, workers, input and output.&#10;field:value narrows to one field: title task status agent flow id last error worker pool tag step, or a key in the input/output (goal:, output.summary:, input:).&#10;&quot;a phrase&quot;, -word to exclude, pool: for cards that have the field.">
+    <label><input type="checkbox" id="hide-finished"> Hide done / failed</label>
+  </div>
   <span class="spacer"></span>
   <span class="status" id="status" role="status">Loading…</span>
 </header>
@@ -156,6 +170,7 @@
       <div class="node-panel" id="d-node" hidden style="margin-top:10px"></div>
     </section>
     <section id="d-progress-section"><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
+    <section id="d-input-section" hidden><h4>Input</h4><pre id="d-input"></pre></section>
     <section id="d-output-section"><h4>Output</h4><pre id="d-output"></pre></section>
     <section id="d-replay-section"><button class="secondary" id="d-replay" type="button">Run again (replay)</button></section>
   </div>
@@ -197,6 +212,7 @@
 <dialog id="flows-dialog" class="fb-dialog"></dialog>
 
 <script src="/static/chat.js"></script>
+<script src="/static/card-search.js"></script>
 <script src="/static/flow-builder.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
@@ -216,7 +232,7 @@
 </script>
 <script>
 const COLUMN_LABELS = { scheduled: "Scheduled", queued: "Queued", running: "Running", waiting: "Waiting", done: "Done", stopped: "Stopped / failed" };
-const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev · production", "trigger-dev": "Trigger.dev · local", prefect: "Prefect" };
+const SYSTEM_LABELS = { hatchet: "Hatchet", trigger: "Trigger.dev · production", "trigger-dev": "Trigger.dev · local", prefect: "Prefect", loadtest: "Load test" };
 const $ = (id) => document.getElementById(id);
 const store = {
   get(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } },
@@ -299,30 +315,97 @@ function el(tag, attrs = {}, ...children) {
 
 function renderHeader() {
   $("systems").replaceChildren(...systems.map((s) =>
-    el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; renderBoard(); refresh(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
+    el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); refresh(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
   $("board").replaceChildren(...boards.map((b) => { const o = el("option", { value: b }, b); if (b === board) o.selected = true; return o; }));
   updateNewForm();
 }
 
 // Top of a column = what the engine runs first (Queued/Scheduled, by card.order), oldest running
-// first, newest finished first. Same rule as board/moves.py.
+// first, newest finished first. Same rule as board/moves.py. Timestamps are ISO strings, which
+// compare correctly as plain strings (and far faster than localeCompare on big boards).
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 function columnOrder(a, b) {
-  if (["queued", "scheduled"].includes(a.column)) return (a.order ?? 0) - (b.order ?? 0) || (a.created_at || "").localeCompare(b.created_at || "");
-  if (["running", "waiting"].includes(a.column)) return (a.started_at || a.created_at || "").localeCompare(b.started_at || b.created_at || "");
-  return (b.finished_at || b.created_at || "").localeCompare(a.finished_at || a.created_at || "");
+  if (["queued", "scheduled"].includes(a.column)) return (a.order ?? 0) - (b.order ?? 0) || cmp(a.created_at || "", b.created_at || "");
+  if (["running", "waiting"].includes(a.column)) return cmp(a.started_at || a.created_at || "", b.started_at || b.created_at || "");
+  return cmp(b.finished_at || b.created_at || "", a.finished_at || a.created_at || "");
+}
+
+// ---------------------------------------------------------------- Filtering
+// The search box filters with CardSearch (card-search.js); "Hide done / failed" empties those
+// columns but keeps them as drop targets. Columns render PAGE cards at a time, so a board of
+// thousands of runs stays responsive.
+const PAGE = 50;
+const FLIP_MAX = 300;          // above this many cards on screen, skip the glide animation
+const FINISHED = new Set(["done", "stopped"]);
+let query = "";
+let hideFinished = store.get("hideFinished", false);
+let shownLimit = {};           // column -> cards rendered (PAGE more per "Show more")
+let filtered = { cards: null, query: "", hits: [] };
+let renderedCount = 0;
+
+function filteredCards() {
+  if (filtered.cards === cards && filtered.query === query) return filtered.hits;
+  // Typing further only narrows: filter the previous hits instead of every card.
+  const from = filtered.cards === cards && CardSearch.narrows(filtered.query, query) ? filtered.hits : cards;
+  filtered = { cards, query, hits: CardSearch.filter(from, query) };
+  return filtered.hits;
+}
+
+let renderQueued = false;
+function renderSoon() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderBoard(); if (columns.length) liveStatus(); });
+}
+
+// Build the search index of new and changed cards while the browser is idle, so the first
+// keystroke doesn't pay for it.
+let indexing = null;
+function indexSoon() {
+  if (indexing || typeof requestIdleCallback !== "function") return;
+  let at = 0, list = cards;
+  const step = (deadline) => {
+    if (list !== cards) { at = 0; list = cards; }
+    while (at < list.length && deadline.timeRemaining() > 2) for (const end = Math.min(at + 200, list.length); at < end; at++) CardSearch.index(list[at]);
+    indexing = at < list.length ? requestIdleCallback(step) : null;
+  };
+  indexing = requestIdleCallback(step);
 }
 
 function renderBoard() {
   if (drag) { drag.renderPending = true; return; } // don't pull cards from under the pointer
-  const before = cardRects();
+  const before = renderedCount <= FLIP_MAX ? cardRects() : new Map();
+  const hits = filteredCards(), total = {}, byColumn = {};
+  for (const col of columns) { total[col] = 0; byColumn[col] = []; }
+  for (const c of cards) if (c.column in total) total[c.column]++;
+  for (const c of hits) byColumn[c.column]?.push(c);
+  renderedCount = 0;
   $("columns").replaceChildren(...columns.map((col) => {
-    const inCol = cards.filter((c) => c.column === col).sort(columnOrder);
-    return el("section", { class: inCol.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
-      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, String(inCol.length))),
-      ...(inCol.length ? inCol.map(renderCard) : [el("div", { class: "empty" }, "—")]));
+    const inCol = byColumn[col], hidden = hideFinished && FINISHED.has(col);
+    const shown = hidden ? [] : inCol.sort(columnOrder).slice(0, shownLimit[col] || PAGE);
+    renderedCount += shown.length;
+    const rest = inCol.length - shown.length;
+    const count = query ? `${inCol.length} / ${total[col]}` : String(inCol.length);
+    const more = !hidden && rest > 0 ? el("button", { type: "button", class: "secondary show-more", onclick: () => {
+      shownLimit[col] = (shownLimit[col] || PAGE) + PAGE; renderBoard(); } }, `Show ${Math.min(PAGE, rest)} more · ${rest} not shown`) : null;
+    const note = hidden && inCol.length ? el("div", { class: "hidden-note" }, `${inCol.length} hidden`)
+      : !inCol.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : "—") : null;
+    return el("section", { class: shown.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
+      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, count)), ...shown.map(cardNode), more, note);
   }));
-  flip(before);
+  if (renderedCount <= FLIP_MAX) flip(before);
 }
+
+$("hide-finished").checked = hideFinished;
+$("hide-finished").addEventListener("change", (e) => { hideFinished = e.target.checked; store.set("hideFinished", hideFinished); renderSoon(); });
+$("search").addEventListener("input", (e) => { query = e.target.value; shownLimit = {}; renderSoon(); });
+$("search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && e.target.value) { e.target.value = ""; query = ""; renderSoon(); e.stopPropagation(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.("input, textarea, select, [contenteditable]") || document.querySelector("dialog[open]")) return;
+  e.preventDefault(); $("search").focus(); $("search").select();
+});
 
 // ---------------------------------------------------------------- Drag and drop
 // Cards move only where the engine has a matching action (card.moves, from board/moves.py):
@@ -434,6 +517,7 @@ async function dragEnd(cancelled) {
   ghost.remove();
   document.body.classList.remove("dragging");
   document.querySelectorAll(".drop-action, .drop-note").forEach((n) => n.remove());
+  document.querySelectorAll(".drop-dim").forEach((n) => n.classList.remove("drop-dim")); // card nodes are reused
   drag = null;
   if (action && confirmed && !unchanged) {
     // Optimistic: show the card in its new column until the engine reports back.
@@ -478,11 +562,24 @@ function flip(before, except = null) {
   }
 }
 
-function renderCard(card) {
-  const last = card.last;
+// A card's element is reused until the card changes (a new object from the live stream) or its
+// face text does (the "running 3m" clock), so re-rendering a big board mostly moves nodes.
+const cardNodes = new WeakMap(); // card -> { face, node }
+function cardNode(card) {
   const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
     : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
+  const face = `${when}|${movingIds.has(card.id)}`;
+  const known = cardNodes.get(card);
+  if (known?.face === face) return known.node;
+  const node = renderCard(card, when);
+  cardNodes.set(card, { face, node });
+  return node;
+}
+
+function renderCard(card, when) {
+  const last = card.last;
   const q = card.column === "queued" ? queueText(card) : "";
+  const workers = [...new Set((card.workers || []).map((w) => w.id))];
   const movable = Object.keys(card.moves || {}).length > 0;
   const priority = card.column === "queued" && card.system === "hatchet" && card.priority ? el("span", { class: "chip", title: "Hatchet priority (1 low – 3 high)" }, `P${card.priority}`) : null;
   return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
@@ -490,7 +587,8 @@ function renderCard(card) {
       onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
       onpointerdown: movable ? (e) => dragStart(e, card) : null },
     el("div", { class: "title" }, card.title, priority ? " " : null, priority),
-    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when)),
+    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when),
+      workers.length ? el("span", { title: "Execution workers" }, `on ${workers.slice(0, 2).join(", ")}${workers.length > 2 ? ` +${workers.length - 2}` : ""}`) : null),
     q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
     last ? el("div", { class: "last" }, last) : null,
     backendLink(card.backend_url));
@@ -582,7 +680,8 @@ function renderDrawer() {
   if (session) chat.render(card, runKey());
   $("d-title").textContent = card.title;
   $("d-backend").replaceChildren(...[backendLink(card.backend_url)].filter(Boolean));
-  const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Created", AgentChat.localTime(card.created_at)], ["Started", AgentChat.localTime(card.started_at)], ["Finished", AgentChat.localTime(card.finished_at)]];
+  const workers = (card.workers || []).map((w) => `${w.step ? w.step + ": " : ""}${w.id}${w.pool ? ` · pool ${w.pool}` : ""}${w.tags?.length ? ` · ${w.tags.join(", ")}` : ""}`);
+  const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Workers", workers.join("\n")], ["Created", AgentChat.localTime(card.created_at)], ["Started", AgentChat.localTime(card.started_at)], ["Finished", AgentChat.localTime(card.finished_at)]];
   $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
   $("d-steer-section").hidden = session || !card.steerable;
   $("d-queue").replaceChildren(queueText(card), ...[backendLink(card.queue?.backend_url)].filter(Boolean));
@@ -593,6 +692,8 @@ function renderDrawer() {
   const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
   $("d-output-section").hidden = session || !output;
   $("d-output").textContent = output;
+  $("d-input-section").hidden = session || card.input == null;
+  $("d-input").textContent = card.input != null ? JSON.stringify(card.input, null, 2) : "";
   $("d-replay-section").hidden = session || !["done", "stopped"].includes(card.column);
 }
 
@@ -938,7 +1039,8 @@ function closeLive() { live?.source.close(); live = null; }
 document.addEventListener("visibilitychange", () => { if (document.hidden) closeLive(); else refresh(); });
 
 function liveStatus() {
-  setStatus(`${SYSTEM_LABELS[system]} · ${cards.length} cards · ${feedLive ? "live" : "polling"} · updated ${new Date().toLocaleTimeString()}`);
+  const count = query ? `${filteredCards().length} of ${cards.length} cards match` : `${cards.length} cards`;
+  setStatus(`${SYSTEM_LABELS[system] || system} · ${count} · ${feedLive ? "live" : "polling"} · updated ${new Date().toLocaleTimeString()}`);
 }
 
 function onLive(message) {
@@ -960,11 +1062,12 @@ function onLive(message) {
   const before = cards.find((c) => c.id === openCardId);
   if (message.reset) cards = message.cards;
   else {
-    const changed = new Map(message.upsert.map((c) => [c.id, c]));
-    cards = [...cards.filter((c) => !changed.has(c.id) && !message.remove.includes(c.id)), ...changed.values()];
+    const changed = new Map(message.upsert.map((c) => [c.id, c])), removed = new Set(message.remove);
+    cards = [...cards.filter((c) => !changed.has(c.id) && !removed.has(c.id)), ...changed.values()];
   }
-  cards.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+  cards.sort((a, b) => cmp(a.created_at || "", b.created_at || ""));
   renderBoard();
+  indexSoon();
   if (pendingOpen && cards.some((c) => c.id === pendingOpen)) { const id = pendingOpen; pendingOpen = null; openCard(id); }
   else if (openCardId) {
     const after = cards.find((c) => c.id === openCardId);
@@ -974,12 +1077,12 @@ function onLive(message) {
   liveStatus();
 }
 
-$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; renderBoard(); refresh(); });
+$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); refresh(); });
 $("add-board").addEventListener("click", () => {
   const name = (prompt("Board name (letters, digits, - and _)") || "").trim();
   if (!/^[\w-]+$/.test(name)) return;
   if (!boards.includes(name)) boards.push(name);
-  board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; renderBoard(); renderHeader(); refresh();
+  board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); renderHeader(); refresh();
 });
 function renderKindOptions() {
   const select = $("n-kind"), current = select.value;

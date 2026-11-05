@@ -106,6 +106,7 @@ class HatchetAdapter:
             created_at=_iso(s.created_at),
             started_at=_iso(s.started_at),
             finished_at=_iso(s.finished_at),
+            input=run_input or None,
             output=s.output or None,
             error=s.error_message,
             steerable=task in (AGENT_TASK, "agent-session") and not is_final(column),

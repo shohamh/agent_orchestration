@@ -21,8 +21,11 @@ class Card:
     created_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    input: Any = None  # the run's input / parameters, for search
     output: Any = None
     error: str | None = None
+    # Execution workers that ran the card's steps: [{"step", "id", "hostname", "pool", "tags"}]
+    workers: list[dict[str, Any]] = field(default_factory=list)
     queue: dict[str, Any] = field(default_factory=dict)  # {"name", "ahead", "running", "limit", "paused"}
     steerable: bool = False
     session_state: str | None = None
@@ -56,7 +59,8 @@ class Card:
         self.version = digest([len(lines), lines[-50:]])
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        # Shallow: asdict() deep-copies every input/output and dominates a big board's refresh.
+        return dict(vars(self))
 
 
 def is_final(column: str) -> bool:

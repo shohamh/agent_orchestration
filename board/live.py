@@ -8,6 +8,8 @@ falls back to polling: the board every LIST_EVERY seconds, an open card every DE
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Any
@@ -208,7 +210,9 @@ class BoardWatcher:
             except asyncio.TimeoutError:
                 log.warning("%s/%s: labelling cards timed out", self.system, self.board)
         cards = {card.id: card.to_json() for card in listed}
-        hashes = {card_id: digest(card) for card_id, card in cards.items()}
+        # Field order is fixed by the Card dataclass, so unsorted JSON is a stable (and much cheaper) key.
+        hashes = {card_id: hashlib.blake2b(json.dumps(card, default=str).encode(), digest_size=8).digest()
+                  for card_id, card in cards.items()}
         first = self.cards is None
         upsert = [cards[i] for i in cards if self.hashes.get(i) != hashes[i]]
         remove = [i for i in self.hashes if i not in cards]

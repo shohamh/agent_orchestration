@@ -41,7 +41,7 @@ from aiohttp import web
 
 import auth
 import moves
-from cards import COLUMNS, Dag, DagNode
+from cards import COLUMNS, Dag, DagNode, is_final
 from flows_client import FlowHost, flow_for_task
 from live import Hub
 from transcript import page
@@ -70,6 +70,10 @@ def load_adapters() -> dict[str, Any]:
         from prefect_adapter import PrefectAdapter
 
         adapters["prefect"] = PrefectAdapter()
+    if os.environ.get("BOARD_LOADTEST_CARDS"):
+        from loadtest_adapter import LoadTestAdapter
+
+        adapters["loadtest"] = LoadTestAdapter()
     return adapters
 
 
@@ -108,6 +112,18 @@ async def label_flows(app: web.Application, cards: list[Any]) -> None:
         card.flow = flow_for_task(card.task, flows)
         card.backend_url = backend_url(card.system, card.id, tenant=tenant_id(app['adapters'].get(card.system)))
     moves.annotate(cards)  # drag-and-drop targets per card; the UI sorts columns by card.order
+    await label_workers(app, [c for c in cards if c.flow])
+
+
+async def label_workers(app: web.Application, cards: list[Any]) -> None:
+    """The execution workers that ran each portable-flow card's steps, so the board can search them."""
+    try:
+        found = await asyncio.wait_for(app["flow_host"].executions({c.id: is_final(c.column) for c in cards}), 1)
+    except asyncio.TimeoutError:
+        return  # labels are extras: the next refresh tries again
+    for card in cards:
+        card.workers = [{"step": step, **execution["worker"]} for step, execution in (found.get(card.id) or {}).items()
+                        if isinstance(execution, dict) and isinstance(execution.get("worker"), dict)]
 
 
 async def move_card(request: web.Request) -> web.Response:
