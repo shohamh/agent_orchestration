@@ -144,7 +144,10 @@ test('the filter box, hide finished and column paging work on a live board', { t
     await waitFor(`document.getElementById('drawer').classList.contains('open')`);
     assert.match(await evaluate(`document.getElementById('d-input').textContent`), /compare schedulers/);
     assert.match(await evaluate(`document.getElementById('d-facts').textContent`), /fetch: gpu-02 · pool gpu · cuda/);
-    await evaluate(`document.getElementById('d-close').click(); onLive({ type: 'cards', reset: true, cards: [
+    // Closing the drawer opens a new live stream whose snapshot replaces the cards: let it land first.
+    await evaluate(`window.snapshots = 0; { const live = onLive; onLive = (message) => { if (message.type === 'cards' && message.reset) window.snapshots++; live(message); }; } document.getElementById('d-close').click()`);
+    await waitFor(`window.snapshots >= 1`);
+    await evaluate(`onLive({ type: 'cards', reset: true, cards: [
       { id: 'newer', column: 'running', title: 'Newer', task: 't', system: 'hatchet', status: 'RUNNING', created_at: '2026-01-02', started_at: '2026-01-03', moves: {} },
       { id: 'older', column: 'running', title: 'Older', task: 't', system: 'hatchet', status: 'RUNNING', created_at: '2026-01-01', started_at: '2026-01-03', moves: {} }
     ] })`);

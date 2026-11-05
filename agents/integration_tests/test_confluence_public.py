@@ -1,6 +1,7 @@
 """Live, anonymous Confluence imports. These exercise real public services and require internet."""
 import sys
 import tempfile
+import time
 import unittest
 import asyncio
 import os
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from confluence_smoke_test import run_public_checks
 from flowkit.definition import parse
 from flowkit.distributed import execute_step
-from flowkit.worker_service import make_app
+from agents.tests.worker_fixture import make_app  # each simulated PC gets its own capacity gate
 
 
 class PublicConfluenceIntegration(unittest.IsolatedAsyncioTestCase):
@@ -43,7 +44,7 @@ class PublicConfluenceIntegration(unittest.IsolatedAsyncioTestCase):
                       for name in ('setup-pc','step-pc')]
             for service in services: await service.start_server()
             registry=root/'workers.yaml'
-            registry.write_text(yaml.safe_dump({'workers':[{'id':name,'pool':'test','tags':[],
+            registry.write_text(yaml.safe_dump({'workers':[{'id':name,'pool':'test','tags':[],'cpu_limit':100,'ram_limit':100,'settings_revision':time.time_ns(),  # admission must not depend on this PC's load
                 'url':str(service.make_url('')).rstrip('/')} for name,service in zip(('setup-pc','step-pc'),services)]}),encoding='utf-8')
             flow=parse({'name':'public-context-test','environment':{'agent':'demo',
                 'confluence':[{'base_url':'https://shibboleth.atlassian.net/wiki','page_id':'2067399657',

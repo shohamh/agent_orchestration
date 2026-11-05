@@ -778,7 +778,8 @@ test('fleet compatibility per step: matches with detection times, waits, explain
   await openFlows();
   await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow'`, 'reopens the last flow');
   await waitFor(`[...document.querySelectorAll('.fb-flow-item')].some(b => b.textContent.includes('fleet-flow'))`, 'the new draft is listed');
-  await click('.fb-flow-item', 'fleet-flow');
+  // Clicked on the element itself: the list can re-render under a pointer position under load.
+  await evaluate(`[...document.querySelectorAll('.fb-flow-item')].find((b) => b.textContent.includes('fleet-flow')).click()`);
   try { await waitFor(`document.querySelector('.fb-title').textContent === 'fleet-flow'`, 'fleet-flow opens'); }
   catch (error) { error.message += `; state: ${JSON.stringify(await evaluate(`({title: document.querySelector('.fb-title')?.textContent, ask: document.querySelector('dialog.fb-ask')?.open, status: document.querySelector('.fb-status')?.textContent, width: innerWidth, flow: document.querySelector('.fb')?.className})`))}`; throw error; }
   await click('.fb-tab', 'Graph');

@@ -16,6 +16,21 @@ Self-hosted Docker Compose setups for running AI-agent workloads on Hatchet, Tri
 
 All three stacks run side by side on one machine with no port conflicts. Idle RAM is about 0.7 GB for Hatchet, 2 GB for Trigger.dev and 0.2 GB for Prefect, so give Docker Desktop at least 4 GB to run them together.
 
+## What's built on top
+
+Beyond the three stacks, the repo now holds a layer that runs the same agent work on any of them. Each item links to its own documentation.
+
+| Feature | What it gives you | Docs |
+|---|---|---|
+| **Portable flows** | One YAML DAG (program, agent and approval steps) that runs natively on Hatchet, Prefect and Trigger.dev. Saved files are drafts; activation is explicit and reversible. Native step restart where the engine lacks it, run and step times in your timezone, and examples such as `slug-relay` (a multi-agent flow made in the builder) and `multi-agent-design`. | [flows/](flows/README.md) |
+| **Graphical workflow builder** | Build and edit a flow on a canvas in the board: drafts, layout, a graph and steps view, launch checks, and a confirmed activation that shows which engines and active runs a change affects. | [flows/](flows/README.md#graphical-builder) |
+| **Agent Board upgrades** | Live card updates, drag and drop between columns (engine-aware drop targets, priority order in Queued), live search filter, big boards (20,000 cards stay responsive, cards load on scroll), per-step chat and a login for phone access. | [board/](board/README.md) |
+| **ACP coding sessions** | Codex, Claude Code, OpenCode and others run as cards through ACP: permissions and question forms, interrupt and Continue, slash commands, model and mode settings, usage and cost, attachments, resume and confirmed terminal commands. | [agents/](agents/README.md) |
+| **Workers and environment context** | Per-step workers with pools and tags, transferred workspaces, an interactive context-setup agent, and Confluence pages exported as Markdown. | [docs/workers-and-context.md](docs/workers-and-context.md) |
+| **Declarative worker fleet** | A Fleet tab to register execution PCs once. Steps and cards declare what they need (software, pool, tags) and are placed on a compatible PC, or wait visibly with the reason. Shared CPU, RAM and slot limits per PC, capability detection with last-checked times, launch checks, immutable per-revision flow assets, and cancel and settings changes that cannot race a start. Works the same on all three engines and offline. | [Execution PCs](agents/README.md#execution-pcs-fleet) |
+
+The board's tests (Python, Node and headless-Chrome) and the agent tests are listed under [Verify](agents/README.md#verify).
+
 ## The plan
 
 1. **Research.** I read the official self-hosting docs and the upstream compose files, plus the parts of the Trigger.dev CLI and webapp source that affect offline use: how deploys build images, the base images, and the API origin handling.
