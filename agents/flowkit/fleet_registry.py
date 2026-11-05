@@ -30,6 +30,10 @@ def label(value, what='tag'):
         raise ValueError(f'A {what} is 1 to 100 characters without commas, line breaks or surrounding spaces')
     return value
 
+def env_path():
+    """The coordinator's token file (git-ignored); FLOW_WORKERS_ENV_FILE overrides it."""
+    return Path(os.environ.get('FLOW_WORKERS_ENV_FILE', ROOT / 'workers.local.env'))
+
 def _path():
     return Path(os.environ.get('FLOW_WORKERS_FILE', ROOT / 'workers.local.yaml'))
 
@@ -119,10 +123,14 @@ def warnings(w):
                 'and stored at the next registry save']
     return []
 
+def relayed(url):
+    from .relay import is_relayed
+    return is_relayed(url)
+
 def _public(w):
     # Connection details never leave the coordinator: only whether an endpoint is configured.
     return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')}
-            | {'connection': 'configured' if w.get('url') else 'awaiting', 'online': False}
+            | {'connection': 'relay' if relayed(w.get('url')) else 'configured' if w.get('url') else 'awaiting', 'online': False}
             | ({'warnings': warnings(w)} if warnings(w) else {}))
 
 def load_fleet():
@@ -181,7 +189,7 @@ def save_worker(worker, create=False):
         updated['settings_revision'] = max(time.time_ns(), (existing or {}).get('settings_revision', 0) + 1)
         if updated.get('url'):
             u = urlsplit(updated['url'])
-            tokens = {**dotenv_values(ROOT / 'workers.local.env'), **os.environ}
+            tokens = {**dotenv_values(env_path()), **os.environ}
             if u.hostname not in ('127.0.0.1', 'localhost', '::1') and not tokens.get(updated.get('token_env', '')):
                 raise ValueError(f"A network endpoint needs its token on the coordinator: set {updated.get('token_env') or 'a token_env variable'} "
                                  'in workers.local.env (or the environment) first, or save without an endpoint to wait for the connection')

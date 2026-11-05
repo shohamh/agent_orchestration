@@ -19,6 +19,9 @@ from aiohttp import web
 COOKIE = "board_session"
 LIFETIME = 30 * 24 * 3600
 PUBLIC = {"/login", "/logout"}
+# A PC installing or relaying has no browser session: these paths are proxied to the relay service,
+# which checks the one-time install code or the PC's own token (see relay_proxy.py).
+PUBLIC_PREFIXES = ("/install/", "/relay/")
 
 
 class Auth:
@@ -45,7 +48,7 @@ class Auth:
 
     @web.middleware
     async def middleware(self, request: web.Request, handler):
-        if request.path in PUBLIC or self.valid(request.cookies.get(COOKIE)):
+        if request.path in PUBLIC or request.path.startswith(PUBLIC_PREFIXES) or self.valid(request.cookies.get(COOKIE)):
             return await handler(request)
         if request.path.startswith("/api/"):
             return web.json_response({"error": "Sign in required"}, status=401)

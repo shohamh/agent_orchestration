@@ -44,6 +44,7 @@ from aiohttp import web
 
 import auth
 import moves
+import relay_proxy
 from cards import COLUMNS, Dag, DagNode, is_final
 from flows_client import FlowHost, flow_for_task
 from live import Hub
@@ -642,6 +643,25 @@ async def fleet_update(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
 
 
+INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server'}
+
+
+async def fleet_installs(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].fleet_installs())
+
+
+async def fleet_install_create(request: web.Request) -> web.Response:
+    body = await json_object(request)
+    unknown = set(body) - INSTALL_FIELDS
+    if unknown:
+        raise ValueError('unknown install fields: ' + ', '.join(sorted(unknown)))
+    return passed_through(await request.app['flow_host'].create_install(body))
+
+
+async def fleet_install_cancel(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].cancel_install(request.match_info['code']))
+
+
 async def fleet_refresh(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].refresh_capabilities(request.match_info['worker_id']))
 
@@ -840,6 +860,7 @@ def make_app() -> web.Application:
     app.on_cleanup.append(close_adapters)
     app.on_response_prepare.append(revalidate_ui)
     auth.install(app)
+    relay_proxy.install(app)
     app.router.add_get("/", index)
     app.router.add_get("/api/systems", systems)
     app.router.add_get("/api/live", live)
@@ -870,6 +891,9 @@ def make_app() -> web.Application:
     app.router.add_get('/api/fleet/metrics', fleet_metrics)
     app.router.add_get('/api/fleet/tags', fleet_tags)
     app.router.add_post('/api/fleet/tags', fleet_add_tag)
+    app.router.add_get('/api/fleet/installs', fleet_installs)
+    app.router.add_post('/api/fleet/installs', fleet_install_create)
+    app.router.add_delete('/api/fleet/installs/{code}', fleet_install_cancel)
     app.router.add_post('/api/fleet/workers', fleet_register)
     app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
     app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)

@@ -28,6 +28,7 @@ Beyond the three stacks, the repo now holds a layer that runs the same agent wor
 | **ACP coding sessions** | Codex, Claude Code, OpenCode and others run as cards through ACP: permissions and question forms, interrupt and Continue, slash commands, model and mode settings, usage and cost, attachments, resume and confirmed terminal commands. | [agents/](agents/README.md) |
 | **Workers and environment context** | Per-step workers with pools and tags, transferred workspaces, an interactive context-setup agent, and Confluence pages exported as Markdown. | [docs/workers-and-context.md](docs/workers-and-context.md) |
 | **Declarative worker fleet** | A Fleet tab to register execution PCs once. Steps and cards declare what they need (software, pool, tags) and are placed on a compatible PC, or wait visibly with the reason. Shared CPU, RAM and slot limits per PC, capability detection with last-checked times, launch checks, immutable per-revision flow assets, and cancel and settings changes that cannot race a start. Works the same on all three engines and offline. | [Execution PCs](agents/README.md#execution-pcs-fleet) |
+| **One-line PC install** | Register a PC with a validated form and paste one command (PowerShell, cmd or bash, no Administrator or sudo). The PC connects out to the server, so no inbound port or firewall rule is needed. | [Register a PC](docs/workers-and-context.md#register-a-pc) |
 
 The board's tests (Python, Node and headless-Chrome) and the agent tests are listed under [Verify](agents/README.md#verify).
 

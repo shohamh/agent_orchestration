@@ -104,3 +104,25 @@ dialog.fl-dialog[open] { display: flex; flex-direction: column; }
   .fl-top, .fl-body { padding: 8px 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .fl * { transition: none !important; } }
+
+/* One-line install: the register form, the command view and the waiting list */
+.fl-field-error { display: block; color: var(--danger); min-height: 0; overflow-wrap: anywhere; }
+.fl-field-error:empty { display: none; }
+.fl-form-body input[aria-invalid="true"], .fl-form-body select[aria-invalid="true"] { outline: 2px solid var(--danger); }
+.fl-form-body select, .fl-form-body .fl-tag-input { max-width: 100%; }
+.fl-command-block { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.fl-command-block h4 { margin: 0; font-size: 14px; }
+.fl-command { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; user-select: all; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--chip); font-size: 13px; max-width: 100%; }
+.fl-elevation { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--chip); border-radius: 4px; font-size: 13px; }
+.fl-install-status { margin: 8px 0; font-weight: 600; overflow-wrap: anywhere; }
+.fl-install-status.fl-ok, .fl-install-state.fl-ok { color: var(--ok); }
+.fl-install-status.fl-error, .fl-install-state.fl-error { color: var(--danger); }
+.fl-install-status.fl-warn, .fl-install-state.fl-warn, .fl-install-status.fl-wait, .fl-install-state.fl-wait { color: var(--warn); }
+.fl-installs { margin: 0 0 12px; display: flex; flex-direction: column; gap: 8px; }
+.fl-installs-title { margin: 0; font-size: 14px; }
+.fl-install-card { border: 1px dashed var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.fl-install-head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.fl-install-state { font-size: 13px; overflow-wrap: anywhere; }
+.fl-install-result { max-width: 760px; }
+.fl-warning:empty { display: none; }
+.fl-form-body .fl-tag-input { width: 100%; box-sizing: border-box; }
