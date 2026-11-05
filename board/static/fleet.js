@@ -18,7 +18,7 @@
     identity_mismatch: 'Offline: identity mismatch (FLOW_WORKER_ID differs)',
   };
   const RESULT = { installed: ['✓', 'Installed'], absent: ['✗', 'Absent'], unknown: ['?', 'Unknown'], error: ['?', 'Check failed'] };
-  const config = { metricsMs: 3000, fullMs: 30000 };
+  const config = { metricsMs: 3000, fullMs: 30000, installMs: 2000 };
   const MAX_SLOTS = 100;  // the worker capacity gate's maximum (agents/flowkit/capacity.py MAX_SLOTS)
 
   // ------------------------------------------------------------------ Pure helpers
@@ -141,6 +141,75 @@
     return { sections, warnings };
   }
 
+
+  // ------------------------------------------------------------------ One-line install (pure helpers)
+  const INSTALL_STEPS = { check: 'Checking the PC', download: 'Downloading the worker', python: 'Installing Python packages', npm: 'Installing the agent adapters',
+    token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection' };
+  const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?)$/i;
+
+  /* The server address as the server will accept it: scheme://host[:port] and never a loopback name. */
+  function serverAddress(value) {
+    const text = String(value || '').trim();
+    if (!text) return { error: 'Enter the address this PC uses to reach this server' };
+    let url;
+    try { url = new URL(text); } catch { return { error: 'The server address must start with http:// or https:// and name a host' }; }
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return { error: 'The server address must start with http:// or https:// and name a host' };
+    if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) return { error: 'Use only scheme, host and port, for example http://192.168.1.10:8090' };
+    if (LOOPBACK.test(url.hostname) || url.hostname.toLowerCase().endsWith('.localhost')) return { error: 'The PC cannot reach this server at localhost; use the name or address the PC can reach' };
+    return { value: url.origin };
+  }
+
+  /* Check the install form the way the server will; returns {errors: {field: message}, body}. */
+  function validateInstall(v, { taken = [] } = {}) {
+    const errors = {};
+    const id = String(v.id || '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) errors.id = 'A name is 1 to 64 letters, digits, dashes or underscores, starting with a letter or digit';
+    else if (taken.includes(id)) errors.id = `${id} is already registered; edit it instead`;
+    if (!OS_LABELS[v.os]) errors.os = "Choose the PC's operating system";
+    if (!(v.engines || []).length) errors.engines = 'Choose at least one engine';
+    if (!validLabel(String(v.pool || '').trim())) errors.pool = 'A pool is 1 to 100 characters without commas';
+    const tags = (v.tags || []).map((t) => String(t).trim());
+    if (tags.some((t) => !validLabel(t))) errors.tags = 'A tag is 1 to 100 characters without commas';
+    const whole = (value, max) => /^\d+$/.test(String(value).trim()) && Number(value) >= 1 && Number(value) <= max;
+    if (!whole(v.slots, MAX_SLOTS)) errors.slots = `Slots must be a whole number from 1 to ${MAX_SLOTS}`;
+    const percent = (value) => /^\d+(\.\d+)?$/.test(String(value).trim()) && Number(value) > 0 && Number(value) <= 100;
+    if (!percent(v.cpu_limit)) errors.cpu_limit = 'The CPU limit is above 0 and at most 100';
+    if (!percent(v.ram_limit)) errors.ram_limit = 'The RAM limit is above 0 and at most 100';
+    const server = serverAddress(v.server);
+    if (server.error) errors.server = server.error;
+    if (Object.keys(errors).length) return { errors, body: null };
+    return { errors, body: { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
+      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value } };
+  }
+
+  /* The commands to show for the chosen operating system, with the elevation note. */
+  function installCommands(os, commands) {
+    const windows = os === 'windows';
+    return windows
+      ? [{ id: 'powershell', label: 'Windows PowerShell', hint: 'Open PowerShell as a normal user (not as Administrator) and paste:', text: commands.powershell },
+         { id: 'cmd', label: 'Command Prompt (cmd)', hint: 'Or in a normal Command Prompt:', text: commands.cmd }]
+      : [{ id: 'bash', label: os === 'macos' ? 'macOS Terminal' : 'Linux terminal', hint: 'Open a terminal as your normal user (no sudo) and paste:', text: commands.bash }];
+  }
+
+  /* One sentence for an install record: what it is waiting for, where it is, or why it failed. */
+  function installProgress(record, now = Date.now()) {
+    if (!record) return { text: 'This install link is no longer listed.', level: 'warn' };
+    const stepText = INSTALL_STEPS[record.step] || null;
+    if (record.state === 'cancelled') return { text: 'Cancelled.', level: 'muted' };
+    if (record.state === 'expired' || (record.state === 'pending' && record.expires_at * 1000 <= now)) return { text: 'The link expired. Create a new one.', level: 'warn' };
+    if (record.state === 'registered') {
+      return record.connected ? { text: `Connected${record.hostname ? ` from ${record.hostname}` : ''}.`, level: 'ok' }
+        : { text: 'Registered. Waiting for the worker to connect…', level: 'wait' };
+    }
+    if (record.error) return { text: `Failed${stepText ? ` while ${stepText.toLowerCase()}` : ''}: ${record.error}`, level: 'error' };
+    if (!record.step) return { text: 'Waiting for you to run the command on the PC…', level: 'wait' };
+    return { text: `${stepText || record.step}…`, level: 'wait' };
+  }
+
+  function minutesLeft(expiresAt, now = Date.now()) {
+    return Math.max(0, Math.ceil((expiresAt * 1000 - now) / 60000));
+  }
+
   // ------------------------------------------------------------------ DOM helpers
   const PROPS = new Set(['value', 'checked', 'disabled', 'hidden', 'readOnly']);
   function h(tag, attrs, ...children) {
@@ -167,23 +236,25 @@
   // ------------------------------------------------------------------ The tab
   function mount(container, options = {}) {
     const request = options.request || fetchJson;
-    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false };
+    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false, installs: [], installTimer: null };
 
     const status = h('p', { class: 'fl-status', role: 'status' });
     // One polite live region for action results and connection changes; metric ticks are not announced.
     const live = h('p', { class: 'fl-live fl-sr', 'aria-live': 'polite' });
     const stale = h('p', { class: 'fl-stale', hidden: true });
     const list = h('div', { class: 'fl-list', role: 'list', 'aria-label': 'Registered PCs' });
+    const pending = h('section', { class: 'fl-installs', 'aria-label': 'PCs being installed', hidden: true });
     const formPanel = h('section', { class: 'fl-form', hidden: true, 'aria-labelledby': 'fl-form-title' });
     const top = h('div', { class: 'fl-top' },
       h('div', { class: 'fl-heading' }, h('h2', { class: 'fl-title', id: 'fl-title' }, 'Fleet'),
         h('p', { class: 'fl-hint' }, 'One entry per PC. A PC serves every engine selected for it through its execution service.')),
       h('div', { class: 'fl-actions' },
-        h('button', { type: 'button', class: 'primary', onclick: () => openForm(null) }, 'Register PC'),
+        h('button', { type: 'button', class: 'primary', onclick: () => openInstall() }, 'Register PC'),
+        h('button', { type: 'button', class: 'secondary', 'data-action': 'advanced', onclick: () => openForm(null) }, 'Register by URL (advanced)'),
         h('button', { type: 'button', class: 'secondary', onclick: () => load(true) }, 'Reload'),
         h('button', { type: 'button', class: 'secondary', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')),
       status);
-    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, list), live));
+    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, pending, list), live));
 
     const say = (text, error = false) => { status.textContent = text; status.classList.toggle('error', error); };
     const announce = (text) => { live.textContent = ''; setTimeout(() => { live.textContent = text; }, 30); };
@@ -280,6 +351,7 @@
       if (!r.ok) { say(`Could not load the fleet: ${errorText(r)}`, true); if (S.workers.length) { markStale(r); render(); } return false; }
       const first = !S.states.size;
       S.workers = r.data.workers || []; S.tags = r.data.tags || []; S.pools = r.data.pools || [];
+      loadInstalls();
       S.lastFull = S.lastMetrics = Date.now(); S.staleSince = null; stale.hidden = true;
       noteStates(S.workers, first);
       render();
@@ -326,7 +398,200 @@
       announce(`Capabilities of ${id} refreshed`);
     }
 
-    // ---- registration and settings form
+
+    // ---- one-line install: form, command, live progress
+    async function loadInstalls() {
+      const r = await request('GET', '/api/fleet/installs');
+      if (r.ok) S.installs = r.data.installs || [];
+      drawInstalls();
+      return r.ok;
+    }
+
+    function drawInstalls() {
+      const open = S.installs.filter((i) => !(i.state === 'registered' && i.connected) && i.state !== 'cancelled' && i.state !== 'expired');
+      pending.hidden = !open.length || !!S.form;
+      pending.replaceChildren(...(open.length ? [h('h3', { class: 'fl-installs-title' }, 'Waiting to be installed')] : []),
+        ...open.map((record) => {
+          const progress = installProgress(record);
+          return h('article', { class: 'fl-install-card', 'data-install': record.id },
+            h('div', { class: 'fl-install-head' }, h('strong', {}, record.id), h('span', { class: `fl-install-state fl-${progress.level}` }, progress.text)),
+            h('div', { class: 'fl-row' },
+              record.commands ? h('button', { type: 'button', class: 'secondary', 'data-action': 'show-command', onclick: () => showInstall(record) }, 'Show command') : null,
+              record.state === 'pending' ? h('button', { type: 'button', class: 'secondary', 'data-action': 'cancel-install', onclick: () => cancelInstall(record) }, 'Cancel') : null));
+        }));
+    }
+
+    async function cancelInstall(record) {
+      const r = await request('DELETE', `/api/fleet/installs/${enc(record.code)}`);
+      if (!r.ok) { say(`Could not cancel: ${errorText(r)}`, true); return false; }
+      say(`Cancelled the install link for ${record.id}.`);
+      announce(`Install link for ${record.id} cancelled`);
+      await loadInstalls();
+      return true;
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard?.writeText && window.isSecureContext) return navigator.clipboard.writeText(text).then(() => true, () => false);
+      const area = h('textarea', { 'aria-hidden': 'true', tabindex: '-1', style: 'position:fixed;opacity:0' });
+      area.value = text; document.body.append(area); area.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { ok = false; }
+      area.remove();
+      return Promise.resolve(ok);
+    }
+
+    /* The result of a valid form: the command for the PC's OS, its status and a way out. */
+    function showInstall(record, commands = record.commands) {
+      clearTimeout(S.installTimer);
+      S.form = { install: true };
+      const status = h('p', { class: 'fl-install-status', role: 'status' });
+      const note = h('p', { class: 'fl-hint fl-install-expiry' });
+      const done = h('button', { type: 'button', class: 'primary', 'data-action': 'install-done', hidden: true, onclick: async () => { closeForm(); await load(); } }, 'Done');
+      const cancel = h('button', { type: 'button', class: 'secondary', 'data-action': 'cancel-install', onclick: async () => { if (await cancelInstall(record)) closeForm(); } }, 'Cancel this install');
+      const blocks = installCommands(record.os, commands).map((c) => {
+        const pre = h('pre', { class: 'fl-code fl-command', 'data-command': c.id, tabindex: '0' }, h('code', {}, c.text));
+        const button = h('button', { type: 'button', class: 'secondary', 'data-action': `copy-${c.id}`, onclick: async () => {
+          const ok = await copyText(c.text);
+          button.textContent = ok ? 'Copied' : 'Select the command and copy it';
+          announce(ok ? `${c.label} command copied` : 'Copy failed: select the command and copy it');
+          setTimeout(() => { button.textContent = 'Copy'; }, 2500);
+        } }, 'Copy');
+        return h('section', { class: 'fl-command-block', 'aria-label': c.label }, h('h4', {}, c.label), h('p', { class: 'fl-hint' }, c.hint), pre, h('div', { class: 'fl-row' }, button));
+      });
+      formPanel.replaceChildren(h('div', { class: 'fl-form-body fl-install-result' },
+        h('h3', { id: 'fl-form-title' }, `Install ${record.id}`),
+        h('p', { class: 'fl-hint' }, 'Run one command on the PC. It downloads the worker from this server, installs it for that user and connects back; nothing on the PC needs to be opened.'),
+        ...blocks,
+        h('p', { class: 'fl-elevation' }, h('strong', {}, 'Run as a normal user. '), 'Do not use Administrator or sudo: everything installs for your own user.'),
+        h('p', { class: 'fl-hint' }, 'The PC needs Python 3.10+ and Node.js 18+. If either is missing the command stops and tells you how to install it.'),
+        note, status,
+        h('div', { class: 'fl-row fl-form-actions' }, cancel, done)));
+      formPanel.hidden = false; list.hidden = true; pending.hidden = true;
+      formPanel.parentElement.scrollTop = 0;
+      const tick = async () => {
+        if (!S.form?.install || !S.open) return;
+        await loadInstalls();
+        pending.hidden = true;
+        const current = S.installs.find((i) => i.code === record.code);
+        const progress = installProgress(current);
+        status.textContent = progress.text; status.className = `fl-install-status fl-${progress.level}`;
+        note.textContent = current?.state === 'pending' ? `The link works once and expires in about ${minutesLeft(record.expires_at)} min.` : '';
+        const finished = current?.state === 'registered' && current.connected;
+        done.hidden = !finished;
+        if (finished) { announce(`${record.id} is connected`); say(`${record.id} is connected.`); return; }
+        if (!current || ['cancelled', 'expired'].includes(current.state)) return;
+        S.installTimer = setTimeout(tick, config.installMs);
+      };
+      tick();
+    }
+
+    /* The register form: details first, validated before any install link exists. */
+    function openInstall(preset = {}) {
+      clearTimeout(S.installTimer);
+      S.form = { install: true, engines: preset.engines || ['hatchet'] };
+      const f = S.form;
+      const taken = () => S.workers.map((w) => w.id);
+      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])] };
+      const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
+      const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
+      const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
+        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server') };
+
+      const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
+      const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
+        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; } }), ` ${label}`)), errors.os);
+      const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
+        ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
+          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`)), errors.engines);
+
+      const poolSelect = h('select', { name: 'pool', 'aria-describedby': 'fl-err-pool' });
+      const newPoolInput = h('input', { name: 'new_pool', maxlength: 100, autocomplete: 'off', 'aria-label': 'New pool name', placeholder: 'New pool name', hidden: true });
+      const drawPoolOptions = () => {
+        const names = [...new Set([...S.pools, 'default'])].sort();
+        poolSelect.replaceChildren(...names.map((p) => h('option', { value: p }, p)), h('option', { value: '__new__' }, 'New pool…'));
+        poolSelect.value = names.includes(state.pool) ? state.pool : names[0];
+        state.pool = poolSelect.value;
+      };
+      poolSelect.addEventListener('change', () => { state.newPool = poolSelect.value === '__new__'; newPoolInput.hidden = !state.newPool; if (!state.newPool) state.pool = poolSelect.value; else newPoolInput.focus(); });
+
+      const tagInput = h('input', { name: 'tag', class: 'fl-tag-input', list: 'fl-install-tags', autocomplete: 'off', spellcheck: 'false', maxlength: 100, placeholder: 'Type a tag and press Enter', 'aria-describedby': 'fl-err-tags' });
+      const tagList = h('datalist', { id: 'fl-install-tags' }, S.tags.map((t) => h('option', { value: t })));
+      const chosen = h('div', { class: 'fl-chosen-tags', 'aria-label': 'Chosen tags' });
+      const drawChosen = () => chosen.replaceChildren(...state.tags.map((t) => h('span', { class: 'fl-chip' }, t,
+        h('button', { type: 'button', class: 'fl-x', 'aria-label': `Remove tag ${t}`, onclick: () => { state.tags = state.tags.filter((x) => x !== t); drawChosen(); tagInput.focus(); } }, '×'))));
+      const addTag = () => {
+        const name = tagInput.value.trim().replace(/,$/, '');
+        if (!name) return;
+        if (!validLabel(name)) { errors.tags.textContent = 'A tag is 1 to 100 characters without commas'; return; }
+        errors.tags.textContent = '';
+        if (!state.tags.includes(name)) state.tags.push(name);
+        tagInput.value = ''; drawChosen();
+      };
+      tagInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addTag(); } });
+      tagInput.addEventListener('blur', addTag);
+
+      const number = (name, value, min, max, step = 1) => h('input', { name, type: 'number', inputmode: 'decimal', min, max, step, value: String(value), 'aria-describedby': `fl-err-${name}` });
+      const slots = number('slots', preset.slots ?? 1, 1, MAX_SLOTS), cpu = number('cpu_limit', preset.cpu_limit ?? 90, 1, 100, 'any'), ram = number('ram_limit', preset.ram_limit ?? 90, 1, 100, 'any');
+      const origin = typeof location !== 'undefined' && location.origin && location.origin !== 'null' ? location.origin : '';
+      const serverInput = h('input', { name: 'server', type: 'url', autocomplete: 'off', spellcheck: 'false', value: preset.server || origin, placeholder: 'http://192.168.1.10:8090', 'aria-describedby': 'fl-server-help fl-err-server' });
+      const serverWarning = h('small', { class: 'fl-warning', 'data-warning': 'server' });
+      const drawServerWarning = () => {
+        const check = serverAddress(serverInput.value);
+        const plain = check.value && check.value.startsWith('http://');
+        const private_ = plain && (/^http:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(check.value) || /^http:\/\/[^./:]+(:\d+)?$/.test(check.value) || /\.ts\.net/i.test(check.value));
+        serverWarning.textContent = plain && !private_ ? 'This address uses plain http outside a private network or tailnet: the install command and the PC\'s token would cross it unencrypted. Prefer https.' : '';
+      };
+      serverInput.addEventListener('input', drawServerWarning);
+
+      const field = (label, input, helpText, helpId, name) => h('label', { class: 'fl-field' }, h('span', {}, label), input, helpText ? h('small', { id: helpId }, helpText) : null, name ? errors[name] : null);
+      const submit = h('button', { type: 'submit', class: 'primary' }, 'Create install command');
+      const form = h('form', { class: 'fl-form-body', novalidate: true },
+        h('h3', { id: 'fl-form-title' }, 'Register a PC'),
+        h('p', { class: 'fl-hint' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
+        field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
+        osBoxes, engineBoxes,
+        h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
+        h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags (optional)'), chosen, tagInput, tagList, errors.tags),
+        h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
+          field('Slots (jobs at once, all engines)', slots, null, null, 'slots'), field('CPU limit (%)', cpu, null, null, 'cpu_limit'), field('RAM limit (%)', ram, null, null, 'ram_limit'),
+          h('small', {}, 'New work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
+        field('Address the PC uses to reach this server', serverInput, 'Name or IP and port the PC can open, for example http://192.168.1.10:8090. Not localhost.', 'fl-server-help', 'server'),
+        serverWarning, errorBox,
+        h('div', { class: 'fl-row fl-form-actions' }, h('button', { type: 'button', class: 'secondary', onclick: closeForm }, 'Cancel'), submit));
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (S.busy) return;
+        addTag();
+        errorBox.replaceChildren();
+        for (const node of Object.values(errors)) node.textContent = '';
+        for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
+        const pool = state.newPool ? newPoolInput.value : poolSelect.value;
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value }, { taken: taken() });
+        if (!result.body) {
+          const names = Object.keys(result.errors);
+          for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
+          errorBox.textContent = `Fix ${names.length === 1 ? 'this' : 'these'} first: ${names.map((n) => result.errors[n]).join('; ')}.`;
+          form.querySelector('[aria-invalid="true"]')?.focus?.();
+          return;
+        }
+        S.busy = true; submit.disabled = true;
+        const r = await request('POST', '/api/fleet/installs', result.body);
+        S.busy = false; submit.disabled = false;
+        if (!r.ok) { errorBox.textContent = errorText(r); return; }
+        say(`Install command created for ${result.body.id}.`);
+        announce(`Install command for ${result.body.id} created`);
+        showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
+      });
+
+      drawPoolOptions(); drawChosen(); drawServerWarning();
+      formPanel.replaceChildren(form);
+      formPanel.hidden = false; list.hidden = true; pending.hidden = true;
+      formPanel.parentElement.scrollTop = 0;
+      idInput.focus();
+    }
+
+    // ---- direct-URL registration and settings form
     function openForm(worker, preset = {}) {
       const editing = !!worker;
       S.form = { worker, engines: preset.engines || (worker ? [...worker.engines] : ['hatchet']), os: 'windows',
@@ -499,9 +764,11 @@
 
     function closeForm() {
       S.form = null;
+      clearTimeout(S.installTimer);
       formPanel.replaceChildren();
       formPanel.hidden = true;
       list.hidden = false;
+      drawInstalls();
     }
 
     return {
@@ -518,7 +785,7 @@
     };
   }
 
-  const api = { MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

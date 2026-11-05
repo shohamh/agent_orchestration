@@ -85,6 +85,7 @@ const result = (status, minutesAgo = 5) => ({ status, checked_at: iso(minutesAgo
 const ENGINES = ['hatchet', 'prefect', 'trigger'];
 let workers, tags, calls, fault, metrics;
 function reset() {
+  installs.clear(); installCount = 0;
   calls = []; fault = { metrics: false };
   tags = ['cuda', 'linux', 'windows'];
   workers = new Map(Object.entries({
@@ -123,6 +124,15 @@ function save(body, existing) {
   workers.set(w.id, w);
   return { worker: publicWorker(w), settings_sync: w.online ? { state: 'applied' } : { state: 'pending' } };
 }
+
+const installs = new Map();
+let installCount = 0;
+const installCommands = (record, origin) => {
+  const link = `${origin}/install/${record.code}`;
+  return { powershell: `irm '${link}/install.ps1' | iex`, cmd: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${link}/install.ps1' | iex"`,
+    bash: `curl -fsSL '${link}/install.sh' | bash`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
+};
+const installView = (r) => { const { commands, ...rest } = r; return rest; };
 const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
@@ -150,6 +160,30 @@ const server = http.createServer(async (request, response) => {
       const existing = workers.get(decodeURIComponent(m[1]));
       if (!existing) return json(404, { error: 'Unknown worker' });
       return json(200, save({ ...body, id: existing.id }, existing));
+    }
+
+    if (url.pathname === '/api/fleet/installs' && request.method === 'GET') {
+      return json(200, { installs: [...installs.values()].filter((r) => r.state !== 'cancelled').map((r) => (r.state === 'pending' ? { ...installView(r), commands: r.commands } : installView(r))) });
+    }
+    if (url.pathname === '/api/fleet/installs' && request.method === 'POST') {
+      if (workers.has(body.id)) return json(400, { error: `${body.id} is already registered; edit it instead` });
+      if ([...installs.values()].some((r) => r.id === body.id && r.state === 'pending')) return json(400, { error: `${body.id} already has an install link waiting; cancel it first` });
+      const code = `code${String(++installCount).padStart(39, 'x')}`;
+      const record = { code, id: body.id, os: body.os, state: 'pending', created_at: Date.now() / 1000, expires_at: Date.now() / 1000 + 1800, step: null, error: null, hostname: null, connected: false, form: body };
+      record.commands = installCommands(record, body.server);
+      installs.set(code, record);
+      return json(200, { install: installView(record), commands: record.commands });
+    }
+    m = url.pathname.match(/^\/api\/fleet\/installs\/([^/]+)$/);
+    if (m && request.method === 'DELETE') {
+      const record = installs.get(m[1]);
+      if (!record) return json(400, { error: 'Unknown install link' });
+      record.state = 'cancelled';
+      return json(200, { install: installView(record) });
+    }
+    if (url.pathname === '/__install' && request.method === 'POST') {  // test hook: move an install along
+      Object.assign(installs.get(body.code), body.set);
+      return json(200, {});
     }
     m = url.pathname.match(/^\/api\/fleet\/workers\/([^/]+)\/refresh$/);
     if (m && request.method === 'POST') {
@@ -334,7 +368,7 @@ test('live CPU and RAM: text values, labels, limits, unknown and stale, without 
 
 test('register an offline PC: engine and OS instructions, several engines and pools, tag autocomplete and inline creation', async () => {
   await openFleet();
-  await click('.fl-top button', 'Register PC');
+  await click('.fl-top button', 'Register by URL (advanced)');
   await waitFor(`!document.querySelector('.fl-form').hidden`, 'registration form');
   const steps = () => text('.fl-instructions');
   assert.equal(await evaluate(`${q('.fl-form input[name="engine"][value="hatchet"]')}.checked`), true, 'Hatchet is preselected');
@@ -405,7 +439,7 @@ test('register an offline PC: engine and OS instructions, several engines and po
   assert.match(await text(worker('lab-pc')), /Awaiting connection/);
   assert.equal(await evaluate(`document.querySelectorAll('${worker('lab-pc')} [data-engine]').length`), 3);
   // A PC with an endpoint: the endpoint and token variable are write-only.
-  await click('.fl-top button', 'Register PC');
+  await click('.fl-top button', 'Register by URL (advanced)');
   await type('.fl-form input[name="id"]', 'net-pc');
   await type('.fl-form input[name="url"]', 'https://net-pc.internal:8096');
   await type('.fl-form input[name="token_env"]', 'NET_PC_TOKEN');
@@ -418,7 +452,7 @@ test('register an offline PC: engine and OS instructions, several engines and po
 
 test('the same PC connects to a second engine by editing it, never as a duplicate', async () => {
   await openFleet();
-  await click('.fl-top button', 'Register PC');
+  await click('.fl-top button', 'Register by URL (advanced)');
   await type('.fl-form input[name="id"]', 'pc-a');
   await click('.fl-form label', 'Trigger.dev');
   await click('.fl-form label', 'Hatchet');  // only Trigger.dev
@@ -504,11 +538,236 @@ test('phone width: the list and the registration form never scroll sideways', as
     await openFleet();
     const sideways = () => evaluate(`(() => { const b = document.querySelector('.fl-body'); return b.scrollWidth - b.clientWidth; })()`);
     assert.ok(await sideways() <= 1, 'worker list fits');
-    await click('.fl-top button', 'Register PC');
+    await click('.fl-top button', 'Register by URL (advanced)');
     await waitFor(`!document.querySelector('.fl-form').hidden`);
     assert.ok(await sideways() <= 1, 'form fits (code blocks scroll inside themselves)');
     await shot('fleet-phone');
     await click('.fl-form button', 'Cancel');
+  } finally {
+    await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  }
+});
+
+// ---------------------------------------------------------------- one-line install: pure helpers
+test('install form validation mirrors the server and builds the request only when valid', () => {
+  const valid = { id: 'build-pc', os: 'linux', engines: ['prefect', 'hatchet'], pool: 'build', tags: ['gpu', 'gpu', ' cuda '], slots: '2', cpu_limit: '80', ram_limit: '85.5', server: 'http://192.168.1.10:8090/' };
+  const ok = Fleet.validateInstall(valid, { taken: ['pc-a'] });
+  assert.deepEqual(ok.errors, {});
+  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090' });
+  const bad = (change, field) => { const r = Fleet.validateInstall({ ...valid, ...change }, { taken: ['pc-a'] }); assert.equal(r.body, null, field); assert.ok(r.errors[field], `${field} has a message`); };
+  for (const id of ['', ' ', 'a b', '-x', 'x'.repeat(65), 'a/b', 'pc-a']) bad({ id }, 'id');
+  bad({ os: '' }, 'os'); bad({ os: 'beos' }, 'os');
+  bad({ engines: [] }, 'engines');
+  for (const pool of ['', 'a,b', ' ']) bad({ pool }, 'pool');
+  bad({ tags: ['a,b'] }, 'tags');
+  for (const slots of ['0', '101', '1.5', '', 'x']) bad({ slots }, 'slots');
+  for (const cpu_limit of ['0', '101', '', 'x', '-5']) bad({ cpu_limit }, 'cpu_limit');
+  bad({ ram_limit: '0' }, 'ram_limit');
+  for (const server of ['', 'localhost:8090', 'http://localhost:8090', 'http://127.0.0.1:8090', 'http://[::1]:8090', 'http://0.0.0.0:8090', 'ftp://h:1', 'http://u:p@h:1', 'http://h:1/path', 'http://h:1?x=1', 'nope']) bad({ server }, 'server');
+  assert.equal(Fleet.serverAddress('https://board.example.ts.net/').value, 'https://board.example.ts.net');
+});
+
+test('install commands: Windows gets PowerShell and cmd, others get bash, and nobody is told to elevate', () => {
+  const commands = { powershell: "irm 'http://s/install/c/install.ps1' | iex", cmd: 'powershell -NoProfile -Command "..."', bash: "curl -fsSL 'http://s/install/c/install.sh' | bash" };
+  assert.deepEqual(Fleet.installCommands('windows', commands).map((c) => c.id), ['powershell', 'cmd']);
+  assert.deepEqual(Fleet.installCommands('linux', commands).map((c) => c.id), ['bash']);
+  assert.match(Fleet.installCommands('macos', commands)[0].label, /macOS/);
+  for (const os of ['windows', 'linux', 'macos']) for (const c of Fleet.installCommands(os, commands)) assert.match(c.hint, /normal user|normal Command Prompt/, `${os}: the hint names a normal user`);
+});
+
+test('install progress words: waiting, each step, failure with its step, registered, connected, expired, cancelled', () => {
+  const now = 1_000_000_000_000;
+  const record = (extra) => ({ state: 'pending', expires_at: now / 1000 + 600, step: null, error: null, connected: false, ...extra });
+  assert.match(Fleet.installProgress(record(), now).text, /Waiting for you to run the command/);
+  assert.equal(Fleet.installProgress(record({ step: 'python' }), now).text, 'Installing Python packages…');
+  const failed = Fleet.installProgress(record({ step: 'npm', error: 'npm could not reach the registry' }), now);
+  assert.deepEqual([failed.level, /while installing the agent adapters: npm could not reach/.test(failed.text)], ['error', true]);
+  assert.match(Fleet.installProgress(record({ state: 'registered' }), now).text, /Waiting for the worker to connect/);
+  assert.deepEqual(Fleet.installProgress(record({ state: 'registered', connected: true, hostname: 'PC-1' }), now), { text: 'Connected from PC-1.', level: 'ok' });
+  assert.match(Fleet.installProgress(record({ expires_at: now / 1000 - 1 }), now).text, /expired/);
+  assert.match(Fleet.installProgress(record({ state: 'cancelled' }), now).text, /Cancelled/);
+  assert.match(Fleet.installProgress(null, now).text, /no longer listed/);
+  assert.equal(Fleet.minutesLeft(now / 1000 + 61, now), 2);
+  assert.equal(Fleet.minutesLeft(now / 1000 - 5, now), 0);
+});
+
+// ---------------------------------------------------------------- one-line install: in the browser
+const fillInstall = async ({ id = 'build-pc', os = 'windows', server = 'http://192.168.1.10:8090' } = {}) => {
+  await type('.fl-form input[name="id"]', id);
+  await click(`.fl-form input[name="os"][value="${os}"]`);
+  await type('.fl-form input[name="server"]', server);
+};
+const submitInstall = () => click('.fl-form button', 'Create install command');
+
+test('register a PC: the form is checked first, and no install command exists until it is valid', async () => {
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('!document.querySelector(".fl-form").hidden && document.querySelector(".fl-form input[name=id]")');
+  assert.equal(await evaluate('document.activeElement.name'), 'id', 'focus starts on the name');
+  const before = calls.length;
+  await evaluate('document.querySelector(".fl-form input[name=server]").value = "http://localhost:8090"');
+  await submitInstall();
+  await waitFor('document.querySelector(\'[data-error="id"]\').textContent.length > 0', 'name error shown');
+  assert.match(await text('[data-error="server"]'), /cannot reach this server at localhost/);
+  assert.match(await text('.fl-form-error'), /Fix these first/);
+  assert.equal(await evaluate('document.querySelector(".fl-form input[name=id]").getAttribute("aria-invalid")'), 'true');
+  assert.equal(calls.slice(before).filter((c) => c.method === 'POST').length, 0, 'nothing is sent while the form is invalid');
+  assert.equal(await evaluate('!!document.querySelector(".fl-command")'), false, 'no command is shown');
+  await type('.fl-form input[name="id"]', 'pc-a');
+  await type('.fl-form input[name="server"]', 'http://192.168.1.10:8090');
+  await submitInstall();
+  assert.match(await text('[data-error="id"]'), /already registered/);
+  assert.equal(calls.slice(before).filter((c) => c.method === 'POST').length, 0);
+  await type('.fl-form input[name="id"]', 'build-pc');
+  await type('.fl-form input[name="slots"]', '0');
+  await submitInstall();
+  assert.match(await text('[data-error="slots"]'), /whole number from 1 to 100/);
+  assert.equal(calls.slice(before).filter((c) => c.method === 'POST').length, 0);
+  await shot('install-form-errors');
+});
+
+test('a valid form creates the install link and shows the Windows commands with the elevation advice', async () => {
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'build-pc', os: 'windows' });
+  await click('.fl-form input[name="engine"][value="prefect"]');
+  await type('.fl-form input[name="slots"]', '2');
+  await type('.fl-form input[name="cpu_limit"]', '80');
+  await evaluate('(() => { const i = document.querySelector(".fl-form input[name=tag]"); i.focus(); })()');
+  await call('Input.insertText', { text: 'gpu' }); await press('Enter');
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'both Windows commands shown');
+  const sent = lastCall('POST', '/api/fleet/installs').body;
+  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090' });
+  const record = [...installs.values()][0];
+  assert.equal(await text('[data-command="powershell"]'), `irm 'http://192.168.1.10:8090/install/${record.code}/install.ps1' | iex`);
+  assert.match(await text('[data-command="cmd"]'), /^powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'http:\/\/192\.168\.1\.10:8090\/install\//);
+  assert.equal(await evaluate('document.querySelectorAll(".fl-command").length'), 2);
+  assert.match(await text('.fl-elevation'), /Run as a normal user\. Do not use Administrator or sudo/);
+  assert.match(await text('.fl-install-result'), /Python 3\.10\+ and Node\.js 18\+/);
+  assert.match(await text('.fl-install-expiry'), /works once and expires in about (29|30) min/);
+  assert.match(await text('.fl-install-status'), /Waiting for you to run the command/);
+  assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
+  await click('[data-action="copy-powershell"]');
+  await waitFor('/Copied|Select the command/.test(document.querySelector(\'[data-action="copy-powershell"]\').textContent)', 'copy gives feedback');
+  assert.match(await text('.fl-live'), /command copied|Copy failed/);
+  await shot('install-command-windows');
+});
+
+test('Linux and macOS get one bash command, no cmd variant', async () => {
+  for (const [os, label] of [['linux', /Linux terminal/], ['macos', /macOS Terminal/]]) {
+    reset();
+    await openFleet();
+    await click('.fl-top button', 'Register PC');
+    await waitFor('document.querySelector(".fl-form input[name=id]")');
+    await fillInstall({ id: `pc-${os}`, os });
+    await submitInstall();
+    await waitFor('document.querySelectorAll(".fl-command").length === 1', `${os} shows one command`);
+    assert.match(await text('.fl-command-block h4'), label);
+    assert.match(await text('[data-command="bash"]'), /^curl -fsSL 'http:\/\/192\.168\.1\.10:8090\/install\/.+\/install\.sh' \| bash$/);
+    assert.match(await text('.fl-command-block .fl-hint'), /no sudo/);
+    await click('.fl-form-actions button', 'Cancel this install');
+    await waitFor('document.querySelector(".fl-form").hidden', 'form closes after cancelling');
+  }
+});
+
+test('the install status follows the PC: steps, a failure with its step, registered, then connected with Done', async () => {
+  reset();
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'live-pc', os: 'linux' });
+  await submitInstall();
+  await waitFor('document.querySelector(".fl-install-status")?.textContent.includes("Waiting for you")');
+  const code = [...installs.keys()][0];
+  const move = (set) => fetch(`${base}/__install`, { method: 'POST', body: JSON.stringify({ code, set }) });
+  await move({ step: 'download' });
+  await waitFor('document.querySelector(".fl-install-status").textContent === "Downloading the worker…"', 'download step shown');
+  await move({ step: 'npm', error: 'npm could not install the agent adapters (is the npm registry reachable?)' });
+  await waitFor('/Failed while installing the agent adapters: npm could not install/.test(document.querySelector(".fl-install-status").textContent)', 'failure shown with its step');
+  assert.equal(await evaluate('document.querySelector(".fl-install-status").classList.contains("fl-error")'), true);
+  await move({ step: 'register', error: null, state: 'registered' });
+  await waitFor('/Registered\\. Waiting for the worker to connect/.test(document.querySelector(".fl-install-status").textContent)', 'registered shown');
+  assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
+  await move({ connected: true, hostname: 'PC-LIVE' });
+  await waitFor('document.querySelector(".fl-install-status").textContent === "Connected from PC-LIVE."', 'connected shown');
+  await waitFor('!document.querySelector(\'[data-action="install-done"]\').hidden', 'Done appears');
+  await click('[data-action="install-done"]');
+  await waitFor('document.querySelector(".fl-form").hidden && !document.querySelector(".fl-list").hidden', 'Done returns to the list');
+  assert.equal(await evaluate('document.querySelector(".fl-installs").hidden'), true, 'a connected PC is no longer listed as pending');
+});
+
+test('a pending install survives closing the tab: it is listed with its command and can be cancelled', async () => {
+  reset();
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'later-pc', os: 'windows' });
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2');
+  await press('Escape');
+  await waitFor('document.querySelector(".fl-form").hidden || !document.querySelector("#fleet-dialog").open', 'escape leaves the install view');
+  if (await evaluate('document.querySelector("#fleet-dialog").open')) { await press('Escape'); }
+  await waitFor('!document.querySelector("#fleet-dialog").open', 'dialog closed');
+  await openFleet();
+  await waitFor('!document.querySelector(".fl-installs").hidden && document.querySelector(\'[data-install="later-pc"]\')', 'pending install listed');
+  assert.match(await text('[data-install="later-pc"]'), /Waiting for you to run the command/);
+  await click('[data-install="later-pc"] [data-action="show-command"]');
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'the command is shown again');
+  await click('.fl-form-actions button', 'Cancel this install');
+  await waitFor('document.querySelector(".fl-form").hidden');
+  assert.equal(lastCall('DELETE', '/api/fleet/installs/').method, 'DELETE');
+  assert.equal(await evaluate('document.querySelector(".fl-installs").hidden'), true, 'a cancelled install disappears');
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'later-pc' });
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'a cancelled name can be registered again');
+});
+
+test('the server refusing a name (already waiting) is shown on the form without losing the input', async () => {
+  reset();
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'dup-pc' });
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2');
+  await click('.fl-form-actions button', 'Cancel this install');   // cancel -> fine; now create a second waiting one via the API and try again
+  installs.set('dupcode'.padEnd(43, 'x'), { code: 'dupcode'.padEnd(43, 'x'), id: 'dup-pc', os: 'linux', state: 'pending', created_at: 0, expires_at: Date.now() / 1000 + 900, commands: {}, step: null, error: null, connected: false });
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'dup-pc' });
+  await submitInstall();
+  await waitFor('/already has an install link waiting/.test(document.querySelector(".fl-form-error").textContent)', 'server message shown');
+  assert.equal(await evaluate('document.querySelector(".fl-form input[name=id]").value'), 'dup-pc');
+});
+
+test('registering by URL stays available as the advanced path', async () => {
+  reset();
+  await openFleet();
+  await click('.fl-top button', 'Register by URL (advanced)');
+  await waitFor('document.querySelector(".fl-form input[name=token_env]")', 'the direct form opens');
+  assert.match(await text('.fl-form'), /Setup instructions|Prepare the PC/);
+});
+
+test('phone width: the install form and its command never scroll sideways', async () => {
+  reset();
+  await call('Emulation.setDeviceMetricsOverride', { width: 360, height: 740, deviceScaleFactor: 2, mobile: true });
+  try {
+    await openFleet();
+    await click('.fl-top button', 'Register PC');
+    await waitFor('document.querySelector(".fl-form input[name=id]")');
+    const wide = () => evaluate('document.documentElement.scrollWidth > innerWidth + 1 || document.querySelector(".fl").scrollWidth > document.querySelector(".fl").clientWidth + 1 || document.querySelector(".fl-body").scrollWidth > document.querySelector(".fl-body").clientWidth + 1');
+    assert.equal(await wide(), false, 'the form fits');
+    await fillInstall({ id: 'phone-pc', os: 'windows', server: 'http://192.168.100.200:8090' });
+    await submitInstall();
+    await waitFor('document.querySelectorAll(".fl-command").length === 2');
+    assert.equal(await wide(), false, 'the command view fits');
+    const style = await evaluate('(() => { const c = getComputedStyle(document.querySelector(".fl-command")); return [c.whiteSpace, c.overflowX, c.overflowWrap]; })()');
+    assert.ok(style[0] === 'pre-wrap' || ['auto', 'scroll'].includes(style[1]), `the long command wraps or scrolls inside its box: ${style}`);
+    await shot('install-command-phone');
   } finally {
     await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   }
