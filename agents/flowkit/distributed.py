@@ -14,11 +14,13 @@ from .artifacts import ancestor_files, snapshot, publish
 from .definition import FLOWS_DIR
 from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, pin_definition, publication_lock
 from .fleet_matching import requirements_for, validate_launch, with_engine
+from .relay import is_relayed
 from .workers import fleet_status, routing, selection_for, selector, with_last_known
 
 PLACEMENT_POLL = 2.0  # seconds between placement checks while a step waits for a worker
 PROBE_INTERVAL = 15.0  # minimum seconds between on-demand capability probes of one worker
 TIMEOUT_SLACK = 5.0  # the engine's step timeout starts slightly before this coroutine does
+RELAYED_POLL = 1.0  # seconds between job polls through the relay (each poll is a round trip through the PC's connector)
 START_TIMEOUT = 5.0  # a start confirmation holds the cancel and settings locks, so it is short
 
 
@@ -519,7 +521,7 @@ class _Job:
                             raise _Replace('offline', data.get('error') or 'The worker cancelled the queued step')
                         raise RuntimeError(data.get('error') or 'Remote step failed')
                     if input_task.done(): input_task.result()
-                    await asyncio.sleep(.2)
+                    await asyncio.sleep(RELAYED_POLL if is_relayed(url) else .2)
             finally:
                 if input_task:
                     input_task.cancel()

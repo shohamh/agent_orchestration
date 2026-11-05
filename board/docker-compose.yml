@@ -32,6 +32,8 @@ services:
       # Portable flows: the flow host on the worker PC (agents/flow_host.py)
       FLOW_HOST_URL: ${FLOW_HOST_URL:-http://host.docker.internal:8095}
       FLOW_HOST_TOKEN: ${FLOW_HOST_TOKEN:-}
+      # The relay PCs install through and connect to (flow host starts it): see docs/workers-and-context.md
+      FLOW_RELAY_URL: ${FLOW_RELAY_URL:-http://host.docker.internal:8097}
       # Browser-visible engine dashboards (use reachable hostnames when opening from a phone).
       HATCHET_DASHBOARD_URL: ${HATCHET_DASHBOARD_URL:-http://localhost:8080}
       TRIGGER_DASHBOARD_URL: ${TRIGGER_DASHBOARD_URL:-http://localhost:8030}

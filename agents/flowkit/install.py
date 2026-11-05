@@ -253,7 +253,7 @@ def json_error(status, message):
 
 async def usable(request, require_pending=True):
     """The record for the request's code, or a generic 404 (slowed after repeated misses from one source)."""
-    source = request.remote or '?'
+    source = request.headers.get('X-Relay-Client') or request.remote or '?'  # the board proxy names the real peer
     count, since = FAILED_ATTEMPTS.get(source, (0, now()))
     if now() - since > 600: count, since = 0, now()
     if count >= 10: raise web.HTTPTooManyRequests(text=json.dumps({'error': 'Too many wrong links'}), content_type='application/json')

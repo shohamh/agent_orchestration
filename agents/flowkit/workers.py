@@ -10,7 +10,7 @@ import aiohttp
 import yaml
 from dotenv import dotenv_values
 
-from .fleet_registry import env_path
+from .fleet_registry import env_path, relayed
 
 ROOT = Path(__file__).resolve().parents[2]
 _CACHE_LOCK = threading.Lock()  # the flow host serves requests on threads
@@ -130,7 +130,7 @@ async def catalog(snapshot=None):
         async def health(worker):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
             public.update({'pool': worker['pools'][0], 'engines': list(worker.get('engines') or ENGINES),
-                           'connection': 'configured' if worker.get('url') else 'awaiting'})
+                           'connection': 'relay' if relayed(worker.get('url')) else 'configured' if worker.get('url') else 'awaiting'})
             from .fleet_registry import warnings
             if warnings(worker): public['warnings'] = warnings(worker)
             pending = {'settings_sync': {'state': 'pending'}}

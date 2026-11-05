@@ -83,6 +83,19 @@ class RelayTests(RelayFixture):
         method, path, authorization, size = [s for s in self.seen if s[0] == 'POST'][0]
         self.assertEqual((path, authorization), ('/echo/jobs?x=1', f'Bearer {TOKEN}'))  # the token is forwarded for the service's own check
 
+    async def test_the_protocols_gate_and_revision_headers_reach_the_service(self):
+        """The limits push and job cancel carry X-Flow-* headers; dropping them turns a push into a local override."""
+        await self.connect()
+        captured = {}
+        async def capture(request):
+            captured.update({k: v for k, v in request.headers.items() if k.lower().startswith('x-')})
+            return web.json_response({})
+        self.local.app.router._frozen = False
+        self.local.app.router.add_post('/capacity/settings', capture)
+        async with self.http.post(f'{self.url}/w/pc/capacity/settings', json={}, headers={**self.auth, 'X-Flow-Gate-ID': 'gate', 'X-Flow-Settings-Revision': '123', 'X-Other': 'dropped'}) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(captured, {'X-Flow-Gate-ID': 'gate', 'X-Flow-Settings-Revision': '123'})
+
     async def test_status_codes_and_empty_bodies_pass_through(self):
         await self.connect()
         async with self.http.get(f'{self.url}/w/pc/echo/missing?status=404', headers=self.auth) as response:

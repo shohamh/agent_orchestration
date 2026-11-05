@@ -123,10 +123,14 @@ def warnings(w):
                 'and stored at the next registry save']
     return []
 
+def relayed(url):
+    from .relay import is_relayed
+    return is_relayed(url)
+
 def _public(w):
     # Connection details never leave the coordinator: only whether an endpoint is configured.
     return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')}
-            | {'connection': 'configured' if w.get('url') else 'awaiting', 'online': False}
+            | {'connection': 'relay' if relayed(w.get('url')) else 'configured' if w.get('url') else 'awaiting', 'online': False}
             | ({'warnings': warnings(w)} if warnings(w) else {}))
 
 def load_fleet():

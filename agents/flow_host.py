@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -49,7 +50,7 @@ from flowkit import document, trigger_codegen  # noqa: E402
 from flowkit.activation import ENGINES, Store  # noqa: E402
 from flowkit.definition import FLOW_NAME, FlowError, parse_text  # noqa: E402
 
-WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py", 'execution': 'flow_execution_worker.py'}
+WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py", 'execution': 'flow_execution_worker.py', 'relay': 'fleet_relay.py'}
 # `lock` guards drafts and layouts (held briefly); `activation_lock` serializes activations and worker
 # restarts, which take seconds, so saving a draft never waits for a restart.
 lock = threading.RLock()
@@ -445,6 +446,32 @@ def coordinator_states(host: "Host | None") -> dict[str, str]:
     return states
 
 
+def relay_online() -> dict[str, bool]:
+    """Which relayed PCs have a live connector (the relay service answers on loopback); {} when it is down."""
+    from flowkit.relay import relay_base
+    try:
+        with urllib.request.urlopen(relay_base().rstrip('/') + '/relay-state', timeout=2) as response:
+            return {k: bool(v.get('online')) for k, v in json.loads(response.read()).items()}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def install_listing() -> list[dict]:
+    """Install links for the Fleet tab: pending ones with their commands, finished ones with whether the PC is connected."""
+    from flowkit import install
+    online = relay_online()
+    out = []
+    for record in sorted(install.all_records(), key=lambda r: r['created_at'], reverse=True):
+        if record['state'] == 'cancelled':
+            continue
+        view = install.view(record)
+        entry = {**view, 'connected': online.get(record['id'], False) if record['state'] == 'registered' else False}
+        if view['state'] == 'pending':
+            entry['commands'] = install.commands(record)
+        out.append(entry)
+    return out
+
+
 def fleet_worker(body: dict, worker_id: str | None) -> dict:
     """A fleet registration or edit: known fields only; new tag and pool names must be plain labels."""
     from flowkit.fleet_registry import label, load_fleet, tag_catalog
@@ -586,6 +613,16 @@ class Api(BaseHTTPRequestHandler):
                 return self._send(200, {'tags': fleet_registry.tag_catalog()}) or True
             if (method, path) == ('POST', '/fleet/tags'):
                 return self._send(200, {'tags': fleet_registry.add_tag(self._json_body().get('name'))}) or True
+            if (method, path) == ('GET', '/fleet/installs'):
+                return self._send(200, {'installs': install_listing()}) or True
+            if (method, path) == ('POST', '/fleet/installs'):
+                from flowkit import install
+                record = install.create(self._json_body(), registered={w['id'] for w in fleet_registry.load_fleet()})
+                return self._send(200, {'install': install.view(record), 'commands': install.commands(record)}) or True
+            install_match = re.fullmatch(r'/fleet/installs/([A-Za-z0-9_-]{43})', path)
+            if install_match and method == 'DELETE':
+                from flowkit import install
+                return self._send(200, {'install': install.cancel(install_match[1])}) or True
             if (method, path) == ('POST', '/fleet/workers'):
                 saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
                 return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
@@ -781,7 +818,8 @@ def main() -> None:
     bind, port = os.environ.get("FLOW_HOST_BIND", "127.0.0.1"), int(os.environ.get("FLOW_HOST_PORT", "8095"))
     if bind not in ('127.0.0.1','localhost','::1') and not os.environ.get('FLOW_HOST_TOKEN'):
         raise SystemExit('FLOW_HOST_TOKEN is required for a network flow host')
-    execution = Supervisor(['execution'] if os.environ.get('FLOW_EXECUTION_SERVICE', '1') != '0' else [])
+    execution = Supervisor((['execution'] if os.environ.get('FLOW_EXECUTION_SERVICE', '1') != '0' else [])
+                           + (['relay'] if os.environ.get('FLOW_RELAY_SERVICE', '1') != '0' else []))
     execution.restart()
     threading.Thread(target=execution.watch, daemon=True).start()
     host.startup()

@@ -26,15 +26,16 @@ RESPONSE_TIMEOUT = 125.0  # the coordinator's own client gives up after 120 s
 STATUS_FRESH = 15.0  # a pushed /health answer younger than this is served without a round trip
 MAX_BATCH = 16
 BODY_CHUNK = 64 * 1024
-FORWARD = ('authorization', 'content-type', 'accept')  # request headers handed to the PC's service
+FORWARD = ('authorization', 'content-type', 'accept')  # request headers handed to the PC's service, plus X-Flow-* (gate id and settings revision)
 MAX_BODY = 200 * 1024 * 1024
 
 DEFAULT_PORT = 8097
 
 
 def relay_base():
-    """Where coordinators reach the relay (loopback; the board proxies PCs to the same listener)."""
-    return os.environ.get('FLOW_RELAY_URL') or f"http://127.0.0.1:{os.environ.get('FLOW_RELAY_PORT', DEFAULT_PORT)}"
+    """Where coordinators reach the relay (loopback; the board proxies PCs to the same listener). The board's own
+    FLOW_RELAY_URL (how the board container reaches it) is a different variable."""
+    return os.environ.get('FLOW_RELAY_LOCAL_URL') or f"http://127.0.0.1:{os.environ.get('FLOW_RELAY_PORT', DEFAULT_PORT)}"
 
 
 def worker_url(worker_id):
@@ -140,7 +141,7 @@ async def coordinator_call(request):
         cached = peer.fresh_status()
         if cached is not None: return web.json_response(cached)
     if not peer.online(): return drop(request)
-    headers = {k: v for k, v in request.headers.items() if k.lower() in FORWARD}
+    headers = {k: v for k, v in request.headers.items() if k.lower() in FORWARD or k.lower().startswith('x-flow-')}
     call = Call(request.method, '/' + tail, request.query_string, headers, request)
     peer.calls[call.id] = call
     peer.pending.append(call)
