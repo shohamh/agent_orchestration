@@ -1,52 +1,182 @@
 # Execution workers and environment setup
 
-Start `agents/flow_host.py` as before. It now also supervises a loopback execution service on
-8096; this stays up when flow definitions re-register. New flows launched from the board use it.
-Older engine runs without worker selections retain their local executor and workspace behavior.
+Start `agents/flow_host.py` as before. It also supervises a loopback execution service on 8096
+(the implicit `local` worker); this stays up when flow definitions re-register. Other PCs run
+the same execution service and are registered in the coordinator's fleet registry, which the
+board's **Fleet** tab edits. Older engine runs without worker selections keep their local
+executor and workspace behavior.
 
 Each native task is still scheduled, retried and cancelled by its engine. Its Python coordinator
-dispatches the command or agent to the selected execution service. The node panel reports the
-**actual execution worker**, hostname, pool and tags after the job acquires a slot. This is distinct
-from the native engine's coordinator process. Prefect serve and Trigger development execution are
-supported by the shared runtime extension; choosing a native queue is not a PC-affinity guarantee.
+dispatches the command or agent to an execution service chosen from the fleet. The node panel
+reports the **actual execution worker**, hostname, pool and tags after the job is admitted. This
+is distinct from the native engine's coordinator process. Prefect serve and Trigger development
+execution are supported by the shared runtime extension; choosing a native queue is not a
+PC-affinity guarantee.
 
-## Add a PC
+## Register a PC
 
-Clone this repository on the execution PC, create the agents virtualenv, install
-`agents/requirements.txt` and `npm ci --prefix agents`, and install/log in to the desired agent
-CLIs using the existing [agent instructions](../agents/README.md). Then run:
+One registration is one PC, however many engines and pools it serves. In the board, open
+**Fleet**, then **Register PC**:
+
+1. Choose the engines and the operating system. The form shows setup steps generated for that
+   choice (the same steps as below).
+2. Enter the worker ID, the endpoint (`http(s)://<pc host>:8096`) and the name of the environment
+   variable that holds its token (default `FLOW_WORKER_TOKEN_<ID>`). The board never asks for the
+   token itself. Leave the endpoint blank to save the PC as **awaiting connection** and add the
+   endpoint later.
+3. Choose one or more pools (or add one) and tags. Tags autocomplete from the tag catalog, and a
+   new tag can be created inline. Tags are declared attributes, separate from detected software.
+4. Set the slots and the CPU and RAM limits (defaults 1, 90% and 90%).
+
+On the PC, install the agents environment and the coding agent CLIs it should run (see the
+[agent instructions](../agents/README.md); for an offline PC the fleet tab lists the wheelhouse
+and npm mirror steps), then start the service:
 
 ```powershell
-$env:FLOW_WORKER_ID = 'build-pc'
-$env:FLOW_WORKER_POOL = 'builds'
-$env:FLOW_WORKER_TAGS = 'windows,gpu'
-$env:FLOW_WORKER_SLOTS = '2'
+$env:FLOW_WORKER_ID = 'build-pc'          # must equal the registered worker ID
 $env:FLOW_WORKER_BIND = '0.0.0.0'
-$env:FLOW_WORKER_TOKEN = '<shared service token>'
+$env:FLOW_WORKER_PORT = '8096'
+$env:FLOW_WORKER_SLOTS = '2'              # per-process cap: keep it at least the fleet slot count
+$env:FLOW_WORKER_TOKEN = (Get-Content '<protected token file>' -TotalCount 1).Trim()
 agents/.venv/Scripts/python.exe -u agents/flow_execution_worker.py
 ```
 
-On Linux use `agents/.venv/bin/python` and the corresponding shell environment syntax. Configure
-private networking or HTTPS termination for a service beyond loopback. This endpoint can execute
-commands with that PC's account; use trusted clients and restrict network access accordingly.
-The service refuses network binding without a token. No native engine credentials are required
-on execution PCs. Agent credentials, Confluence tokens and source file paths belong on the PC
-performing setup/execution.
+On Linux use `agents/.venv/bin/python` and `export`. Generate the token on the coordinator
+(`python -c "import secrets; print(secrets.token_urlsafe(32))"`), store it as `NAME=value` in the
+coordinator's ignored `workers.local.env` (or the flow host's environment), and copy it to a file
+on the PC that only the service account can read. The service refuses a network bind without a
+token. It can execute commands with that PC's account: allow inbound TCP 8096 only from the
+coordinator, over a private network or HTTPS termination. No native engine credentials are needed
+on execution PCs. Agent credentials, Confluence tokens and source file paths belong on the PC that
+runs the step. `FLOW_WORKER_POOL` and `FLOW_WORKER_TAGS` on the PC are legacy and informational
+only: the registry owns pools, tags and limits.
 
-On the coordinator PC copy [workers.example.yaml](../workers.example.yaml) to ignored
-`workers.local.yaml`, adding that PC's URL, id, pool, tags and `token_env`. Put the matching secret
-in that environment variable or ignored `workers.local.env` (`NAME=value`). All native coordinators
-read that registry; they currently run on the same flow-host PC and share its `FLOW_WORKSPACES`
-artifact store. Worker services can be on other PCs. The board receives a sanitized health catalog,
-never registry URLs or tokens. `FLOW_WORKERS_FILE` can override the registry location.
+When the PC connects, the coordinator checks that `/health` reports the registered ID (otherwise
+the PC is shown as an identity mismatch and nothing is placed on it), then pushes the registry's
+slots and CPU/RAM limits to its capacity gate. The fleet tab shows each PC's state (online,
+awaiting connection, credentials unavailable, unauthorized, identity mismatch or unreachable),
+live CPU and RAM, slot use, per-engine status, pools, tags, limits and their sync state, and the
+detected agents and commands with their last check time. The board receives only this sanitized
+view, never endpoints, token variable names or tokens.
 
-Choose a default worker/pool and required tags when starting a flow. Expand individual steps to
-override placement per step. Offline or unmatched selections fail explicitly. When restarting a
-finished step, its node panel can choose a new execution worker; descendants retain their own
-selections and restart through the engine dependency mechanism. Hatchet replays its native DAG;
-the Prefect/Trigger extension creates a new native run and reuses unaffected results.
-Per-step tags keep the default pool; an explicit worker id chooses that worker independently of
-the default pool. Clearing a restart override returns to the flow's selection.
+To let a registered PC serve another engine, edit it and add the engine. Registering the same ID
+again is refused with a pointer to the existing entry, so a PC is never registered twice.
+
+### Per-engine registration
+
+Native engine placement is not enabled (see [Engine adapters](#engine-adapters-and-workspace-integrity)),
+so every engine reaches a PC through its execution service and the PC needs no engine connection:
+
+| Engine | On the coordinator | On the PC | Fleet tab engine status |
+|---|---|---|---|
+| Hatchet | The flow host runs the Hatchet flow worker (`FLOW_BACKENDS` includes `hatchet`). Placed standalone cards go through `agents/hatchet_worker.py`. | Execution service only; no Hatchet token. | Connected while the PC is online and the coordinator's Hatchet flow worker runs. |
+| Prefect | The flow host runs `flow_worker_prefect.py` (served deployments stay in the coordinator's serve process). Placed cards go through `agents/prefect_worker.py`. | Execution service only; no Prefect API access. | As for Hatchet. |
+| Trigger.dev | The local development worker (`trigger dev`, `scripts/dev-worker.ps1`) runs on the coordinator and sends flow steps to the PC. | Execution service only. | Unconfirmed: the flow host cannot check `trigger dev`. |
+
+Standalone Trigger.dev cards always run on the coordinator, and Trigger.dev production deployment
+to other PCs is not supported. A worker's `engines` list (default: all three) limits which engines
+may place work on it; a step or card on another engine treats that PC as not compatible.
+
+## Registry, migration and rollback
+
+The registry is `workers.local.yaml` on the coordinator (`FLOW_WORKERS_FILE` overrides it); token
+values stay in the ignored `workers.local.env` or the flow host's environment and are never
+written to the registry. [workers.example.yaml](../workers.example.yaml) shows the format. Without
+a registry file the coordinator uses one implicit worker, `local` (`FLOW_WORKER_ID`), in pool
+`default`, at `http://127.0.0.1:8096` with token variable `FLOW_WORKER_TOKEN`.
+
+A legacy (version 1) registry keeps working as it is: its single `pool` becomes the worker's only
+pool membership, and IDs, tags, endpoints and `token_env` references are kept. Flow and step
+selectors keep their meaning; `pool` matches any of a worker's pools. The file is rewritten as
+version 2 (with `pools`, `engines`, `slots`, `cpu_limit`, `ram_limit` and the tag catalog) on the
+first save from the fleet tab or the legacy `/workers` routes, or explicitly:
+
+1. Stop everything that edits the registry (the flow host, or at least registry saves).
+2. Copy the registry file, with its permissions, to a protected folder outside the repository.
+   `workers.local.env` is never rewritten by migration; keep it as it is.
+3. Start the flow host and call `POST /workers/migrate` on it (with `Authorization: Bearer
+   <FLOW_HOST_TOKEN>` when that token is set). It answers `{migrated: true}` and writes version 2
+   through a temporary file and an atomic replace, so an interruption leaves the original file.
+   Running it again answers `{migrated: false}` and changes nothing.
+4. In the fleet tab, check the IDs, pools, tags and that each PC with a token still shows its
+   connection as configured and comes online.
+
+To roll back, stop the registry editors again, copy the backup into the registry's folder under a
+temporary name with the same protections, and atomically replace the registry with it. Restore
+the backup before running an older version of this repository: older versions read only the
+legacy `pool` field. Edits made after the backup are lost, so note them first. The last known
+capability results of offline PCs are kept in `<registry>.inventory.json`; it holds no secrets and
+can be deleted at any time.
+
+## Choosing workers in the board
+
+**Starting a flow (New card).** Choose a default worker or pool and required tags, and expand
+**Choose workers for individual steps** to override placement per step. A step's own worker ID
+chooses that worker regardless of the default pool; a step pool replaces the default pool; step
+tags replace the default's tags and keep its pool. A default chosen at launch replaces the flow's
+default worker, and a step chosen at launch replaces that step's own setting; otherwise the flow
+definition's default and step settings apply as before. While you choose, the dialog asks the flow host
+(`POST /api/launch/validate`, with the selected backend) where each step can run and shows, per step:
+
+- **Ready**: the workers that can start it now.
+- **Will wait**: a possible match is offline, busy or not freshly checked; the run starts and the
+  step waits for it (see [waiting reasons](#waiting-reasons-and-states)).
+- **Blocked**: no registered worker can run it, with the reason and **How to fix**. **Start flow**
+  is disabled, and the board refuses the launch as well. The flow itself stays saved.
+
+Under each step every registered worker is listed as Compatible, Might match (waiting) or Not
+compatible, with the reasons, and the required agent or command with its last detected status and
+check time (for an offline PC, its last known result, marked as such).
+
+**Standalone coding agent cards.** **Run on (fleet worker)** places the card on a pool, a worker
+or tags, on Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the
+coordinator there) and when a workspace or resume ID is filled in: a placed card runs in a new
+workspace on that PC. The same compatibility panel is shown, and a blocked card cannot be created.
+Without a selection the card runs on the coordinator as before and is not checked.
+
+**Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
+draft, placed the way **New card** starts it, and where its selection comes from (its own worker
+setting or the default in Flow settings). The Steps list shows Ready, Waits or Blocked per step,
+and Flow settings summarizes all steps. Saving is never blocked: a blocked step says "You can save
+this draft; launch is blocked until this is resolved". Program steps have an **Executable
+(requires_command)** field. Leave it blank when the executable is the first word of a simple
+command; when it cannot be inferred (pipes, variables, scripts) the field is marked required and
+launch stays blocked until it is filled in.
+
+**While it runs.** The engine shows a placed card or step as running while it waits for a worker:
+the wait happens inside the engine task, which occupies one engine execution slot meanwhile and
+counts toward the step's `timeout_minutes`. This is an unavoidable constraint of the shared-service
+fallback (see [Placement, waiting and cancellation](#placement-waiting-and-cancellation)). The card
+drawer's **Fleet placement** section polls the execution records every 2 seconds while the drawer
+is open and shows each step's state and reason; the graph labels a waiting step "waiting for a
+worker" (or "intervention needed"), and its step panel explains it.
+
+**Restarting a step.** A finished step's node panel can choose a new execution worker; the choice
+is checked like a launch (a confirmed mismatch is refused, an offline or busy match is accepted and
+waits). Descendants retain their own selections and restart through the engine dependency
+mechanism. Hatchet replays its native DAG; the Prefect/Trigger extension creates a new native run
+and reuses unaffected results. Clearing a restart override returns to the flow's selection.
+
+### Waiting reasons and states
+
+| `waiting_reason` | Shown as |
+|---|---|
+| `offline` | a matching worker is offline (or awaiting connection) |
+| `credentials_unavailable` | the coordinator has no usable credentials for a matching worker |
+| `full_slots` | every matching worker is busy (no free slot) |
+| `high_cpu` / `high_ram` | CPU or RAM on the matching workers is at or above their limit |
+| `missing_metrics` | waiting for a complete 10-second CPU and RAM measurement |
+| `cooldown` | the worker waits for a fresh 10-second measurement after its last start |
+| `software_unknown` / `software_stale` | the required software has not been checked, or was last checked over a day ago; it is probed |
+| `software_missing` | the software was missing on the chosen worker at admission; another one is sought |
+| `awaiting_authorization` | the worker admitted the job and waits for the coordinator to confirm the start |
+| `coordinator_unreachable` | the worker cannot reach the coordinator |
+| `intervention_needed` | no registered worker can run it now; the record carries the message and resolution |
+
+Record states: `queued` (being placed, or queued on a worker), `waiting`, `running`, `done`,
+`failed`, `cancelled` (the board's cancel), `timed_out` (the step's `timeout_minutes` elapsed) and
+`interrupted` (any other engine-side cancellation). The last three keep the last waiting reason,
+so the board can say why the work never ran.
 
 ## How files move
 
@@ -318,3 +448,57 @@ once when the registry value changes. Slots are at most 100, the gate's maximum:
 is refused, and an older registry entry above it is enforced as 100 with a warning in the fleet
 tab until the next save stores 100. `FLOW_WORKER_SLOTS` still caps each service process. A
 worker's `engines` list (default: all three) limits which engines may place work on it.
+
+## Capability detection
+
+Each execution service detects the supported agents (including their ACP adapters) and the
+commands steps need, in its own execution environment: at startup, whenever its results are more
+than a day old (checked hourly, and when the coordinator reads them, which covers a reconnect),
+on **Refresh capabilities** in the fleet tab, on demand while a step waits for a command or agent
+that is not freshly installed (at most every 15 seconds per worker), and once more immediately
+before a job starts. Results are `installed`, `absent`, `unknown` or `error`, each with its check
+time. Installed does not mean signed in: authentication readiness is reported as unknown. A result
+older than a day counts as unknown, never as absent; only a fresh `absent` makes a worker not
+compatible. The coordinator keeps the last known results of each PC so an offline PC still shows
+when it was last checked; they are shown, never used as a verified answer.
+
+## Capacity: CPU, RAM, slots and cooldown
+
+Each execution service samples the whole machine every second into the PC's shared capacity store:
+CPU from the OS's idle and busy counters between samples (`GetSystemTimes` on Windows,
+`/proc/stat` on Linux), and RAM as physical memory in use, `(total - available) / total`, using
+the OS's available-memory figure (`GlobalMemoryStatusEx` on Windows, `MemAvailable` on Linux), so
+readily reclaimable cache counts as free. macOS is not sampled: a macOS PC always reports unknown
+capacity and its gate never admits work.
+
+The admitted value is a time-weighted average over the last 10 seconds of a monotonic clock. It is
+unknown (waiting reason `missing_metrics`) until samples cover a full 10-second window, when the
+newest sample is more than 3 seconds old (stale), and after a gap of more than 3 seconds between
+samples, which restarts the window. A PC is not eligible for new work while either average is at
+or above its limit (`high_cpu`, `high_ram`; default 90%). These are admission thresholds, not caps
+or predictions: running jobs are never interrupted when a limit is exceeded or changed.
+
+Admission is serialized per PC in one SQLite store shared by every service on it
+(`FLOW_CAPACITY_DB`, default `%PROGRAMDATA%\agent-orchestration\capacity.db` on Windows and
+`/var/tmp/agent-orchestration/capacity.db` on Linux; never a network drive). In order, a new job
+waits while the PC's leases fill its slots (`full_slots`, counted across all engines), while
+another admission is still starting, during the cooldown (`cooldown`: for 10 seconds after the last
+confirmed start, and until a sample taken at least 10 seconds after it exists), while metrics are
+unknown, and while CPU or RAM is at or above its limit. The cooldown and samples survive service
+restarts and reconnects. A lease lasts 30 seconds and is renewed every 5 seconds while the job runs.
+
+## Crash recovery and its limits
+
+An expired lease is not reused while its work may still run: the reservation stays blocked until
+the execution is known to have stopped. A reservation whose owner died before the job started is
+reclaimed. A started job's reservation is reclaimed after its process tree is verified dead
+(a Windows named Job in the same OS session is terminated and checked; on Linux the session or
+process group must be gone) or after a verified reboot (a changed OS boot identity).
+
+**Limitation (POSIX):** live orphan process groups on Linux and other POSIX systems are not
+terminated automatically. If an execution service or its coordinator crashes while a job's process
+group keeps running, that PC's reservation stays blocked (the PC shows a used slot and new work
+waits with `full_slots`) until the group is verified dead or the PC reboots. Unattended POSIX crash
+recovery is not supported: an operator must stop the orphaned processes, or reboot the PC. On
+Windows, a Job owned by another OS session or account cannot be opened, and its reservation stays
+blocked in the same way.

@@ -106,6 +106,34 @@ or the host's environment. The board only forwards backend/run/step IDs to this 
 Exact outputs and definition fingerprints live in the worker's run workspace; see
 [restart behavior and limits](../flows/README.md#watching-and-restarting-steps).
 
+## Execution PCs (fleet)
+
+Flow steps and coding agent cards can run on other PCs. Each PC runs the shared execution service
+(`agents/flow_execution_worker.py`) and is registered once in the board's **Fleet** tab, which
+generates the setup steps for the chosen engines and operating system, including an offline
+install from a wheelhouse and npm mirror. The coordinator's registry (`workers.local.yaml`, token
+values in `workers.local.env`) owns pools, tags, slots and the CPU and RAM limits (90% by
+default); a legacy registry keeps working and is migrated idempotently, with a backup-and-restore
+rollback. Native engine placement is not enabled: Hatchet, Prefect and Trigger.dev all reach a PC
+through its execution service, and Trigger.dev cards always run on the coordinator.
+
+When you start a flow or a placed card, the New card dialog shows where each step can run: ready,
+will wait (a matching PC is offline, busy or not freshly checked) or blocked (no registered PC can
+run it, with how to fix it). Only a blocked launch is refused; a flow draft can always be saved.
+While a placed step or card waits, it occupies its engine task (the engine shows it as running)
+and the card drawer shows the waiting reason live; cancelling, the step's timeout and engine-side
+interruptions are recorded as `cancelled`, `timed_out` and `interrupted` with the last reason.
+
+Admission uses machine-wide CPU and RAM averaged over 10 seconds (sampled every second; unknown
+after a gap or a sample older than 3 seconds; RAM is physical memory in use, total minus
+available), one slot count shared by every engine on the PC, and a 10-second cooldown after each
+start. Thresholds only gate new work. **POSIX limitation:** if a service crashes on Linux while a
+job's process group keeps running, its slot stays reserved until that group is verified dead or the
+PC reboots; unattended POSIX crash recovery is not supported, so stop the orphaned processes by hand.
+
+Setup, migration and rollback, per-engine registration, metric semantics, limits, the fallback and
+every waiting reason are described in [Workers and environment context](../docs/workers-and-context.md).
+
 ## Chat controls
 
 - **Send message** while busy queues the message for the next turn. **Interrupt turn** cancels
@@ -147,12 +175,13 @@ agents/.venv/Scripts/python.exe -m unittest discover -s agents/tests -v
 agents/.venv/Scripts/python.exe -m unittest discover -s agents/integration_tests -v
 agents/.venv/Scripts/python.exe -m unittest discover -s agents -p 'test_hatchet*.py' -v
 agents/.venv/Scripts/python.exe -m unittest discover -s board -p 'test_*.py' -v
-node --test board/static/chat.test.cjs board/static/chat.browser.test.cjs
+node --test board/static/*.test.cjs   # unit tests and headless-Chrome browser tests (chat, flows, fleet, launch)
 $env:AGENT_PYTHON = (Resolve-Path agents/.venv/Scripts/python.exe).Path
 trigger.dev/example-project/node_modules/.bin/tsx.cmd --test trigger.dev/example-project/src/agent-session.test.ts
 trigger.dev/example-project/node_modules/.bin/tsc.cmd --project trigger.dev/example-project/tsconfig.json
 python board/session_smoke_test.py hatchet trigger-dev
 python board/smoke_test.py hatchet trigger
+agents/.venv/Scripts/python.exe board/workers_smoke_test.py --base http://127.0.0.1:8093  # needs idle engines and a dedicated board
 ```
 
 The agent unit/fixture tests and public Confluence integration tests also run in the
@@ -190,5 +219,5 @@ marks its result done. Normal dashboard sessions always leave those decisions to
 - Blank-workspace projects are retained in the OS temporary directory for inspection.
 - The dashboard has no authentication and can launch local tools. Keep it on a trusted local network.
 - The offline distribution bundle has not been regenerated for this UI/driver. Cloud-backed models
-  still need their provider; an air-gapped deployment needs a local provider and separately bundled
+  still need their provider; an offline deployment needs a local provider and separately bundled
   adapters, CLIs, Python dependencies and authentication/configuration.

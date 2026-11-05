@@ -1,6 +1,7 @@
-"""Real-engine, two-service setup/transfer/restart smoke test; disposable flows and runs only.
+"""Real-engine, two-service launch-check/setup/transfer/restart smoke test; disposable flows and runs only.
 
 Requires idle portable coordinators. The two execution services run on this PC, not two PCs.
+Their capacity gates sample this PC: it must stay below the 90% CPU and RAM limits to admit work.
 python board/workers_smoke_test.py --base http://127.0.0.1:8092
 """
 import argparse
@@ -61,11 +62,13 @@ async def main(args):
                   'finish':{'kind':'program','needs':['verify'],'worker':{'id':'smoke-a'},'run':'''python -c "from pathlib import Path; print(Path('result.txt').read_text())"'''}}}
         runs=[]
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client:
-            async def call(method,path,body=None):
+            async def attempt(method,path,body=None):
                 async with client.request(method,args.base+path,json=body) as response:
-                    data=await response.json()
-                    if response.status>=400: raise RuntimeError(f'{response.status} {path}: {data}')
-                    return data
+                    return response.status,await response.json()
+            async def call(method,path,body=None):
+                status,data=await attempt(method,path,body)
+                if status>=400: raise RuntimeError(f'{status} {path}: {data}')
+                return data
             async def activate(name):
                 # Saving is a draft; activation applies it. The disposable fixture accepts interrupting
                 # running flow steps, as re-registering did before.
@@ -103,6 +106,14 @@ async def main(args):
                 await activate(flow['name'])
                 await asyncio.sleep(25)  # native registration / Trigger rebuild
                 for system in args.systems:
+                    # The New card dialog's launch check: both services match; a tag no worker has blocks.
+                    check=await call('POST','/api/launch/validate',{'flow':flow['name'],'execution':{'default':{'pool':'smoke'}},'system':system})
+                    assert check['status']!='blocked' and check['fleet'],check
+                    mismatch={'default':{'pool':'smoke'},'steps':{'verify':{'id':'smoke-b','tags':['no-such-tag']}}}
+                    check=await call('POST','/api/launch/validate',{'flow':flow['name'],'execution':mismatch,'system':system})
+                    assert check['steps']['verify']['status']=='blocked' and 'no-such-tag' in check['steps']['verify']['message'],check
+                    status,refused=await attempt('POST',f'/api/boards/{system}/workers-context-smoke/cards',{'kind':'flow','flow':flow['name'],'execution':mismatch})
+                    assert status==409 and 'no-such-tag' in refused['error'],(status,refused)
                     run=(await call('POST',f'/api/boards/{system}/workers-context-smoke/cards',{'kind':'flow','flow':flow['name'],'execution':{'default':{'pool':'smoke'}}}))['id']
                     runs.append((system,run))
                     dag=await wait_done(system,run,review=True)
