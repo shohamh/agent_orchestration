@@ -174,6 +174,28 @@ dialog.fb-ask { width: min(580px, 94vw); max-height: 86vh; overflow-y: auto; }
 .fb-result-failed strong { color: var(--danger); }
 .fb-result-pending strong, .fb-result-unavailable strong { color: var(--warn); }
 
+/* Fleet placement (also used by the New card dialog and the card drawer). The status is always
+   a word (Ready, Will wait, Blocked); the coloured edge only repeats it. */
+.fb-placement-slot { display: flex; flex-direction: column; gap: 6px; }
+.fb-placement-slot h4, .fb-placement h4 { margin: 0; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
+.fb-placement { border: 1px solid var(--line); border-left: 3px solid var(--muted); border-radius: 6px; padding: 8px 10px; font-size: 12px;
+  display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; min-width: 0; }
+.fb-placement p, .fb-exec p { margin: 0; }
+.fb-placement-ready { border-left-color: var(--ok); }
+.fb-placement-wait { border-left-color: var(--warn); }
+.fb-placement-blocked { border-left-color: var(--danger); }
+.fb-placement-fix { color: var(--ink); }
+.fb-placement-workers { margin: 0; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.fb-placement-workers strong { color: var(--ink); }
+.fb-placement-summary { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; overflow-wrap: anywhere; }
+.fb-chip-ready { color: var(--ok); }
+.fb-chip-wait { color: var(--warn); }
+.fb-chip-blocked { color: var(--danger); }
+.fb-exec { font-size: 12px; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.fb-exec-waiting, .fb-exec-queued { color: var(--warn); }
+.fb-exec-cancelled, .fb-exec-timed_out, .fb-exec-interrupted, .fb-exec-failed { color: var(--danger); }
+.fb-exec .fb-placement-workers, .fb-exec .fb-placement-fix { color: var(--muted); }
+
 /* Touch and phones: 44px targets everywhere, nothing that depends on hover. */
 @media (max-width: 700px), (pointer: coarse) {
   .fb button, .fb select, .fb input:not([type="checkbox"]) { min-height: 44px; }
