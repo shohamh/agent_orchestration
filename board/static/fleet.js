@@ -19,6 +19,7 @@
   };
   const RESULT = { installed: ['✓', 'Installed'], absent: ['✗', 'Absent'], unknown: ['?', 'Unknown'], error: ['?', 'Check failed'] };
   const config = { metricsMs: 3000, fullMs: 30000 };
+  const MAX_SLOTS = 100;  // the worker capacity gate's maximum (agents/flowkit/capacity.py MAX_SLOTS)
 
   // ------------------------------------------------------------------ Pure helpers
   const pad = (n) => String(n).padStart(2, '0');
@@ -69,10 +70,10 @@
 
   function engineText(engine, status, worker) {
     const label = ENGINE_LABELS[engine] || engine;
-    if (status?.connected) {
-      const note = status.coordinator === 'unconfirmed' ? ' (the trigger dev worker on the coordinator is not checked by the flow host)' : '';
-      return `${label}: Connected through the shared execution service${note}`;
+    if (status?.state === 'unconfirmed' || (worker.online && status?.coordinator === 'unconfirmed')) {
+      return `${label}: Unconfirmed: the PC is online, but the flow host cannot check the ${engine === 'trigger' ? 'trigger dev worker' : `${label} worker`} on the coordinator`;
     }
+    if (status?.connected) return `${label}: Connected through the shared execution service`;
     if (!worker.online) return `${label}: Not connected: the PC is ${(STATUS[worker.status] || 'offline').replace(/^Offline: /, 'offline: ').toLowerCase()}`;
     if (status?.coordinator === 'not_enabled') return `${label}: Not connected: ${label} is not enabled on the flow host (FLOW_BACKENDS)`;
     if (status?.coordinator === 'stopped') return `${label}: Not connected: the ${label} flow worker is not running on the coordinator`;
@@ -106,7 +107,9 @@
         { text: `Install the agents environment from a local wheelhouse and npm mirror. The wheelhouse must hold ${OS_LABELS[os]} wheels for agents/requirements.txt: `
             + (os === 'linux' ? 'add agents/requirements.txt to PY_REQUIREMENTS when building the offline bundle (its wheels are Linux x86_64, Python 3.12), '
               : `build it on a connected ${OS_LABELS[os]} PC with the same Python version (pip download -r agents/requirements.txt -d wheelhouse), `)
-            + 'and point npm at the bundle\'s npm mirror.',
+            + 'and install the agents ACP adapters from the bundle\'s offline npm mirror. The mirror holds only the projects listed in NPM_PROJECTS '
+            + 'when the offline bundle is built (default trigger.dev/example-project): add agents to it (NPM_PROJECTS="trigger.dev/example-project agents") '
+            + 'or npm ci fails offline.',
           code: win
             ? 'python -m venv agents\\.venv\nagents\\.venv\\Scripts\\python.exe -m pip install --no-index --find-links <wheelhouse folder> -r agents\\requirements.txt\nnpm.cmd ci --prefix agents --registry <offline npm mirror URL>'
             : 'python3 -m venv agents/.venv\nagents/.venv/bin/python -m pip install --no-index --find-links <wheelhouse folder> -r agents/requirements.txt\nnpm ci --prefix agents --registry <offline npm mirror URL>' },
@@ -219,7 +222,10 @@
         h('div', { class: 'fl-metrics' }, metricNode(worker, 'cpu'), metricNode(worker, 'ram'),
           h('p', { class: 'fl-basis' }, 'RAM is physical memory in use (total minus available). New work waits while either average is at or above its limit; running work is never stopped.')),
         h('p', { class: 'fl-slots' }, slotsText(worker)),
-        h('ul', { class: 'fl-engines', 'aria-label': 'Engines' }, worker.engines.map((e) => h('li', { 'data-engine': e, class: worker.engine_status?.[e]?.connected ? 'fl-connected' : 'fl-disconnected' }, engineText(e, worker.engine_status?.[e], worker)))),
+        h('ul', { class: 'fl-engines', 'aria-label': 'Engines' }, worker.engines.map((e) => {
+          const st = worker.engine_status?.[e], state = st?.state || (st?.connected ? 'connected' : 'not_connected');
+          return h('li', { 'data-engine': e, class: `fl-${state.replace('_', '-')}` }, engineText(e, st, worker));
+        })),
       ];
     }
 
@@ -233,6 +239,7 @@
             h('button', { type: 'button', class: 'secondary', 'data-action': 'edit', onclick: () => openForm(worker) }, 'Edit settings'),
             h('button', { type: 'button', class: 'secondary', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Check installed agents and commands now' : 'The PC must be connected',
               onclick: (e) => refresh(worker.id, e.currentTarget) }, 'Refresh capabilities'))),
+        (worker.warnings || []).map((w) => h('p', { class: 'fl-warning' }, `Warning: ${w}`)),
         h('div', { class: 'fl-live-parts' }, liveParts(worker)),
         h('dl', { class: 'fl-facts' },
           h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => h('span', { class: 'fl-chip' }, p))),
@@ -332,7 +339,7 @@
       let tokenTouched = editing;
       const urlInput = h('input', { name: 'url', type: 'url', autocomplete: 'off', spellcheck: 'false', placeholder: 'https://pc-host:8096', 'aria-describedby': 'fl-url-help' });
       const number = (name, value, min, max) => h('input', { name, type: 'number', min, max, step: 1, required: true, value: String(value) });
-      const slots = number('slots', worker?.slots ?? 1, 1, 100), cpu = number('cpu_limit', worker?.cpu_limit ?? 90, 1, 100), ram = number('ram_limit', worker?.ram_limit ?? 90, 1, 100);
+      const slots = number('slots', worker?.slots ?? 1, 1, MAX_SLOTS), cpu = number('cpu_limit', worker?.cpu_limit ?? 90, 1, 100), ram = number('ram_limit', worker?.ram_limit ?? 90, 1, 100);
       const steps = h('div', { class: 'fl-instructions', 'aria-label': 'Setup instructions' });
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
 
@@ -454,7 +461,7 @@
         if (!editing && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id)) return problem('Worker ID: letters, digits, dots, dashes or underscores, starting with a letter or digit.');
         if (!f.engines.length) return problem('Choose at least one engine.');
         if (!f.pools.length) return problem('Choose at least one pool.');
-        const s = whole(slots, 'Slots', 100); if (s == null) return;
+        const s = whole(slots, 'Slots', MAX_SLOTS); if (s == null) return;
         const c = whole(cpu, 'CPU limit', 100); if (c == null) return;
         const m = whole(ram, 'RAM limit', 100); if (m == null) return;
         const body = { ...(editing ? {} : { id }), engines: f.engines, pools: [...f.pools], tags: [...f.tags], slots: s, cpu_limit: c, ram_limit: m };
@@ -511,7 +518,7 @@
     };
   }
 
-  const api = { ENGINES, ENGINE_LABELS, config, instructions, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

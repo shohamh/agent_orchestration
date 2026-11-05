@@ -10,6 +10,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import yaml
 
+from .capacity import MAX_SLOTS
+
 ROOT = Path(__file__).resolve().parents[2]
 _LOCK = threading.RLock()
 ENGINES = ('hatchet', 'prefect', 'trigger')  # every engine reaches a PC through its execution service
@@ -60,7 +62,10 @@ def _default():
     return {'id': os.environ.get('FLOW_WORKER_ID', 'local'), 'pool': 'default', 'tags': [],
             'url': 'http://127.0.0.1:8096', 'token_env': 'FLOW_WORKER_TOKEN'}
 
-def _normalize(item):
+def _normalize(item, stored=False):
+    """Validate one registry entry. `stored` entries (read from the file) above the slot
+    maximum are clamped to it with a visible warning, so an old registry keeps working; a save
+    above the maximum is refused."""
     if not isinstance(item, dict): raise ValueError('Invalid registry worker')
     w = dict(item)
     if not isinstance(w.get('id'), str) or not w['id'] or len(w['id']) > 100: raise ValueError('Invalid worker id')
@@ -76,9 +81,13 @@ def _normalize(item):
     w['engines'] = engines
     if 'token_env' in w and (not isinstance(w['token_env'], str) or not TOKEN_ENV.match(w['token_env'])):
         raise ValueError('token_env must be an environment variable name (letters, digits and _)')
+    w.pop('_slots_configured', None)
     for field, default in [('slots', 1), ('cpu_limit', 90), ('ram_limit', 90)]:
         value = w.get(field, default)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 or (field == 'slots' and (not isinstance(value, int) or value > 10000)) or (field != 'slots' and value > 100): raise ValueError('Invalid worker ' + field)
+        if field == 'slots' and isinstance(value, int) and not isinstance(value, bool) and value > MAX_SLOTS:
+            if not stored: raise ValueError(f'Invalid worker slots: at most {MAX_SLOTS} (the worker capacity gate maximum)')
+            w['_slots_configured'], value = value, MAX_SLOTS
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0 or (field == 'slots' and not isinstance(value, int)) or (field != 'slots' and value > 100): raise ValueError('Invalid worker ' + field)
         w[field] = value
     if 'url' in w:
         u = urlsplit(w['url'])
@@ -90,7 +99,7 @@ def _load():
     path = _path()
     data = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {'workers': [_default()]}
     if not isinstance(data, dict) or data.get('version', 1) not in (1, 2) or not isinstance(data.get('workers'), list): raise ValueError('Invalid worker registry')
-    workers = [_normalize(w) for w in data['workers']]
+    workers = [_normalize(w, stored=True) for w in data['workers']]
     if len({w['id'] for w in workers}) != len(workers): raise ValueError('Worker ids must be unique')
     tags = data.get('tags', [])
     if not isinstance(tags, list) or len(tags) > 1000 or any(not isinstance(t, str) or not t or len(t) > 100 for t in tags): raise ValueError('Invalid tag catalog')
@@ -99,10 +108,18 @@ def _load():
 def _read():
     return _load()['workers']
 
+def warnings(w):
+    """Problems an operator should see for a stored entry (for example clamped slots)."""
+    if w.get('_slots_configured'):
+        return [f"slots {w['_slots_configured']} in the registry is above the maximum of {MAX_SLOTS}; {MAX_SLOTS} is enforced "
+                'and stored at the next registry save']
+    return []
+
 def _public(w):
     # Connection details never leave the coordinator: only whether an endpoint is configured.
     return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')}
-            | {'connection': 'configured' if w.get('url') else 'awaiting', 'online': False})
+            | {'connection': 'configured' if w.get('url') else 'awaiting', 'online': False}
+            | ({'warnings': warnings(w)} if warnings(w) else {}))
 
 def load_fleet():
     return [_public(w) for w in _read()]
@@ -123,7 +140,8 @@ def _write(workers, tags=()):
     fd, name = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
-            yaml.safe_dump({'version': 2, 'workers': workers, **({'tags': list(tags)} if tags else {})}, f, sort_keys=False)
+            stored = [{k: v for k, v in w.items() if not k.startswith('_')} for w in workers]
+            yaml.safe_dump({'version': 2, 'workers': stored, **({'tags': list(tags)} if tags else {})}, f, sort_keys=False)
             f.flush(); os.fsync(f.fileno())
         # Windows readers may briefly hold the old file without delete sharing.
         for attempt in range(100):

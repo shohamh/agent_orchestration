@@ -12,6 +12,10 @@ from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[2]
 _CACHE_LOCK = threading.Lock()  # the flow host serves requests on threads
+# A limits push that failed is not retried on every catalog call (placement polls every 2 s):
+# worker id -> (wanted limits, monotonic retry time, result). A changed registry value retries now.
+PUSH_RETRY_SECONDS = {'failed': 30, 'unsupported': 300}
+_PUSH_BACKOFF = {}
 
 
 def selector(value):
@@ -80,9 +84,21 @@ def limits(worker):
 async def push_limits(client, worker, capacity):
     """Bring a connected worker's capacity gate in line with the registry. The gate applies
     limits to future admissions only; running work is never interrupted."""
+    import time
     wanted = limits(worker)
     if isinstance(capacity, dict) and capacity.get('settings') == wanted:
+        _PUSH_BACKOFF.pop(worker['id'], None)
         return {'state': 'applied'}
+    held = _PUSH_BACKOFF.get(worker['id'])
+    if held and held[0] == wanted and time.monotonic() < held[1]:
+        return held[2]
+    result = await _push(client, worker, wanted, capacity)
+    if result['state'] == 'applied': _PUSH_BACKOFF.pop(worker['id'], None)
+    else: _PUSH_BACKOFF[worker['id']] = (wanted, time.monotonic() + PUSH_RETRY_SECONDS[result['state']], result)
+    return result
+
+
+async def _push(client, worker, wanted, capacity):
     try:
         async with client.post(worker['url'] + '/capacity/settings', json=wanted, headers=worker['_headers']) as response:
             if response.status == 404:
@@ -107,6 +123,8 @@ async def catalog(snapshot=None):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
             public.update({'pool': worker['pools'][0], 'engines': list(worker.get('engines') or ENGINES),
                            'connection': 'configured' if worker.get('url') else 'awaiting'})
+            from .fleet_registry import warnings
+            if warnings(worker): public['warnings'] = warnings(worker)
             pending = {'settings_sync': {'state': 'pending'}}
             try:
                 if worker.get('_error'): return {**public, 'online': False, 'reason': worker['_error'], 'status': 'credentials_unavailable', **pending}
@@ -165,10 +183,14 @@ def remember_inventory(worker_id, inventory):
 
 def engine_status(worker, engine, coordinators):
     """Every engine reaches the PC through its execution service (native placement is not
-    enabled): connected when the PC is online and that engine's coordinator worker is up."""
+    enabled). state: connected when the PC is online and that engine's coordinator worker runs;
+    unconfirmed when the PC is online but the coordinator worker cannot be checked (Trigger.dev's
+    `trigger dev` runs outside the flow host); not_connected otherwise."""
     coordinator = (coordinators or {}).get(engine, 'unknown')
-    connected = bool(worker.get('online')) and coordinator not in ('stopped', 'not_enabled')
-    return {'route': 'shared_service', 'coordinator': coordinator, 'connected': connected}
+    if not worker.get('online') or coordinator in ('stopped', 'not_enabled'): state = 'not_connected'
+    elif coordinator == 'running': state = 'connected'
+    else: state = 'unconfirmed'
+    return {'route': 'shared_service', 'coordinator': coordinator, 'state': state, 'connected': state == 'connected'}
 
 
 async def fleet_view(coordinators=None, inventory=True):

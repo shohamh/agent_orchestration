@@ -504,7 +504,7 @@ async def workers_list(request: web.Request) -> web.Response:
 SYSTEM_ENGINES = {'hatchet': 'hatchet', 'prefect': 'prefect', 'trigger-dev': 'trigger', 'trigger': 'trigger'}
 FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
 PUBLIC_WORKER = {'id', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
-                 'status', 'hostname', 'active'}
+                 'status', 'hostname', 'active', 'warnings'}
 PUBLIC_CAPACITY = {'state', 'reason', 'cpu_percent', 'ram_percent', 'sample_age_seconds', 'window_seconds', 'ram_basis',
                    'leases', 'settings'}
 PUBLIC_RESULT = {'status', 'checked_at', 'auth_status'}
@@ -528,7 +528,7 @@ def public_worker(worker: Any) -> dict[str, Any]:
     if 'inventory' in worker:
         result['inventory'] = public_inventory(worker['inventory'])
     if isinstance(worker.get('engine_status'), dict):
-        result['engine_status'] = {e: {k: s[k] for k in ('route', 'coordinator', 'connected') if k in s}
+        result['engine_status'] = {e: {k: s[k] for k in ('route', 'coordinator', 'state', 'connected') if k in s}
                                    for e, s in worker['engine_status'].items() if isinstance(s, dict)}
     if isinstance(worker.get('settings_sync'), dict):
         result['settings_sync'] = {k: str(worker['settings_sync'][k])[:300] for k in ('state', 'message') if k in worker['settings_sync']}

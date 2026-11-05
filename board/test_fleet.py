@@ -17,7 +17,9 @@ LEAKY = {'id': 'pc-a', 'pools': ['build'], 'pool': 'build', 'tags': ['gpu'], 'en
                       'settings': {'slots': 2, 'cpu_limit': 90, 'ram_limit': 90}, 'leases': 0, 'endpoint': 'http://10.0.0.5:8096'},
          'inventory': {'agents': {'codex': {'status': 'installed', 'checked_at': '2026-11-05T10:00:00+00:00', 'auth_status': 'unknown', 'path': 'C:/secret'}},
                        'commands': {}, 'refreshed_at': '2026-11-05T10:00:00+00:00', 'cached': False, 'token': 's3cret'},
-         'engine_status': {'hatchet': {'route': 'shared_service', 'coordinator': 'running', 'connected': True, 'url': 'http://10.0.0.5'}},
+         'engine_status': {'hatchet': {'route': 'shared_service', 'coordinator': 'running', 'state': 'connected', 'connected': True, 'url': 'http://10.0.0.5'},
+                           'trigger': {'route': 'shared_service', 'coordinator': 'unconfirmed', 'state': 'unconfirmed', 'connected': False}},
+         'warnings': ['slots 500 in the registry is above the maximum of 100; 100 is enforced'],
          'settings_sync': {'state': 'applied', 'token': 's3cret'}}
 
 
@@ -47,6 +49,8 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
         worker = data['workers'][0]
         self.assertEqual((worker['id'], worker['capacity']['cpu_percent'], worker['inventory']['agents']['codex']['status']), ('pc-a', 12.5, 'installed'))
         self.assertEqual(worker['engine_status']['hatchet']['connected'], True)
+        self.assertEqual(worker['engine_status']['trigger']['state'], 'unconfirmed')
+        self.assertIn('above the maximum of 100', worker['warnings'][0])
         self.assertEqual(data['tags'], ['gpu'])
         metrics = await (await self.client.get('/api/fleet/metrics')).json()
         self.assert_clean(metrics)

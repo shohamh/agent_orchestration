@@ -304,8 +304,9 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
         if not isinstance(data, dict) or set(data) != {'slots', 'cpu_limit', 'ram_limit'}:
             raise ValueError('Body must contain exactly slots, cpu_limit and ram_limit')
-        if not isinstance(data['slots'], int) or isinstance(data['slots'], bool) or not 1 <= data['slots'] <= 100:
-            raise ValueError('slots must be a whole number from 1 to 100')
+        from .capacity import MAX_SLOTS
+        if not isinstance(data['slots'], int) or isinstance(data['slots'], bool) or not 1 <= data['slots'] <= MAX_SLOTS:
+            raise ValueError(f'slots must be a whole number from 1 to {MAX_SLOTS}')
         if not all(number(data[k]) and 0 < data[k] <= 100 for k in ('cpu_limit', 'ram_limit')):
             raise ValueError('cpu_limit and ram_limit must be percentages above 0 and at most 100')
         await capacity_call(lambda: app['capacity'].configure(**data))

@@ -21,6 +21,12 @@ test('instructions fit the selected engines and operating system and never hold 
   assert.match(w, /agents\\\.venv\\Scripts\\python\.exe -u agents\\flow_execution_worker\.py/);
   assert.match(w, /\$env:FLOW_WORKER_SLOTS = '2'/);
   assert.match(w, /--no-index --find-links/);                       // offline install
+  for (const os of ['windows', 'linux', 'macos']) {                  // the mirror only holds NPM_PROJECTS
+    const t = text(Fleet.instructions({ engines: ['hatchet'], os, id: 'x' }));
+    assert.match(t, /npm(\.cmd)? ci --prefix agents --registry <offline npm mirror URL>/, os);
+    assert.match(t, /add agents to (it|NPM_PROJECTS)/, os);
+    assert.match(t, /NPM_PROJECTS="trigger\.dev\/example-project agents"/, os);
+  }
   assert.match(w, /FLOW_WORKER_TOKEN_LAB_PC=<generated token>/);    // placeholder only
   assert.match(w, /workers\.local\.env/);
   assert.match(w, /no Hatchet (token|credentials)/i);
@@ -42,6 +48,15 @@ test('instructions fit the selected engines and operating system and never hold 
   assert.match(adding, /Nothing new is needed on the PC/);
   assert.doesNotMatch(adding, /pip install/);
   for (const doc of [win, mac]) assert.doesNotMatch(text(doc), /[A-Za-z0-9_-]{40,}/, 'no generated secret');
+});
+
+test('engine status words: Trigger.dev unconfirmed is never called connected', () => {
+  const online = { online: true, status: 'online' };
+  const unconfirmed = Fleet.engineText('trigger', { route: 'shared_service', coordinator: 'unconfirmed', state: 'unconfirmed', connected: false }, online);
+  assert.match(unconfirmed, /^Trigger\.dev: Unconfirmed: .*trigger dev worker/);
+  assert.doesNotMatch(unconfirmed, /Connected/);
+  assert.match(Fleet.engineText('hatchet', { coordinator: 'running', state: 'connected', connected: true }, online), /^Hatchet: Connected/);
+  assert.match(Fleet.engineText('trigger', { coordinator: 'unconfirmed', state: 'not_connected', connected: false }, { online: false, status: 'unreachable' }), /Not connected/);
 });
 
 test('tag suggestions autocomplete existing tags and offer to create new ones', () => {
@@ -79,7 +94,7 @@ function reset() {
         commands: { git: result('installed'), cargo: result('absent') }, refreshed_at: iso(5), cached: false },
       _url: 'http://10.1.2.3:8096', _token_env: 'PC_A_TOKEN' },
     'pc-b': { id: 'pc-b', pools: ['build'], tags: ['linux'], engines: ENGINES, slots: 1, cpu_limit: 90, ram_limit: 90, connection: 'configured',
-      online: false, status: 'unreachable', settings_sync: { state: 'pending' },
+      online: false, status: 'unreachable', settings_sync: { state: 'pending' }, warnings: ['slots 500 in the registry is above the maximum of 100; 100 is enforced and stored at the next registry save'],
       inventory: { agents: { codex: result('installed', 600) }, commands: {}, refreshed_at: iso(600), cached: true },
       _url: 'http://10.1.2.4:8096', _token_env: 'PC_B_TOKEN' },
     'pc-c': { id: 'pc-c', pools: ['default'], tags: [], engines: ['hatchet'], slots: 1, cpu_limit: 90, ram_limit: 90, connection: 'awaiting',
@@ -92,7 +107,8 @@ const coordinators = { hatchet: 'running', prefect: 'stopped', trigger: 'unconfi
 function publicWorker(w) {
   const out = Object.fromEntries(Object.entries(w).filter(([k]) => !k.startsWith('_')));
   if (metrics[w.id] && w.online) out.capacity = metrics[w.id];
-  out.engine_status = Object.fromEntries(w.engines.map((e) => [e, { route: 'shared_service', coordinator: coordinators[e], connected: w.online && !['stopped', 'not_enabled'].includes(coordinators[e]) }]));
+  const state = (e) => (!w.online || ['stopped', 'not_enabled'].includes(coordinators[e]) ? 'not_connected' : coordinators[e] === 'running' ? 'connected' : 'unconfirmed');
+  out.engine_status = Object.fromEntries(w.engines.map((e) => [e, { route: 'shared_service', coordinator: coordinators[e], state: state(e), connected: state(e) === 'connected' }]));
   return out;
 }
 const listing = () => ({ workers: [...workers.values()].map(publicWorker), tags: [...new Set([...tags, ...[...workers.values()].flatMap((w) => w.tags)])].sort(),
@@ -271,6 +287,7 @@ test('fleet tab lists every PC with state, pools, tags, slots, per-engine status
   assert.equal(await evaluate(`[...document.querySelectorAll('${worker('pc-a')} .fl-glyph')].every(n => n.getAttribute('aria-hidden') === 'true')`), true);
   const b = await text(worker('pc-b'));
   assert.match(b, /Offline/); assert.match(b, /Last known results.*not connected/);
+  assert.match(b, /Warning: slots 500 in the registry is above the maximum of 100/);
   const c = await text(worker('pc-c'));
   assert.match(c, /Awaiting connection/);
   assert.match(c, /CPU limit 90%/); assert.match(c, /RAM limit 90%/); assert.match(c, /0 of 1 slot in use|1 slot/);
@@ -342,6 +359,7 @@ test('register an offline PC: engine and OS instructions, several engines and po
   assert.match(await steps(), /FLOW_WORKER_TOKEN_LAB_PC=<generated token>/);
   // Limits default to 90/90 and one slot.
   assert.deepEqual(await evaluate(`['slots','cpu_limit','ram_limit'].map(n => document.querySelector('.fl-form input[name="' + n + '"]').value)`), ['1', '90', '90']);
+  assert.equal(await evaluate(`${q('.fl-form input[name="slots"]')}.max`), '100', 'the slot maximum matches the registry and the gate');
   // Pools: several, including a new one.
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.fl-form .fl-pools input:checked')].map(n => n.value)`), ['default'], 'a new PC starts in the default pool');
   await click('.fl-form .fl-pools label', 'build');
@@ -421,7 +439,8 @@ test('the same PC connects to a second engine by editing it, never as a duplicat
   assert.ok(!('url' in sent), 'a blank endpoint keeps the configured one');
   assert.equal(await evaluate(`document.querySelectorAll('${worker('pc-a')}').length`), 1);
   await waitFor(`document.querySelectorAll('${worker('pc-a')} [data-engine]').length === 3`);
-  assert.match(await text(`${worker('pc-a')} [data-engine="trigger"]`), /Trigger\.dev/);
+  assert.match(await text(`${worker('pc-a')} [data-engine="trigger"]`), /Trigger\.dev: Unconfirmed/);
+  assert.doesNotMatch(await text(`${worker('pc-a')} [data-engine="trigger"]`), /Connected/);
   await noSecrets();
 });
 
@@ -429,6 +448,10 @@ test('settings edits: limits and slots, validated, with the sync state', async (
   await openFleet();
   await click(`${worker('pc-c')} button`, 'Edit settings');
   await waitFor(`/Edit pc-c/.test(document.querySelector('.fl-form h3').textContent)`);
+  await type('.fl-form input[name="slots"]', '101');
+  await click('.fl-form button', 'Save');
+  await waitFor(`/Slots must be a whole number from 1 to 100/.test(document.querySelector('.fl-form-error').textContent)`, 'slot maximum');
+  await type('.fl-form input[name="slots"]', '1');
   await type('.fl-form input[name="cpu_limit"]', '0');
   await click('.fl-form button', 'Save');
   await waitFor(`/CPU limit/.test(document.querySelector('.fl-form-error').textContent)`, 'client validation');

@@ -51,6 +51,8 @@ class Fixture(unittest.IsolatedAsyncioTestCase):
         # Machine samples come only from the test, never from this PC's real load.
         sampler = patch('flowkit.capacity.MachineSampler.sample', return_value=None)
         sampler.start(); self.addCleanup(sampler.stop)
+        from flowkit import workers
+        workers._PUSH_BACKOFF.clear(); self.addCleanup(workers._PUSH_BACKOFF.clear)
         import flow_host
         self.host = flow_host.serve(None, '127.0.0.1', 0)
         threading.Thread(target=self.host.serve_forever, daemon=True).start()
@@ -261,6 +263,87 @@ class EngineMatchTests(unittest.TestCase):
         self.assertIn('Prefect', refused['resolution'])
         legacy = {k: v for k, v in worker.items() if k != 'engines'}
         self.assertEqual(match_worker(legacy, {'pool': 'build', 'engine': 'prefect'})['status'], 'compatible')
+
+
+class ReviewRoundOneTests(Fixture):
+    async def test_one_slot_maximum_shared_by_registry_gate_route_and_ui(self):
+        from flowkit import capacity, fleet_registry
+        self.assertIs(fleet_registry.MAX_SLOTS, capacity.MAX_SLOTS)
+        self.assertEqual(capacity.MAX_SLOTS, 100)
+        ui = (Path(__file__).resolve().parents[2] / 'board/static/fleet.js').read_text(encoding='utf-8')
+        self.assertIn('const MAX_SLOTS = 100;', ui)
+        with self.assertRaises(ValueError): CapacityGate(self.root / 'g.db', slots=101)
+        # A stored entry above the maximum (old YAML) keeps working: clamped, with a visible warning.
+        app, server, gate, _ = await self.service()
+        self.write_registry([{'id': 'pc-a', 'pools': ['build'], 'slots': 500, 'url': str(server.make_url('')), 'token_env': 'PC_A_TOKEN'},
+                             {'id': 'pc-b', 'pools': ['build'], 'slots': 100}])
+        listed = {w['id']: w for w in fleet_registry.load_fleet()}
+        self.assertEqual(listed['pc-a']['slots'], 100)
+        self.assertIn('slots 500 in the registry is above the maximum of 100', listed['pc-a']['warnings'][0])
+        self.assertNotIn('warnings', listed['pc-b'])
+        status, body = await self.call('GET', '/fleet')
+        a = next(w for w in body['workers'] if w['id'] == 'pc-a')
+        self.assertEqual((a['slots'], a['settings_sync']['state']), (100, 'applied'))  # matched and enforced as 100
+        self.assertIn('above the maximum', a['warnings'][0])
+        self.assertEqual(gate.metrics()['settings']['slots'], 100)
+        # Saves above the maximum are refused on every path, with the maximum in the message.
+        for method, path in (('PUT', '/workers/pc-b'), ('PUT', '/fleet/workers/pc-b'), ('POST', '/workers')):
+            status, body = await self.call(method, path, {'id': 'pc-b', 'slots': 101} if method == 'POST' else {'slots': 101})
+            self.assertEqual(status, 400, path)
+            self.assertIn('at most 100', body['error'])
+        with self.assertRaises(ValueError): fleet_registry.save_worker({'id': 'pc-c', 'slots': 10000})
+        # The next save of that entry stores the enforced value; the warning goes away.
+        self.assertEqual((await self.call('PUT', '/fleet/workers/pc-a', {'tags': ['x']}))[0], 200)
+        stored = next(w for w in yaml.safe_load(self.registry.read_text(encoding='utf-8'))['workers'] if w['id'] == 'pc-a')
+        self.assertEqual(stored['slots'], 100)
+        self.assertFalse(any(k.startswith('_') for k in stored))
+        self.assertNotIn('warnings', next(w for w in fleet_registry.load_fleet() if w['id'] == 'pc-a'))
+
+    async def test_failed_or_unsupported_push_is_not_retried_on_every_catalog_call(self):
+        from aiohttp import web
+        from flowkit import workers
+        posts = []
+        async def health(request):
+            return web.json_response({'id': 'old-pc', 'hostname': 'OLD', 'active': 0,
+                                      'capacity': {'state': 'unknown', 'settings': {'slots': 4, 'cpu_limit': 90, 'ram_limit': 90}}})
+        async def settings(request):
+            posts.append(await request.json())
+            raise web.HTTPNotFound()  # an execution service older than the configure route
+        old = web.Application(); old.router.add_get('/health', health); old.router.add_post('/capacity/settings', settings)
+        server = TestServer(old); await server.start_server(); self.addAsyncCleanup(server.close)
+        self.write_registry([{'id': 'old-pc', 'pools': ['build'], 'url': str(server.make_url(''))}])
+        for _ in range(3):
+            listed = (await workers.catalog())[0]
+            self.assertEqual(listed['settings_sync']['state'], 'unsupported')
+        self.assertEqual(len(posts), 1)
+        self.write_registry([{'id': 'old-pc', 'pools': ['build'], 'cpu_limit': 70, 'url': str(server.make_url(''))}])
+        await workers.catalog(); await workers.catalog()
+        self.assertEqual(len(posts), 2)  # a changed registry value is tried at once, then held again
+        wanted, _, held = workers._PUSH_BACKOFF['old-pc']
+        self.assertEqual(held['state'], 'unsupported')
+        workers._PUSH_BACKOFF['old-pc'] = (wanted, 0, held)  # the backoff has elapsed
+        await workers.catalog()
+        self.assertEqual(len(posts), 3)  # retried after the backoff
+        # A failing push (worker refuses the limits) is held the same way.
+        async def refuse(request):
+            posts.append(await request.json())
+            return web.json_response({'error': 'slots must be a whole number from 1 to 100'}, status=400)
+        refusing = web.Application(); refusing.router.add_get('/health', health); refusing.router.add_post('/capacity/settings', refuse)
+        server2 = TestServer(refusing); await server2.start_server(); self.addAsyncCleanup(server2.close)
+        workers._PUSH_BACKOFF.clear(); posts.clear()
+        self.write_registry([{'id': 'old-pc', 'pools': ['build'], 'url': str(server2.make_url(''))}])
+        for _ in range(3):
+            self.assertEqual((await workers.catalog())[0]['settings_sync']['state'], 'failed')
+        self.assertEqual(len(posts), 1)
+
+    def test_trigger_dev_unconfirmed_is_not_connected(self):
+        from flowkit.workers import engine_status
+        online, offline = {'online': True}, {'online': False}
+        states = {'hatchet': 'running', 'prefect': 'stopped', 'trigger': 'unconfirmed'}
+        self.assertEqual(engine_status(online, 'trigger', states), {'route': 'shared_service', 'coordinator': 'unconfirmed', 'state': 'unconfirmed', 'connected': False})
+        self.assertEqual(engine_status(online, 'hatchet', states)['state'], 'connected')
+        self.assertEqual(engine_status(online, 'prefect', states)['state'], 'not_connected')
+        self.assertEqual(engine_status(offline, 'trigger', states)['state'], 'not_connected')
 
 
 if __name__ == '__main__':

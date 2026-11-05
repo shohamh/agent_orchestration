@@ -313,5 +313,8 @@ whenever the coordinator finds a connected worker whose gate reports different l
 covers connecting and reconnecting. The gate reads them at each admission, so a change affects
 new work only and never interrupts running jobs. Until the push succeeds (the PC is offline, or
 its service predates the route) the gate keeps its previous limits and the fleet tab says so.
-`FLOW_WORKER_SLOTS` still caps each service process. A worker's `engines` list (default: all
-three) limits which engines may place work on it.
+A failed push is retried after 30 seconds (5 minutes when the service predates the route), or at
+once when the registry value changes. Slots are at most 100, the gate's maximum: a save above it
+is refused, and an older registry entry above it is enforced as 100 with a warning in the fleet
+tab until the next save stores 100. `FLOW_WORKER_SLOTS` still caps each service process. A
+worker's `engines` list (default: all three) limits which engines may place work on it.

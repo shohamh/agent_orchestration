@@ -45,7 +45,8 @@ dialog.fl-dialog[open] { display: flex; flex-direction: column; }
 .fl-engines, .fl-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
 .fl-engines li { overflow-wrap: anywhere; }
 .fl-connected { color: var(--ok); }
-.fl-disconnected { color: var(--muted); }
+.fl-unconfirmed { color: var(--warn); }
+.fl-not-connected { color: var(--muted); }
 .fl-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 13px; }
 .fl-facts dt { color: var(--muted); }
 .fl-facts dd { margin: 0; overflow-wrap: anywhere; }

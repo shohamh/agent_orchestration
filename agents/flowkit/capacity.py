@@ -92,9 +92,12 @@ def execution_dead(details):
     return False
 
 
+MAX_SLOTS = 100  # one worker's slot maximum; the fleet registry enforces the same bound
+
+
 class CapacityGate:
     def __init__(self, path=None, *, slots=4, cpu_limit=90, ram_limit=90, clock=time.monotonic, boot=None):
-        if not 1 <= slots <= 100 or not 0 < cpu_limit <= 100 or not 0 < ram_limit <= 100:
+        if not 1 <= slots <= MAX_SLOTS or not 0 < cpu_limit <= 100 or not 0 < ram_limit <= 100:
             raise ValueError('Invalid capacity settings')
         self.path = Path(path) if path is not None else default_path()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +137,7 @@ class CapacityGate:
     def _save(self, db, state): db.execute('INSERT OR REPLACE INTO state VALUES (1,?)',(json.dumps(state),))
 
     def configure(self, *, slots, cpu_limit=90, ram_limit=90):
-        if not 1<=slots<=100 or not 0<cpu_limit<=100 or not 0<ram_limit<=100: raise ValueError('Invalid capacity settings')
+        if not 1<=slots<=MAX_SLOTS or not 0<cpu_limit<=100 or not 0<ram_limit<=100: raise ValueError('Invalid capacity settings')
         with self.transaction() as db:
             s=self._state(db); s['settings']={'slots':slots,'cpu_limit':cpu_limit,'ram_limit':ram_limit}; self._save(db,s)
 
