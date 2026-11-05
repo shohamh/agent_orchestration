@@ -50,6 +50,22 @@ class MatchTests(unittest.TestCase):
             result = match_worker(worker(inventory=inventory), {'command': 'python'})
             self.assertEqual((result['status'], [r['code'] for r in result['reasons']]), ('unknown', ['software_unknown']))
 
+    def test_detected_software_carries_its_last_check_without_changing_the_match(self):
+        from flowkit.fleet_matching import match_worker
+        checked = stamp(120)
+        live = worker(agents={'codex': {'status': 'installed', 'checked_at': checked}})
+        result = match_worker(live, {'agent': 'codex'})
+        self.assertEqual(result['status'], 'compatible')
+        self.assertEqual(result['detected'], [{'kind': 'agent', 'name': 'codex', 'status': 'installed', 'checked_at': checked, 'cached': False}])
+        # An offline PC: the last known result is shown, but it is never used as a verified answer.
+        offline = worker(online=False, inventory={}, last_known={'agents': {'codex': {'status': 'absent', 'checked_at': checked}}})
+        result = match_worker(offline, {'agent': 'codex'})
+        self.assertEqual((result['status'], sorted(codes(result))), ('unknown', ['offline', 'software_unknown']))
+        self.assertEqual(result['detected'], [{'kind': 'agent', 'name': 'codex', 'status': 'absent', 'checked_at': checked, 'cached': True}])
+        never = match_worker(worker(online=False, inventory={}), {'command': 'python'})
+        self.assertEqual(never['detected'], [{'kind': 'command', 'name': 'python', 'status': 'unknown', 'checked_at': None, 'cached': False}])
+        self.assertEqual(match_worker(live, {'pool': 'build'})['detected'], [])
+
     def test_pool_plus_all_tags_and_software_required(self):
         from flowkit.fleet_matching import match_worker
         w = worker(commands={'python': entry('installed')})
@@ -433,6 +449,41 @@ class LaunchRouteTests(unittest.TestCase):
         local = self.validate(flow)
         self.assertEqual((local['status'], local['fleet']), ('ready', False))
         self.assertNotIn('url', json.dumps([waiting, blocked]))
+
+    def post(self, body):
+        import urllib.request, urllib.error
+        request = urllib.request.Request(f'http://127.0.0.1:{self.server.server_address[1]}/launch/validate', json.dumps(body).encode(), {'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response: return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as exc: return exc.code, json.loads(exc.read())
+
+    def test_standalone_card_launch_check_uses_its_agent_selection_and_engine(self):
+        checked = stamp(60)
+        cache = Path(os.environ['FLOW_WORKERS_FILE'] + '.inventory.json')
+        cache.write_text(json.dumps({'pc-a': {'agents': {'codex': {'status': 'installed', 'checked_at': checked}}, 'commands': {}}}), encoding='utf-8')
+        status, waiting = self.post({'card': {'agent': 'codex', 'worker': {'pool': 'build'}}, 'engine': 'hatchet'})
+        self.assertEqual(status, 200, waiting)
+        self.assertEqual((waiting['status'], waiting['fleet']), ('wait', True))
+        self.assertEqual(waiting['card']['waiting_reason'], 'offline')
+        detected = waiting['card']['workers'][0]['detected']
+        self.assertEqual(detected, [{'kind': 'agent', 'name': 'codex', 'status': 'installed', 'checked_at': checked, 'cached': True}])
+        status, blocked = self.post({'card': {'agent': 'codex', 'worker': {'tags': ['gpu']}}, 'engine': 'prefect'})
+        self.assertEqual((status, blocked['status']), (200, 'blocked'))
+        self.assertIn('gpu', blocked['card']['message'])
+        self.assertTrue(blocked['card']['resolution'])
+        for bad in ({'card': {'agent': 'codex', 'worker': {}}}, {'card': {'agent': 'nope', 'worker': {'id': 'pc-a'}}},
+                    {'card': {'agent': 'codex', 'worker': {'url': 'http://x'}}}):
+            with self.subTest(bad=bad): self.assertEqual(self.post(bad)[0], 400)
+        self.assertNotIn('url', json.dumps([waiting, blocked]))
+
+    def test_offline_step_shows_its_last_known_check(self):
+        checked = stamp(30)
+        Path(os.environ['FLOW_WORKERS_FILE'] + '.inventory.json').write_text(
+            json.dumps({'pc-a': {'commands': {'python': {'status': 'installed', 'checked_at': checked}}, 'agents': {}}}), encoding='utf-8')
+        flow = {'name': 'routed', 'steps': {'go': {'kind': 'program', 'run': 'python a.py'}}}
+        decision = self.validate(flow, {'default': {'pool': 'build'}})['steps']['go']
+        self.assertEqual(decision['status'], 'wait')
+        self.assertEqual(decision['workers'][0]['detected'], [{'kind': 'command', 'name': 'python', 'status': 'installed', 'checked_at': checked, 'cached': True}])
 
 
 if __name__ == '__main__': unittest.main()

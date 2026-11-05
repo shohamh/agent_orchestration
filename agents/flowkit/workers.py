@@ -181,6 +181,15 @@ def remember_inventory(worker_id, inventory):
         pass  # a read-only registry folder only loses the offline history
 
 
+def with_last_known(public):
+    """Launch checks show when an offline PC last reported its software (display only)."""
+    cache = _cached_inventory()
+    for worker in public:
+        if not worker.get('inventory') and isinstance(cache.get(worker['id']), dict):
+            worker['last_known'] = _sanitized_inventory(cache[worker['id']])
+    return public
+
+
 def engine_status(worker, engine, coordinators):
     """Every engine reaches the PC through its execution service (native placement is not
     enabled). state: connected when the PC is online and that engine's coordinator worker runs;

@@ -80,6 +80,20 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/launch/validate', json={'flow': 'demo-flow'})
         self.assertEqual((await response.json())['steps']['talk']['status'], 'blocked')
 
+    async def test_unsaved_draft_is_checked_for_the_flow_builder(self):
+        draft = {'name': 'draft-flow', 'steps': {'go': {'kind': 'program', 'run': 'echo $X | tee out', 'worker': {'pool': 'build'}}}}
+        self.app['flow_host'].validate_routing = AsyncMock(return_value={'default': {}, 'steps': {}})
+        self.app['flow_host'].validate_launch = AsyncMock(return_value={'status': 'blocked', 'fleet': True, 'steps': {'go': {'status': 'blocked'}}})
+        response = await self.client.post('/api/launch/validate', json={'document': draft, 'execution': {}})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual((await response.json())['steps']['go']['status'], 'blocked')
+        self.app['flow_host'].validate_routing.assert_awaited_once_with({}, ['go'])
+        self.app['flow_host'].validate_launch.assert_awaited_once_with(draft, {'default': {}, 'steps': {}}, engine=None)
+        for body in ({'document': 'name: x'}, {'document': {'name': 'x', 'steps': []}}, {'document': {'name': 'x', 'steps': {}, 'big': 'x' * 300000}},
+                     {'flow': 'demo-flow', 'document': draft}):
+            with self.subTest(body=str(body)[:60]):
+                self.assertEqual((await self.client.post('/api/launch/validate', json=body)).status, 400)
+
     async def test_user_cancel_is_marked_on_the_flow_host_first(self):
         order = []
         async def mark(run_id): order.append(('mark', run_id))

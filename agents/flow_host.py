@@ -639,14 +639,18 @@ class Api(BaseHTTPRequestHandler):
                 return self._send(200, routing(body['execution'], body['steps']))
             except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
         if self.path == '/launch/validate':
-            from flowkit.distributed import validate_flow_launch
+            from flowkit.distributed import validate_card_launch, validate_flow_launch
             from flowkit.definition import parse
             try:
                 body = self._json_body()
-                source = body.get('flow')
-                flow = parse_text(source) if isinstance(source, str) else parse(source)
                 engine = body.get('engine')
                 if engine is not None and engine not in ENGINES: raise ValueError('Unknown engine')
+                card = body.get('card')
+                if card is not None:  # a standalone card: {agent, worker}
+                    if not isinstance(card, dict) or set(card) - {'agent', 'worker'}: raise ValueError('card must contain agent and worker')
+                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine)))
+                source = body.get('flow')
+                flow = parse_text(source) if isinstance(source, str) else parse(source)
                 return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'), engine)))
             except (ValueError, KeyError, FlowError) as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/cancel', self.path)

@@ -40,12 +40,56 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0][1]['session_options'], {
             'agent': 'demo', 'workspace': 'C:/work', 'simulateFailures': 2})
 
+    def fake_card_check(self, decision):
+        checks = []
+        async def validate_card(agent, worker, engine=None):
+            checks.append((agent, worker, engine))
+            return {'status': decision['status'], 'fleet': True, 'card': decision}
+        self.client.app['flow_host'].validate_card = validate_card
+        return checks
+
+    async def test_card_launch_check_for_the_creation_dialog(self):
+        checks = self.fake_card_check({'status': 'wait', 'waiting_reason': 'offline', 'workers': []})
+        response = await self.client.post('/api/launch/validate', json={'card': {'agent': 'codex', 'worker': {'pool': 'build', 'tags': ['gpu']}}, 'system': 'hatchet'})
+        self.assertEqual(response.status, 200, await response.text())
+        self.assertEqual((await response.json())['card']['waiting_reason'], 'offline')
+        self.assertEqual(checks, [('codex', {'pool': 'build', 'tags': ['gpu']}, 'hatchet')])
+        for body, message in [({'card': {'agent': 'codex', 'worker': {'id': 'pc-a'}}, 'system': 'trigger-dev'}, 'Hatchet and Prefect'),
+                              ({'card': {'agent': 'codex', 'worker': {}}, 'system': 'hatchet'}, 'worker'),
+                              ({'card': {'agent': 'nope', 'worker': {'id': 'pc-a'}}, 'system': 'hatchet'}, 'agent'),
+                              ({'card': {'agent': 'codex', 'worker': {'url': 'http://pc'}}, 'system': 'hatchet'}, 'worker')]:
+            with self.subTest(body=body):
+                response = await self.client.post('/api/launch/validate', json=body)
+                self.assertEqual(response.status, 400)
+                self.assertIn(message, (await response.json())['error'])
+        self.assertEqual(len(checks), 1)
+
+    async def test_card_creation_is_blocked_when_no_worker_can_run_it(self):
+        checks = self.fake_card_check({'status': 'blocked', 'message': 'No registered worker can run this step: pc-a lacks tags: gpu',
+                                       'resolution': 'Add the missing tags to a worker, or remove them from the requirement.', 'workers': []})
+        response = await self.client.post('/api/boards/hatchet/demo/cards', json={
+            'kind': 'agent-session', 'goal': 'Fix test', 'agent': 'codex', 'worker': {'tags': ['gpu']}})
+        self.assertEqual(response.status, 409)
+        data = await response.json()
+        self.assertIn('lacks tags: gpu', data['error'])
+        self.assertIn('Add the missing tags', data['error'])
+        self.assertEqual(data['launch']['status'], 'blocked')
+        self.assertEqual(checks, [('codex', {'tags': ['gpu']}, 'hatchet')])
+        self.assertEqual(self.calls, [])
+        # A card without a fleet selection runs on the coordinator as before and is not checked.
+        response = await self.client.post('/api/boards/hatchet/demo/cards', json={'kind': 'agent-session', 'goal': 'x', 'agent': 'demo'})
+        self.assertEqual(response.status, 201, await response.text())
+        self.assertEqual(len(checks), 1)
+
     async def test_card_worker_requirement_is_forwarded_to_the_engine(self):
+        checks = self.fake_card_check({'status': 'wait', 'waiting_reason': 'offline', 'workers': []})
         response = await self.client.post('/api/boards/hatchet/demo/cards', json={
             'kind': 'agent-session', 'goal': 'Fix test', 'agent': 'demo', 'worker': {'pool': 'build', 'tags': ['gpu']}})
         self.assertEqual(response.status, 201, await response.text())
         self.assertEqual(self.calls[0][1]['session_options'], {
             'agent': 'demo', 'workspace': '', 'simulateFailures': 0, 'worker': {'pool': 'build', 'tags': ['gpu']}})
+        self.assertEqual(checks, [('demo', {'pool': 'build', 'tags': ['gpu']}, 'hatchet')])
+        self.assertEqual((await response.json())['launch']['status'], 'wait')
 
     async def test_card_worker_requirement_is_validated(self):
         cases = [({'worker': {'url': 'http://pc'}}, 'worker'), ({'worker': {'tags': 'gpu'}}, 'tags'),
@@ -70,8 +114,8 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
         self.client.app['flow_host'] = Host()
         response = await self.client.get('/api/cards/hatchet/run-1/execution')
         self.assertEqual(response.status, 200, await response.text())
-        self.assertEqual(await response.json(), {'execution': record})
-        self.assertEqual(await (await self.client.get('/api/cards/hatchet/run-2/execution')).json(), {'execution': None})
+        self.assertEqual(await response.json(), {'execution': record, 'steps': {'card': record}})
+        self.assertEqual(await (await self.client.get('/api/cards/hatchet/run-2/execution')).json(), {'execution': None, 'steps': {}})
 
     async def test_rejects_malformed_or_unbounded_requests_with_json(self):
         cases = [[], {'goal': []}, {'kind': 'agent-session', 'goal': 'x', 'agent': 'unknown'},

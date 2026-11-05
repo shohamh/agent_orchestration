@@ -11,7 +11,7 @@ from .artifacts import ancestor_files, snapshot, publish
 from .definition import FLOWS_DIR
 from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, pin_definition, publication_lock
 from .fleet_matching import requirements_for, validate_launch, with_engine
-from .workers import fleet_status, routing, selection_for, selector
+from .workers import fleet_status, routing, selection_for, selector, with_last_known
 
 PLACEMENT_POLL = 2.0  # seconds between placement checks while a step waits for a worker
 PROBE_INTERVAL = 15.0  # minimum seconds between on-demand capability probes of one worker
@@ -103,10 +103,23 @@ async def validate_flow_launch(flow, configured=None, engine=None):
     routes = routing(configured or {}, flow.steps)
     needs = {sid: with_engine(requirements_for(flow, sid, routes), engine) for sid in flow.steps}
     public, _ = await fleet_status(list(needs.values()))
+    with_last_known(public)
     steps = {sid: validate_launch(req, public) for sid, req in needs.items()}
     states = {d['status'] for d in steps.values()}
     status = 'blocked' if 'blocked' in states else 'wait' if 'wait' in states else 'ready'
     return {'status': status, 'fleet': True, 'steps': steps}
+
+
+async def validate_card_launch(agent, selection, engine=None):
+    """Launch check for a standalone card placed on the fleet: its selection plus its agent."""
+    from .definition import AGENTS
+    wanted = {k: v for k, v in selector(selection).items() if v}
+    if not wanted: raise ValueError('Choose a worker, a pool or tags to place a card on the fleet')
+    if agent not in AGENTS: raise ValueError(f"agent must be one of {', '.join(AGENTS)}")
+    requirements = with_engine({**wanted, 'agent': agent}, engine)
+    public, _ = await fleet_status([requirements])
+    decision = validate_launch(requirements, with_last_known(public))
+    return {'status': decision['status'], 'fleet': True, 'card': decision}
 
 
 async def execute_step(flow, step_id, context, run_id, receive, sink, engine=None):

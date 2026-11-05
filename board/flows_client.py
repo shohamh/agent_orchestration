@@ -131,6 +131,10 @@ class FlowHost:
                 **({'engine': engine} if engine else {})}
         return await self._request('POST', '/launch/validate', body, timeout=30)
 
+    async def validate_card(self, agent, worker, engine=None):
+        body = {'card': {'agent': agent, 'worker': worker}, **({'engine': engine} if engine else {})}
+        return await self._request('POST', '/launch/validate', body, timeout=30)
+
     # Fleet management (the board's fleet tab). Each returns (HTTP status, body) for pass-through.
     async def fleet(self) -> tuple[int, Any]:
         return await self._call('GET', '/fleet', timeout=30)

@@ -19,6 +19,9 @@
   /api/flow-documents[/{name}[/layout|/activation|/activate]], /api/flow-documents/parse|serialize
                                                       workflow builder: drafts, revisions, layout and
                                                       confirmed activation (2026-11-03-workflow-builder-api.md)
+  POST /api/launch/validate {flow|document|card, execution?, system?}
+                                                      -> ready | wait | blocked, with per-worker reasons
+  GET  /api/cards/{system}/{run_id}/execution         -> placement records: executing PC, waiting reason
   POST /api/cards/{system}/{run_id}/steer             {instruction}
   POST /api/cards/{system}/{run_id}/{stop|cancel|replay}
   POST /api/queues/{system}/{queue}/pause             {paused: bool}   (Trigger.dev only)
@@ -213,6 +216,9 @@ async def card_events(request: web.Request) -> web.Response:
     return web.json_response({"dropped": dropped, "events": events})
 
 
+SESSION_AGENTS = ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo")
+
+
 async def create_card(request: web.Request) -> web.Response:
     body = await json_object(request)
     kind = body.get("kind", "steerable-agent")
@@ -224,7 +230,7 @@ async def create_card(request: web.Request) -> web.Response:
     options = {}
     if kind == "agent-session":
         agent = body.get("agent", "codex")
-        if agent not in ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"):
+        if agent not in SESSION_AGENTS:
             raise ValueError("agent must be codex, claude, opencode, opencode2, omp, pi or demo")
         workspace = body.get("workspace", "")
         if not isinstance(workspace, str) or len(workspace) > 4096 or "\x00" in workspace:
@@ -240,7 +246,14 @@ async def create_card(request: web.Request) -> web.Response:
                 raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
             if workspace.strip() or body.get('resumeSessionId'):
                 raise ValueError('a card placed on a fleet worker runs in a new workspace there; clear the workspace')
+            # As for flows: a confirmed mismatch blocks launch; offline, busy or unchecked matches wait.
+            launch = await request.app['flow_host'].validate_card(agent, worker, engine=SYSTEM_ENGINES.get(request.match_info['system']))
+            if launch['status'] == 'blocked':
+                card = launch['card']
+                return web.json_response({'error': f"Cannot launch: {card['message']} {card['resolution']}", 'launch': launch}, status=409)
             options['session_options']['worker'] = worker
+            options['launch'] = launch
+    launch = options.pop('launch', None)
     run_id = await adapter_for(request).create(
         request.match_info["board"],
         kind,
@@ -249,7 +262,7 @@ async def create_card(request: web.Request) -> web.Response:
         bounded_int(body, "stepSeconds", 5, 1, 3600),
         **options,
     )
-    return web.json_response({"id": run_id}, status=201)
+    return web.json_response({"id": run_id, **({'launch': launch} if launch else {})}, status=201)
 
 
 def worker_selector(value: Any) -> dict[str, Any]:
@@ -268,9 +281,10 @@ def worker_selector(value: Any) -> dict[str, Any]:
 
 
 async def card_execution(request: web.Request) -> web.Response:
-    """Where a standalone card actually runs: executing PC, engine and waiting reason (or null)."""
+    """Where a standalone card actually runs (`execution`, or null) and every placed flow step's
+    record (`steps`): executing PC, engine, state and waiting reason. The drawer polls it."""
     execution = await request.app['flow_host'].execution(request.match_info['run_id'])
-    return web.json_response({'execution': execution.get('card')})
+    return web.json_response({'execution': execution.get('card'), 'steps': execution})
 
 
 async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -306,19 +320,41 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
 
 
 async def launch_validate(request: web.Request) -> web.Response:
-    """Pre-launch check for the card and flow creation dialogs; saving is never blocked."""
+    """Pre-launch check for the card and flow creation dialogs; saving is never blocked.
+    One of: `flow` (an active flow's name), `document` (the flow builder's unsaved draft) or
+    `card` ({agent, worker}: a standalone card placed on the fleet)."""
     body = await json_object(request)
-    name = text_field(body, 'flow', 100)
-    flow = (await request.app['flow_host'].flows()).get(name)
-    if flow is None:
-        raise ValueError(f'unknown flow {name!r}')
-    execution = None
-    if 'execution' in body:
-        execution = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
     system = body.get('system')
     if system is not None and system not in SYSTEM_ENGINES:
         raise ValueError('unknown system')
-    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution, engine=SYSTEM_ENGINES.get(system)))
+    engine = SYSTEM_ENGINES.get(system)
+    if sum(key in body for key in ('flow', 'document', 'card')) != 1:
+        raise ValueError('send one of flow, document or card')
+    if 'card' in body:
+        card = body['card']
+        if not isinstance(card, dict) or set(card) - {'agent', 'worker'}:
+            raise ValueError('card must contain agent and worker')
+        if card.get('agent') not in SESSION_AGENTS:
+            raise ValueError('agent must be codex, claude, opencode, opencode2, omp, pi or demo')
+        worker = worker_selector(card.get('worker'))
+        if not any(worker.values()):
+            raise ValueError('choose a worker, a pool or tags to place the card')
+        if system not in ('hatchet', 'prefect'):
+            raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
+        return web.json_response(await request.app['flow_host'].validate_card(card['agent'], worker, engine=engine))
+    if 'document' in body:
+        flow = body['document']
+        if not isinstance(flow, dict) or not isinstance(flow.get('steps'), dict) or len(json.dumps(flow)) > 200000:
+            raise ValueError('document must be a flow mapping with steps (at most 200000 characters)')
+    else:
+        name = text_field(body, 'flow', 100)
+        flow = (await request.app['flow_host'].flows()).get(name)
+        if flow is None:
+            raise ValueError(f'unknown flow {name!r}')
+    execution = None
+    if 'execution' in body:
+        execution = await request.app['flow_host'].validate_routing(body['execution'], list(flow['steps']))
+    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution, engine=engine))
 
 
 async def json_object(request: web.Request) -> dict[str, Any]:

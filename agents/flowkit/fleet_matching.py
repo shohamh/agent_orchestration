@@ -136,7 +136,26 @@ def match_worker(worker, requirements, now=None):
                     if capacity['ram_percent'] >= worker.get('ram_limit', 90):
                         unknown.append(_reason('high_ram', f"{wid} RAM {capacity['ram_percent']:.0f}% is at or above its limit"))
     status = 'incompatible' if incompatible else 'unknown' if unknown else 'compatible'
-    return {'worker': wid, 'status': status, 'reasons': incompatible or unknown}
+    return {'worker': wid, 'status': status, 'reasons': incompatible or unknown, 'detected': detected(worker, requirements)}
+
+
+def detected(worker, requirements):
+    """The required software's last capability result on this worker, for display. An offline
+    worker shows its `last_known` (cached) result; that never counts as a verified answer."""
+    inventory, cached = worker.get('inventory'), False
+    if not (isinstance(inventory, dict) and inventory) and isinstance(worker.get('last_known'), dict):
+        inventory, cached = worker['last_known'], True
+    inventory = inventory if isinstance(inventory, dict) else {}
+    result = []
+    for kind in ('agent', 'command'):
+        name = requirements.get(kind)
+        if not name: continue
+        section = inventory.get(kind + 's') if isinstance(inventory.get(kind + 's'), dict) else {}
+        found = section.get(name) if isinstance(section.get(name), dict) else {}
+        status = found.get('status') if isinstance(found.get('status'), str) else 'unknown'
+        checked = found.get('checked_at') if isinstance(found.get('checked_at'), str) else None
+        result.append({'kind': kind, 'name': name, 'status': status, 'checked_at': checked, 'cached': cached and bool(found)})
+    return result
 
 
 def _resolution(code, requirements):
