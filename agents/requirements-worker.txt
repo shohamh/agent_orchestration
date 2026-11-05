@@ -1,0 +1,9 @@
+# What a relayed execution PC installs (agents/worker_runner.py). Versions must match requirements.txt;
+# agents/tests/test_install.py checks that. The engines' own SDKs (hatchet-sdk, prefect) are not needed
+# here: they run on the coordinator and reach this PC through its execution service.
+agent-client-protocol==0.12.1
+aiohttp==3.14.5
+confluence-markdown-exporter==5.6.0
+jsonschema==4.26.0
+python-dotenv==1.2.4
+PyYAML==6.0.3

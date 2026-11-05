@@ -10,6 +10,8 @@ import aiohttp
 import yaml
 from dotenv import dotenv_values
 
+from .fleet_registry import env_path
+
 ROOT = Path(__file__).resolve().parents[2]
 _CACHE_LOCK = threading.Lock()  # the flow host serves requests on threads
 # A limits push that failed is not retried on every catalog call (placement polls every 2 s):
@@ -64,7 +66,7 @@ def registry():
             continue
         if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ValueError('Invalid execution-worker endpoint')
-        token = {**dotenv_values(ROOT/'workers.local.env'), **os.environ}.get(item.get('token_env', ''), '')
+        token = {**dotenv_values(env_path()), **os.environ}.get(item.get('token_env', ''), '')
         if url.hostname not in ('127.0.0.1', 'localhost', '::1') and not token:
             workers.append({**item, '_headers': {}, '_error': 'Worker credentials unavailable'})
             continue
