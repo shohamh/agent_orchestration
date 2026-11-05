@@ -93,7 +93,8 @@ class RelayedPcTests(FleetFixture):
         await self.start_pc()
         run = asyncio.create_task(execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'cancel-run', self.receive, self.sink))
         try:
-            await until(lambda: any(j.started for j in self.service['jobs'].values()), timeout=40, message='job started on the PC')
+            await until(lambda: any(j.started for j in self.service['jobs'].values()), timeout=90,
+                        message=f"job started on the PC (a loaded machine can be slow to spawn the child); record: {info(self.root, 'cancel-run', 'go')}")
             self.assertTrue(mark_cancelled('cancel-run'))
             run.cancel()
             with self.assertRaises(asyncio.CancelledError): await run
