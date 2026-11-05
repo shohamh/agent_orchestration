@@ -101,6 +101,12 @@
   .dag-node text.kind { fill: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
   .dag-node.agent rect.box { stroke-dasharray: 4 3; }
   #n-flow-fields { display: flex; flex-direction: column; gap: 10px; }
+  #n-placement { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; }
+  #n-placement h5 { margin: 0 0 4px; font-size: 13px; }
+  #n-card-worker { display: flex; flex-direction: column; gap: 4px; }
+  #n-card-worker .fb-note { margin: 0; font-size: 12px; }
+  #d-placement ul.placement-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .session-drawer #d-placement { padding: 12px 24px; border-bottom: 1px solid var(--line); }
   /* Phones: one scrollable row of backend tabs, and the columns stacked top to bottom with empty
      ones collapsed to their header, so cards that need you are visible without sideways swiping. */
   @media (max-width: 700px) {
@@ -117,6 +123,7 @@
 </style>
 <link rel="stylesheet" href="/static/chat.css">
 <link rel="stylesheet" href="/static/flow-builder.css">
+<link rel="stylesheet" href="/static/fleet.css">
 </head>
 <body>
 <header>
@@ -126,6 +133,7 @@
   <select id="board" aria-label="Board"></select>
   <button class="secondary" id="add-board" type="button">+ Board</button>
   <button class="secondary" id="flows-btn" type="button" title="Create and edit flows that run on every backend">Flows</button>
+  <button class="secondary" id="fleet-btn" type="button" title="Execution PCs: registration, capabilities, live CPU/RAM and limits">Fleet</button>
   <button class="primary" id="new-card" type="button">New card</button>
   <div class="filters" role="search">
     <input type="search" id="search" placeholder="Filter cards  (/)" aria-label="Filter cards" autocomplete="off" spellcheck="false"
@@ -145,6 +153,7 @@
     <button class="close" id="d-close" type="button" aria-label="Close">×</button>
   </div>
   <div class="body">
+    <section id="d-placement" hidden aria-live="polite" aria-label="Fleet placement"></section>
     <section id="d-facts-section"><dl id="d-facts"></dl></section>
     <section id="d-chat" class="session-chat" hidden aria-label="Agent session"></section>
     <section id="d-steer-section">
@@ -194,12 +203,14 @@
       <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
       <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
       <label>Resume ACP session ID <input id="n-resume" placeholder="Optional"><small>Use the same agent and workspace as the original session. The agent must support loading sessions.</small></label>
+      <div id="n-card-worker"></div>
       <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
       <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
     </div>
     <p class="session-note warning" id="n-production-note" hidden>Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.</p>
     <label class="agent-only" hidden>Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
     <label class="agent-only" hidden>Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
+    <div id="n-placement" hidden aria-live="polite"></div>
     <div class="row" style="justify-content:flex-end">
       <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
       <button class="primary" id="n-create" value="create" type="submit">Create session</button>
@@ -210,10 +221,13 @@
 <!-- The flow builder (flow-builder.js): a flow runs on every backend as a native workflow. Saving
      stores a draft only; activation is a separate, previewed step. -->
 <dialog id="flows-dialog" class="fb-dialog"></dialog>
+<!-- The fleet tab (fleet.js): registered execution PCs and their settings. -->
+<dialog id="fleet-dialog" class="fl-dialog" aria-labelledby="fl-title"></dialog>
 
 <script src="/static/chat.js"></script>
 <script src="/static/card-search.js"></script>
 <script src="/static/flow-builder.js"></script>
+<script src="/static/fleet.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
   // Chrome honours interactive-widget=resizes-content above; this covers browsers that only
@@ -249,10 +263,11 @@ let flows = [];          // portable flows from the flow host: [{name, descripti
 let executionWorkers = [];
 const restartWorkers = new Map();
 
-function workerPicker(label, selected, changed) {
+const poolsOf = (w) => w.pools || [w.pool].filter(Boolean);
+function workerPicker(label, selected, changed, emptyLabel = 'Use flow selection') {
   const select = el('select', { 'aria-label': label });
-  const choices = [['Use flow selection', {}], ...[...new Set(executionWorkers.map(w => w.pool))].map(pool => [`Pool: ${pool}`, {pool}]),
-    ...executionWorkers.map(w => [`Worker: ${w.id} · ${w.pool} · ${(w.tags || []).join(', ')}${w.online ? '' : ' (offline)'}`, {id:w.id}])];
+  const choices = [[emptyLabel, {}], ...[...new Set(executionWorkers.flatMap(poolsOf))].map(pool => [`Pool: ${pool}`, {pool}]),
+    ...executionWorkers.map(w => [`Worker: ${w.id} · ${poolsOf(w).join(', ')} · ${(w.tags || []).join(', ')}${w.online ? '' : ' (offline)'}`, {id:w.id}])];
   const route = selected || {};
   for (const [text, value] of choices) select.append(el('option', {value: JSON.stringify(value)}, text));
   const base = route.id ? {id:route.id} : route.pool ? {pool:route.pool} : {};
@@ -692,7 +707,7 @@ function openCard(id) {
   pushOverlay("drawer", () => hideDrawer());
   if (touchScreen) return;
   if (cards.find(c => c.id === id)?.task === "agent-session") chat.focus(); else $("d-instruction").focus(); }
-function hideDrawer() { openCardId = null; $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+function hideDrawer() { openCardId = null; watchPlacement(); $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
 function closeDrawer() { const wasOpen = openCardId !== null; hideDrawer(); if (wasOpen) dropOverlay("drawer"); }
 // Hidden by Back as well as by ✕: either way, stop streaming the card's transcript.
 new MutationObserver(() => { if (!$("drawer").classList.contains("open")) refresh(); })
@@ -724,6 +739,53 @@ function renderDrawer() {
   $("d-input-section").hidden = session || card.input == null;
   $("d-input").textContent = card.input != null ? JSON.stringify(card.input, null, 2) : "";
   $("d-replay-section").hidden = session || !["done", "stopped"].includes(card.column);
+  watchPlacement();
+}
+
+// ---------------------------------------------------------------- Fleet placement, live
+// A placed card or flow step waits inside its engine task for a fleet worker; the engine shows it
+// as running meanwhile. Its execution record (GET .../execution) says why it waits, live.
+const PLACEMENT_POLL_MS = 2000;
+let placementWatch = null; // { key, timer, last }
+function watchPlacement() {
+  const card = cards.find((c) => c.id === openCardId);
+  const placeable = card && (card.flow || (card.task === "agent-session" && ["hatchet", "prefect"].includes(system)));
+  const key = placeable ? runKey() : null;
+  if ((placementWatch?.key ?? null) === key) return;
+  clearTimeout(placementWatch?.timer);
+  placementWatch = key ? { key, timer: null, last: null } : null;
+  $("d-placement").hidden = true; $("d-placement").replaceChildren();
+  if (placementWatch) pollPlacement(placementWatch);
+}
+async function pollPlacement(watch) {
+  const id = openCardId, at = system;
+  try {
+    if (!document.hidden) {  // a background tab only keeps the timer going
+      const data = await api("GET", `/api/cards/${at}/${encodeURIComponent(id)}/execution`);
+      if (placementWatch === watch) showPlacement(watch, cards.find((c) => c.id === id), data);
+    }
+  } catch (_) { /* the flow host may be restarting: keep the last state and try again */ }
+  if (placementWatch !== watch) return;
+  // A finished card was fetched once more above; nothing changes after that.
+  if (document.hidden || !["done", "stopped"].includes(cards.find((c) => c.id === id)?.column)) watch.timer = setTimeout(() => pollPlacement(watch), PLACEMENT_POLL_MS);
+}
+function showPlacement(watch, card, data) {
+  const steps = data.steps || {}, text = JSON.stringify(steps);
+  if (!card || text === watch.last) return;
+  watch.last = text;
+  const section = $("d-placement"), order = dag?.nodes.map((n) => n.step) || [];
+  const rank = (sid) => (order.includes(sid) ? order.indexOf(sid) : order.length);
+  const ids = Object.keys(steps).filter((sid) => sid !== "card").sort((a, b) => rank(a) - rank(b));
+  const body = card.task === "agent-session" ? (data.execution ? [FlowBuilder.executionView(data.execution)] : [])
+    : ids.length ? [el("ul", { class: "placement-steps" }, ...ids.map((sid) => el("li", { "data-step": sid }, FlowBuilder.executionView(steps[sid], { label: sid }))))] : [];
+  section.replaceChildren(...(body.length ? [el("h4", {}, "Fleet placement"), ...body] : []));
+  section.hidden = !body.length;
+  // Keep the graph and the open step panel in step with the records.
+  let changed = false;
+  for (const node of dag?.nodes || []) {
+    if (node.step && steps[node.step] && JSON.stringify(node.execution) !== JSON.stringify(steps[node.step])) { node.execution = steps[node.step]; changed = true; }
+  }
+  if (changed) renderDag();
 }
 
 // ---------------------------------------------------------------- DAG view
@@ -863,14 +925,17 @@ function renderDag() {
     const p = pos[n.id];
     const label = n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label;
     const time = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
+    // The engine reports a placed step as running while it still waits for a fleet worker.
+    const placing = !["done", "stopped"].includes(n.column) && ["queued", "waiting"].includes(n.execution?.state) && !n.execution.worker;
+    const status = !placing ? n.status.toLowerCase() : n.execution.intervention_needed ? "intervention needed" : n.execution.state === "waiting" ? "waiting for a worker" : "queued for a worker";
     return svg("g", { class: `dag-node${n.kind ? " " + n.kind : ""}${n.id === selectedNode ? " selected" : ""}`, transform: `translate(${p.x},${p.y})`,
-      tabindex: "0", role: "button", "aria-label": `${n.label}: ${n.status}`,
+      tabindex: "0", role: "button", "aria-label": `${n.label}: ${status}`,
       onclick: () => selectNode(n.id), onkeydown: (ev) => { if (ev.key === "Enter") selectNode(n.id); } },
-      svg("title", {}, `${n.label} — ${n.status}`),
+      svg("title", {}, `${n.label} — ${placing ? FlowBuilder.executionText(n.execution) : n.status}`),
       svg("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 8 }),
-      svg("rect", { class: `bar-${n.column}`, width: 5, height: NODE_H - 8, x: 4, y: 4, rx: 2 }),
+      svg("rect", { class: `bar-${placing ? "waiting" : n.column}`, width: 5, height: NODE_H - 8, x: 4, y: 4, rx: 2 }),
       svg("text", { x: 16, y: 18 }, label),
-      svg("text", { class: "st", x: 16, y: 34 }, n.status.toLowerCase() + time),
+      svg("text", { class: "st", x: 16, y: 34 }, status + time),
       n.kind ? svg("text", { class: "kind", x: NODE_W - 8, y: 13, "text-anchor": "end" }, n.kind) : null);
   });
   const markers = ["depends", "calls", "then"].map((kind) =>
@@ -960,8 +1025,8 @@ function renderFlowNode(panel, node) {
     : "Replay this step; the engine restarts its dependent descendants";
   const header = el("div", { class: "row" }, el("h5", {}, `${node.label} · ${node.kind}`), backendLink(node.backend_url), restart);
   const actual = node.execution?.worker;
-  header.append(el('span', {class:'status'}, actual ? `Executed by ${actual.id} on ${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}`
-    : node.execution ? `Execution ${node.execution.state}; worker has not started` : 'Execution worker not reported'));
+  header.append(actual ? el('span', {class:'status'}, `Executed by ${actual.id} on ${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}`)
+    : node.execution ? FlowBuilder.executionView(node.execution) : el('span', {class:'status'}, 'Execution worker not reported'));
   if (['done','stopped'].includes(card?.column)) header.append(workerPicker('Worker for step restart', restartWorkers.get(key), value => restartWorkers.set(key,value)));
   if (!node.restart_supported && node.restart_reason) header.append(el("p", { class: "status" }, node.restart_reason));
   if (node.kind === "agent") {
@@ -1133,6 +1198,80 @@ async function loadFlows() {
   try { executionWorkers = (await api('GET', '/api/workers')).workers; } catch (_) { executionWorkers = []; }
 }
 
+// A standalone card may run on a fleet worker (Hatchet and Prefect). It then gets a new workspace
+// on that PC, so a host workspace or resumed session rules the selection out.
+let cardWorker = {};
+function cardWorkerBlock() {
+  if (!["hatchet", "prefect"].includes(system)) return "Fleet placement of standalone cards is available on Hatchet and Prefect. On Trigger.dev a card always runs on the coordinator.";
+  if ($("n-workspace").value.trim() || $("n-resume").value.trim()) return "A card placed on a fleet worker runs in a new workspace on that PC. Clear the workspace and the resume ID to choose a worker.";
+  return null;
+}
+function cardSelection() {
+  if (cardWorkerBlock()) return null;
+  return Object.values(cardWorker).some((v) => (Array.isArray(v) ? v.length : v)) ? cardWorker : { tags: [] };
+}
+function syncCardWorker() {
+  const box = $("n-card-worker"), key = JSON.stringify(executionWorkers);
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.replaceChildren(workerPicker("Run on (fleet worker)", cardWorker, (value) => { cardWorker = value; scheduleLaunchCheck(); }, "Any compatible fleet worker"),
+      el("p", { class: "fb-note" }));
+  }
+  const why = cardWorkerBlock(), note = box.querySelector(".fb-note");
+  box.querySelectorAll("select, input").forEach((n) => { n.disabled = !!why || $("n-session-fields").hidden; });
+  note.textContent = why || ""; note.hidden = !why;
+}
+
+// Ask the flow host whether a registered worker can run what is about to start: ready, wait
+// (offline, busy or unchecked: it starts by itself later) or blocked (start is refused).
+const launch = { key: null, serial: 0, result: null, blocked: false, timer: null };
+function launchRequest() {
+  const kind = $("n-kind").value;
+  if (kind.startsWith("flow:")) return system === "trigger" ? null : { flow: kind.slice(5), execution: launchExecution, system };
+  const worker = kind === "agent-session" ? cardSelection() : null;
+  return worker ? { card: { agent: $("n-agent").value, worker }, system } : null;
+}
+function scheduleLaunchCheck() { clearTimeout(launch.timer); launch.timer = setTimeout(checkLaunch, 250); }
+async function checkLaunch() {
+  const body = launchRequest(), key = body ? JSON.stringify(body) : null;
+  if (key === launch.key) return;
+  launch.key = key;
+  const serial = ++launch.serial;
+  if (!body) { Object.assign(launch, { result: null, blocked: false }); renderLaunch(); updateCreate(); return; }
+  // Keep showing the previous answer for the same card or flow while the new one is on its way.
+  const previous = launch.result?.body, same = previous && (body.card ? !!previous.card : previous.flow === body.flow);
+  launch.result = same ? { ...launch.result, pending: true } : { body, pending: true }; renderLaunch();
+  let result;
+  try { result = { body, data: await api("POST", "/api/launch/validate", body) }; } catch (e) { result = { body, error: e.message }; }
+  if (serial !== launch.serial) return;
+  Object.assign(launch, { result, blocked: result.data?.status === "blocked" });
+  renderLaunch(); updateCreate();
+  if (result.data?.status === "blocked") launch.timer = setTimeout(() => { if ($("new-dialog").open) { launch.key = null; checkLaunch(); } }, 5000);
+}
+function renderLaunch() {
+  const box = $("n-placement"), r = launch.result;
+  box.hidden = !r;
+  if (!r) { box.replaceChildren(); return; }
+  const parts = [];
+  if (r.pending) parts.push(el("p", { class: "status", role: "status" }, "Checking the fleet…"));
+  if (r.error) parts.push(el("p", { class: "status error" }, `Couldn't check the fleet: ${r.error}. The board checks again when you start.`));
+  const data = r.data;
+  if (data?.card) parts.push(FlowBuilder.placementView(data.card, { title: "Where this card can run" }));
+  else if (data && data.fleet === false) parts.push(FlowBuilder.placementView(data));
+  else if (data) parts.push(el("strong", {}, "Where each step can run"),
+    ...Object.entries(data.steps || {}).map(([sid, decision]) => el("section", { "data-step": sid }, el("h5", {}, sid), FlowBuilder.placementView(decision))));
+  if (data?.status === "blocked") parts.push(el("p", { class: "session-note warning" }, r.body.card
+    ? "Launch is blocked until a registered worker can run this card. Change the selection, or fix the worker in the fleet tab."
+    : "Launch is blocked until every step can run on a registered worker. The flow stays saved: change the workers here, or fix the flow in Flows or the worker in the fleet tab."));
+  box.replaceChildren(...parts);
+}
+function updateCreate() {
+  const kind = $("n-kind").value, session = kind === "agent-session", flow = kind.startsWith("flow:");
+  const button = $("n-create");
+  button.disabled = ((session || flow) && system === "trigger") || launch.blocked;
+  button.title = launch.blocked ? "Launch is blocked: no registered worker can run it (see the explanation above)" : "";
+}
+
 function updateNewForm() {
   const kind = $("n-kind").value;
   const flow = kind.startsWith("flow:") ? flows.find((f) => f.name === kind.slice(5)) : null;
@@ -1152,10 +1291,11 @@ function updateNewForm() {
   if (flow && $('n-worker-fields').dataset.key !== workerKey) {
     $('n-worker-fields').dataset.key = workerKey;
     $('n-worker-fields').replaceChildren(el('strong', {}, 'Execution workers'),
-      workerPicker('Default worker / pool', launchExecution.default, value => launchExecution.default=value),
+      workerPicker('Default worker / pool', launchExecution.default, value => { launchExecution.default = value; scheduleLaunchCheck(); }),
       el('details', {}, el('summary', {}, 'Choose workers for individual steps'),
         ...Object.keys(flow.steps).map(sid => workerPicker(sid, launchExecution.steps[sid], value => {
           if (Object.keys(value).length) launchExecution.steps[sid]=value; else delete launchExecution.steps[sid];
+          scheduleLaunchCheck();
         }))),
       el('small', {}, flow.environment ? 'Environment context is prepared in setup_environment. File source paths refer to that worker PC.' : 'Steps receive files from their dependencies, including across worker PCs.'));
   }
@@ -1164,15 +1304,18 @@ function updateNewForm() {
   document.querySelectorAll(".agent-only input").forEach((n) => { n.disabled = !agent; });
   document.querySelectorAll(".session-fields input, .session-fields select").forEach((n) => { n.disabled = !session; });
   $("n-session-fields").hidden = !session;
+  syncCardWorker();
   $("n-goal-label").textContent = session ? "Opening prompt" : agent ? "Goal" : "Topic";
   $("n-production-note").hidden = !session || system !== "trigger";
-  $("n-create").disabled = (session || !!flow) && system === "trigger";
+  updateCreate();
   $("n-create").textContent = session ? "Create session" : flow ? "Start flow" : "Create card";
   if (flow && system === "trigger") { $("n-production-note").hidden = false; $("n-production-note").textContent = "Flows run on the local development worker. Choose the Trigger.dev · local tab, Hatchet or Prefect."; }
   else $("n-production-note").textContent = "Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.";
   $("n-demo-note").hidden = $("n-agent").value !== "demo";
+  scheduleLaunchCheck();
 }
 function openNewCard(kind) {
+  launch.key = null; // the fleet may have changed since the dialog was last open
   if (kind) { renderKindOptions(); if ([...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; }
   updateNewForm();
   loadFlows().then(() => { if (kind && [...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; updateNewForm(); });
@@ -1188,16 +1331,19 @@ new MutationObserver(() => { if (!$("new-dialog").open) dropOverlay("dialog"); }
 function closeNewDialog() { $("new-dialog").close(); return dropOverlay("dialog"); }
 $("n-kind").addEventListener("change", updateNewForm);
 $("n-agent").addEventListener("change", updateNewForm);
+$("n-workspace").addEventListener("input", updateNewForm);
+$("n-resume").addEventListener("input", updateNewForm);
 $("new-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "create") return;
   e.preventDefault();
   const kind = $("n-kind").value, key = contextKey();
-  if ((kind === "agent-session" || kind.startsWith("flow:")) && system === "trigger") { updateNewForm(); return; }
+  if (((kind === "agent-session" || kind.startsWith("flow:")) && system === "trigger") || launch.blocked) { updateNewForm(); return; }
   const body = kind.startsWith("flow:")
     ? { kind: "flow", flow: kind.slice(5), execution: launchExecution, input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
         n.tagName === "SELECT" ? n.value === "true" : n.type === "number" ? Number(n.value) : n.value])) }
     : kind === "agent-session"
-    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), resumeSessionId: $("n-resume").value.trim(), simulateFailures: Number($("n-failures").value) }
+    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), resumeSessionId: $("n-resume").value.trim(), simulateFailures: Number($("n-failures").value),
+        ...(cardSelection() ? { worker: cardSelection() } : {}) }
     : { kind, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) };
   $("n-create").disabled = true;
   try {
@@ -1230,9 +1376,16 @@ async function closeFlows() {
 $("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOverlay("flows", onFlowsBack); flowBuilder.open(); });
 // Escape asks before discarding unsaved edits instead of closing straight away.
 flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
+// ---------------------------------------------------------------- Fleet
+const fleetDialog = $("fleet-dialog");
+const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet() });
+async function closeFleet() { fleet.stop(); if (fleetDialog.open) { fleetDialog.close(); await dropOverlay("fleet"); } }
+$("fleet-btn").addEventListener("click", () => { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open(); });
+// Escape closes an open form first, then the fleet tab.
+fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
 
 $("d-close").addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open && !fleetDialog.open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
 $("d-stop").addEventListener("click", () => act("stop"));
 $("d-cancel").addEventListener("click", () => act("cancel"));

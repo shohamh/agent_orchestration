@@ -68,11 +68,11 @@ def _error(message):
 class ProcessTree:
     """Own one Windows process tree until an explicit, idempotent close()."""
 
-    def __init__(self, pid: int):
+    def __init__(self, pid: int, name=None):
         self._handle = None
         if os.name != "nt":
             raise NotImplementedError("ProcessTree requires Windows job objects")
-        job = _kernel.CreateJobObjectW(None, None)
+        job = _kernel.CreateJobObjectW(None, name)
         if not job:
             raise _error(f"Cannot own ACP process {pid} (create job)")
         process = None
@@ -100,3 +100,28 @@ class ProcessTree:
             if not _kernel.CloseHandle(self._handle):
                 raise _error("Cannot close ACP process ownership")
             self._handle = None
+
+
+def reclaim_named_tree(name):
+    """Return true only after a named job is absent or contains no live processes.
+
+    Used after verified owner death; opening a handle can delay kill-on-close,
+    so explicitly terminate the orphan job before checking its accounting data.
+    """
+    if not name: return False
+    _kernel.OpenJobObjectW.argtypes = [wintypes.DWORD,wintypes.BOOL,wintypes.LPCWSTR]
+    _kernel.OpenJobObjectW.restype = wintypes.HANDLE
+    _kernel.TerminateJobObject.argtypes = [wintypes.HANDLE,wintypes.UINT]
+    _kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE,ctypes.c_int,ctypes.c_void_p,wintypes.DWORD,ctypes.c_void_p]
+    handle=_kernel.OpenJobObjectW(0x0004 | 0x0008,False,name)  # QUERY | TERMINATE
+    if not handle:
+        if ctypes.get_last_error() == 2: return True
+        raise _error('Cannot open orphan execution job')
+    try:
+        if not _kernel.TerminateJobObject(handle,1): raise _error('Cannot terminate orphan execution job')
+        class Accounting(ctypes.Structure):
+            _fields_=[(n,ctypes.c_longlong) for n in ('user','kernel','period_user','period_kernel')]+[(n,wintypes.DWORD) for n in ('faults','total','active','terminated')]
+        data=Accounting()
+        if not _kernel.QueryInformationJobObject(handle,1,ctypes.byref(data),ctypes.sizeof(data),None): raise _error('Cannot query orphan execution job')
+        return data.active == 0
+    finally: _kernel.CloseHandle(handle)

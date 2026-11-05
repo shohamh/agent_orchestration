@@ -297,7 +297,10 @@ class Host:
                     raise FlowError(f"the active snapshot of {name} cannot be read: {broken.get(name)}")
                 flows[name] = loaded[name]
             else:
-                flows[name] = parse_text(text)
+                # An already-snapshotted revision must render with its immutable asset
+                # reference in the preview, just as it does during activation.
+                loaded, _ = self.store.load({name: target})
+                flows[name] = loaded.get(name) or parse_text(text)
         return dict(sorted(flows.items()))
 
     def preview(self, name: str) -> dict:
@@ -309,7 +312,16 @@ class Host:
         target = draft.revision if draft else None
         errors = self.analyze(name, draft)[1] if draft else []
         active = (entry or {}).get("revision")
+        if draft and not errors:
+            try:
+                _, asset_digest = self.store.current_assets()
+                ref_path = self.store.asset_manifest_path(name, target).with_suffix('.assetref')
+                if ref_path.is_file() and self.store.asset_reference(name, target)['digest'] != asset_digest:
+                    raise FlowError('Flow assets have changed for this revision; change the flow YAML before activating')
+            except (FlowError, OSError, ValueError) as exc:
+                errors.append({'message': str(exc), 'step': None, 'field': 'assets'})
         change = "remove" if draft is None else "add" if not active else "update" if target != active else "none"
+        assets_missing = bool(target and not self.store.asset_manifest_path(name, target).with_suffix('.assetref').is_file())
         engines = []
         for engine in ENGINES:
             state = ((entry or {}).get("engines") or {}).get(engine) or {}
@@ -321,7 +333,7 @@ class Host:
                     except FlowError:
                         code = None
                     action = "regenerate tasks" if code != trigger_codegen.current(self.trigger_target) else "none"
-                elif state.get("revision") != target or state.get("state") != "active":
+                elif assets_missing or state.get("revision") != target or state.get("state") != "active":
                     action = "reload worker"
             engines.append({"engine": engine, "action": action, "enabled": self.enabled[engine],
                             "state": state.get("state"), "error": state.get("error")})
@@ -344,19 +356,20 @@ class Host:
                     draft, errors = current, self.analyze(name, current)[1]
                 if errors:
                     raise invalid(errors)
+                assets_missing = bool(target and not self.store.asset_manifest_path(name, target).with_suffix('.assetref').is_file())
                 if current and self.store.write_snapshot(name, current.text) != target:
                     raise invalid([{"message": "the draft could not be stored exactly; save it as UTF-8 text", "step": None, "field": None}])
             entry = manifest["flows"].setdefault(name, {"revision": None, "engines": {}})
             entry["revision"] = target
             self.store.write_manifest(manifest)
-            results = self._apply(name, target, manifest)
+            results = self._apply(name, target, manifest, force_reload=assets_missing)
             if target is None and not any((e or {}).get("revision") for e in entry["engines"].values()):
                 del manifest["flows"][name]
                 self.store.write_manifest(manifest)
             log(f"activated {name} {target or '(removal)'}: " + ", ".join(f"{r['engine']} {r['state']}" for r in results))
             return {"name": name, "activeRevision": target, "engines": results}
 
-    def _apply(self, name: str, target: str | None, manifest: dict) -> list[dict]:
+    def _apply(self, name: str, target: str | None, manifest: dict, force_reload: bool = False) -> list[dict]:
         """Trigger.dev first (a file write), then every worker restart at once, then wait for them."""
         engines = manifest["flows"][name].setdefault("engines", {})
         old = {e: engines.get(e) or {"revision": None, "state": None, "error": None} for e in ENGINES}
@@ -368,7 +381,7 @@ class Host:
             engines["trigger"] = self._apply_trigger(name, target, old["trigger"], manifest)
         self.store.write_manifest(manifest)
         restart = [e for e in ("hatchet", "prefect") if self.enabled[e] and not (
-            old[e].get("revision") == target and old[e].get("state") == "active" and self.supervisor.running(e))]
+            not force_reload and old[e].get("revision") == target and old[e].get("state") == "active" and self.supervisor.running(e))]
         for engine in restart:
             engines[engine] = {"revision": target, "state": "pending", "error": None}
         self.store.write_manifest(manifest)
@@ -415,6 +428,39 @@ def watch_files(store: Store, stopping: threading.Event) -> None:
 def flow_summary(name: str, text: str) -> dict:
     flow = parse_text(text)
     return {**flow.to_json(), 'environment': flow.environment, "yaml": text}
+
+
+FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
+WORKER_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+
+
+def coordinator_states(host: "Host | None") -> dict[str, str]:
+    """Per engine, whether its coordinator worker (which places work on the fleet) is up here."""
+    states = {}
+    for engine in ENGINES:
+        if host is None: states[engine] = 'unknown'
+        elif not host.enabled.get(engine): states[engine] = 'not_enabled'
+        elif engine == 'trigger': states[engine] = 'unconfirmed'  # `trigger dev` runs outside the flow host
+        else: states[engine] = 'running' if host.supervisor.running(engine) else 'stopped'
+    return states
+
+
+def fleet_worker(body: dict, worker_id: str | None) -> dict:
+    """A fleet registration or edit: known fields only; new tag and pool names must be plain labels."""
+    from flowkit.fleet_registry import label, load_fleet, tag_catalog
+    if set(body) - FLEET_FIELDS: raise ValueError('Unknown worker fields: ' + ', '.join(sorted(map(str, set(body) - FLEET_FIELDS))))
+    if worker_id is not None:
+        if 'id' in body and body['id'] != worker_id: raise ValueError('Worker id mismatch')
+        body = {**body, 'id': worker_id}
+    elif not isinstance(body.get('id'), str) or not WORKER_ID.match(body['id']):
+        raise ValueError('A worker ID is 1 to 100 letters, digits, dots, dashes or underscores (it must equal FLOW_WORKER_ID on the PC)')
+    known_tags, known_pools = set(tag_catalog()), {p for w in load_fleet() for p in w['pools']}
+    for name in body.get('tags', []) if isinstance(body.get('tags'), list) else []:
+        if name not in known_tags: label(name, 'tag')
+    for name in body.get('pools', []) if isinstance(body.get('pools'), list) else []:
+        if name not in known_pools: label(name, 'pool')
+    if body.get('url') == '': body.pop('url')  # a blank endpoint keeps the existing one
+    return body
 
 
 class Api(BaseHTTPRequestHandler):
@@ -526,8 +572,49 @@ class Api(BaseHTTPRequestHandler):
             self._send(500, {"error": f"flow host storage error: {exc}"})
         return True
 
+    def _fleet(self, method: str) -> bool:
+        """The fleet management routes (/fleet...) behind the board's fleet tab; False otherwise."""
+        path = urlsplit(self.path).path
+        if path != '/fleet' and not path.startswith('/fleet/'):
+            return False
+        from urllib.parse import unquote
+        from flowkit import fleet_registry, workers
+        try:
+            if (method, path) in (('GET', '/fleet'), ('GET', '/fleet/metrics')):
+                return self._send(200, asyncio.run(workers.fleet_view(coordinator_states(self.host), inventory=path == '/fleet'))) or True
+            if (method, path) == ('GET', '/fleet/tags'):
+                return self._send(200, {'tags': fleet_registry.tag_catalog()}) or True
+            if (method, path) == ('POST', '/fleet/tags'):
+                return self._send(200, {'tags': fleet_registry.add_tag(self._json_body().get('name'))}) or True
+            if (method, path) == ('POST', '/fleet/workers'):
+                saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
+                return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
+            match = re.fullmatch(r'/fleet/workers/([^/]+)(/capabilities/refresh)?', path)
+            if match:
+                worker_id = unquote(match[1], errors='strict')
+                if worker_id not in {w['id'] for w in fleet_registry.load_fleet()}:
+                    return self._send(404, {'error': f'Unknown worker {worker_id}'}) or True
+                if method == 'PUT' and not match[2]:
+                    saved = fleet_registry.save_worker(fleet_worker(self._json_body(), worker_id))
+                    return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(worker_id))}) or True
+                if method == 'POST' and match[2]:
+                    return self._send(200, {'inventory': asyncio.run(workers.refresh_capabilities(worker_id))}) or True
+            self._send(404, {'error': 'not found'})
+        except fleet_registry.AlreadyRegistered as exc:
+            self._send(409, {'error': str(exc)})
+        except LookupError as exc:
+            self._send(404, {'error': str(exc)})
+        except ConnectionError as exc:
+            self._send(409, {'error': str(exc)})
+        except ValueError as exc:
+            self._send(400, {'error': str(exc)})
+        except Exception as exc:  # an unexpected worker answer: never echo connection details
+            log(f'{method} {path} failed: {type(exc).__name__}')
+            self._send(502, {'error': f'The worker did not answer as expected ({type(exc).__name__})'})
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("GET"):
+        if not self._allowed() or self._documents("GET") or self._fleet("GET"):
             return
         if self.path == '/workers':
             from flowkit.workers import catalog
@@ -545,22 +632,64 @@ class Api(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("POST"):
+        if not self._allowed() or self._documents("POST") or self._fleet("POST"):
             return
+        if self.path == '/workers':
+            from flowkit.fleet_registry import save_worker
+            from flowkit.workers import sync_limits
+            try:
+                saved = save_worker(self._json_body())
+                return self._send(200, {**saved, 'settings_sync': asyncio.run(sync_limits(saved['id']))})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
+        if self.path == '/workers/migrate':
+            from flowkit.fleet_registry import migrate_legacy_registry
+            try: return self._send(200, migrate_legacy_registry())
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         if self.path == '/workers/validate':
             from flowkit.workers import routing
             try:
                 body = self._json_body()
                 return self._send(200, routing(body['execution'], body['steps']))
             except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
+        if self.path == '/launch/validate':
+            from flowkit.distributed import validate_card_launch, validate_flow_launch
+            from flowkit.definition import parse
+            try:
+                body = self._json_body()
+                engine = body.get('engine')
+                if engine is not None and engine not in ENGINES: raise ValueError('Unknown engine')
+                card = body.get('card')
+                if card is not None:  # a standalone card: {agent, worker}
+                    if not isinstance(card, dict) or set(card) - {'agent', 'worker'}: raise ValueError('card must contain agent and worker')
+                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine)))
+                source = body.get('flow')
+                flow = parse_text(source) if isinstance(source, str) else parse(source)
+                return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'), engine)))
+            except (ValueError, KeyError, FlowError) as exc: return self._send(400, {'error': str(exc)})
+        match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/cancel', self.path)
+        if match:
+            from flowkit.distributed import mark_cancelled
+            try: return self._send(200, {'marked': mark_cancelled(match[1])})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/execution/([A-Za-z0-9_-]+)/selection', self.path)
         if match:
             from flowkit.distributed import set_selection
-            from flowkit.workers import choose
+            from flowkit.definition import parse
+            from flowkit.fleet_matching import requirements_for, validate_launch
+            from flowkit.workers import fleet_status, selector
             try:
                 body = self._json_body()
-                asyncio.run(choose(body['worker']))
-                set_selection(match[1], body['step'], body['worker'])
+                wanted = selector(body['worker'])
+                requirements = dict(wanted)
+                if body.get('flow') is not None:  # the step's software counts, as at launch
+                    source = body['flow']
+                    flow = parse_text(source) if isinstance(source, str) else parse(source)
+                    if body['step'] not in flow.steps: raise ValueError('Unknown step')
+                    requirements = requirements_for(flow, body['step'], selection=wanted)
+                # An offline, busy or unchecked match is accepted: the restarted step waits for it.
+                decision = validate_launch(requirements, asyncio.run(fleet_status([requirements]))[0])
+                if decision['status'] == 'blocked': raise ValueError(f"{decision['message']}. {decision['resolution']}")
+                set_selection(match[1], body['step'], wanted)
                 return self._send(200, {'ok': True})
             except (ValueError, KeyError) as exc: return self._send(400, {'error': str(exc)})
         match = re.fullmatch(r'/runs/(prefect|trigger-dev)/([A-Za-z0-9_-]+)/nodes/([A-Za-z0-9_-]+)/restart', self.path)
@@ -585,8 +714,20 @@ class Api(BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
 
     def do_PUT(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("PUT"):
+        if not self._allowed() or self._documents("PUT") or self._fleet("PUT"):
             return
+        match = re.fullmatch(r'/workers/([^/]+)', urlsplit(self.path).path)
+        if match:
+            from flowkit.fleet_registry import save_worker
+            from flowkit.workers import sync_limits
+            from urllib.parse import unquote
+            try:
+                worker_id = unquote(match[1], errors='strict')
+                body = self._json_body()
+                if 'id' in body and body['id'] != worker_id: raise ValueError('Worker id mismatch')
+                saved = save_worker({**body, 'id': worker_id})
+                return self._send(200, {**saved, 'settings_sync': asyncio.run(sync_limits(worker_id))})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         try:  # the original save: a draft only; checks the revision only when the client sends one
             name, body = self._name(), self._body()
             text = body["yaml"]
@@ -604,8 +745,16 @@ class Api(BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("DELETE"):
+        if not self._allowed() or self._documents("DELETE") or self._fleet("DELETE"):
             return
+        match = re.fullmatch(r'/workers/([^/]+)', urlsplit(self.path).path)
+        if match:
+            from flowkit.fleet_registry import delete_worker
+            from urllib.parse import unquote
+            try:
+                delete_worker(unquote(match[1], errors='strict'))
+                return self._send(200, {'ok': True})
+            except ValueError as exc: return self._send(400, {'error': str(exc)})
         try:
             name = self._name()
         except ValueError as exc:

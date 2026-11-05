@@ -15,6 +15,8 @@ Agent steps receive the human's input through `receive` (same messages as agent 
 import asyncio
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,7 @@ from typing import Any
 from agentdriver.events import Emitter, Sink
 from .definition import FLOWS_DIR, Flow, Step
 from .template import _EXPR, command_argv, render
-from .restart import prepare_workspace, save_result, read_result, descendants
+from .restart import prepare_workspace, save_result, read_result, descendants, pin_definition
 
 STDOUT_TAIL = 40
 
@@ -52,11 +54,24 @@ async def run_step(flow: Flow, step_id: str, context: dict[str, Any], run_id: st
     step = flow.steps[step_id]
     plan = context.get('_flow_restart')
     workspace = prepare_workspace(flow, run_id, plan)
+    if not os.environ.get('FLOW_MANAGED_JOB'):  # a managed job's workspace is new; its coordinator pinned the run
+        pin_definition(workspace, flow)  # a newer revision never runs the rest of an older run
     emit = Emitter(sink)
     if plan and step_id not in descendants(flow, plan['step']):
         output = read_result(workspace, step_id)
         await emit('step', state='done', kind=step.kind, reused=True, output=_bounded(output))
         return output
+    # Managed workers recheck immediately before launch. Scheduling can retry elsewhere.
+    if os.environ.get('FLOW_MANAGED_JOB'):
+        from .capabilities import probe
+        from .fleet_matching import software_requirement
+        needed = software_requirement(step)
+        if needed.get('ambiguous_command'):
+            raise ValueError('Ambiguous program command: declare requires_command')
+        for kind, requirement in needed.items():  # shell builtins need no executable
+            result = probe(kind, requirement)
+            if result['status'] != 'installed':
+                raise RuntimeError(f"Required software {requirement!r} is {result['status']} on this worker")
     if step.kind == "agent":
         try:
             if step.setup is not None:
@@ -102,8 +117,10 @@ async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) ->
     env = {**os.environ, "FLOW_CONTEXT": context_json, "FLOW_OUTPUT": str(output_file), "FLOW_STEP": step.id,
            "FLOW_DIR": flow_dir, "FLOW_PYTHON": sys.executable, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1"}
     # `python` in a command means this worker's interpreter, so steps don't depend on PATH.
-    if not argv and command.startswith("python "):
-        command = f'"{sys.executable}" ' + command[len("python "):]
+    if not argv:
+        command = re.sub(r"^\s*(?:python|\"python\"|'python')(?=\s|$)",
+                         lambda _: subprocess.list2cmdline([sys.executable]) if os.name == 'nt' else shlex.quote(sys.executable),
+                         command, count=1)
     await emit("step", state="running", kind="program", command=command)
     options = dict(cwd=workspace, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                    stderr=asyncio.subprocess.PIPE, start_new_session=os.name != "nt" and not os.environ.get('FLOW_MANAGED_JOB'))

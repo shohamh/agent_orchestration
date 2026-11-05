@@ -11,6 +11,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const fake = require('./placement-fake.cjs');
 
 // ---------------------------------------------------------------- fake flow host
 // JSON is valid YAML, so the fake serialises documents as JSON. Real flow files use a tiny
@@ -107,7 +108,7 @@ function previewOf(name) {
   return { name, revision, activeRevision: entry.active ? revisionOf(entry.active) : null, change, engines, disruptive,
     impact: crypto.createHash('sha256').update(JSON.stringify([revision, engines])).digest('hex').slice(0, 16) };
 }
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -161,6 +162,11 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/api/flows') {
       const flows = [...store.entries()].filter(([, e]) => e.active).map(([name, e]) => { const d = parse(e.active).document; return { name, description: d.description || '', input: d.input || {}, steps: Object.fromEntries(Object.entries(d.steps).map(([id, s]) => [id, { kind: s.kind, needs: s.needs || [] }])) }; });
       return json(200, { flows, broken: {} });
+    }
+    if (url.pathname === '/api/launch/validate') {
+      const active = Object.fromEntries([...store.entries()].filter(([, e]) => e.active).map(([name, e]) => [name, parse(e.active).document]));
+      const [status, data] = fake.launchCheck(body, fake.fleet(), active);
+      return json(status, data);
     }
     if (url.pathname === '/api/workers') return json(200, { workers: [{ id: 'pc-a', pool: 'gpu', tags: ['linux'], online: true }] });
     const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
@@ -761,6 +767,83 @@ test('phone: full screen, step list and form editing without sideways scrolling,
   await call('Emulation.setEmulatedMedia', { features: [] });
   await call('Emulation.setTouchEmulationEnabled', { enabled: false });
   await desktop();
+});
+
+test('fleet compatibility per step: matches with detection times, waits, explained mismatches, step overrides, a blocked draft still saves', async () => {
+  store.set('fleet-flow', { yaml: serialize({ name: 'fleet-flow', description: 'Placed on the fleet', input: {}, worker: { pool: 'build' }, steps: {
+    build: { kind: 'program', run: 'python build.py' },
+    pipe: { kind: 'program', run: 'cat $IN | sort', needs: ['build'] },
+    review: { kind: 'agent', agent: 'codex', prompt: 'Review', needs: ['build'], worker: { id: 'pc-c' } } } }), active: null, layout: null });
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await openFlows();
+  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow'`, 'reopens the last flow');
+  await waitFor(`[...document.querySelectorAll('.fb-flow-item')].some(b => b.textContent.includes('fleet-flow'))`, 'the new draft is listed');
+  await click('.fb-flow-item', 'fleet-flow');
+  try { await waitFor(`document.querySelector('.fb-title').textContent === 'fleet-flow'`, 'fleet-flow opens'); }
+  catch (error) { error.message += `; state: ${JSON.stringify(await evaluate(`({title: document.querySelector('.fb-title')?.textContent, ask: document.querySelector('dialog.fb-ask')?.open, status: document.querySelector('.fb-status')?.textContent, width: innerWidth, flow: document.querySelector('.fb')?.className})`))}`; throw error; }
+  await click('.fb-tab', 'Graph');
+  await waitFor(`document.querySelectorAll('.fb-node').length === 3`, 'fleet-flow graph renders');
+  await click('[data-step="build"] .box');
+  await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="ready"]')`, 'the step is checked against the fleet');
+  const check = calls.filter((c) => c.path === '/api/launch/validate').at(-1).body;
+  assert.equal(check.document.name, 'fleet-flow');
+  assert.deepEqual(check.execution, {}, 'checked the way the New card dialog launches it');
+  assert.match(await evaluate(q('.fb-inspector .fb-placement') + '.textContent'), /Can start now on pc-a.*python installed.*checked/s);
+  assert.equal(await evaluate(`!!document.querySelector('.fb-inspector .fb-placement [data-worker="pc-a"] time[datetime="${fake.CHECKED}"]')`), true, 'last detected time');
+  assert.match(await evaluate(q('.fb-inspector .fb-placement-source') + '.textContent'), /default worker in Flow settings/, 'says where the selection comes from');
+  // A tag no worker in the pool has: blocked and explained; the draft still saves.
+  await type('.fb-inspector [data-focus="step:build:worker-tags"]', 'cuda');
+  await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="blocked"]')`, 'missing tag blocks');
+  const blocked = await evaluate(q('.fb-inspector .fb-placement') + '.textContent');
+  assert.match(blocked, /pc-a lacks tags: cuda/);
+  assert.match(blocked, /How to fix: Add the missing tags to a worker in pool build/);
+  assert.match(await evaluate(q('.fb-inspector .fb-placement-source') + '.textContent'), /You can save this draft.*launch is blocked/s);
+  await waitFor(`!document.querySelector('.fb-yaml').readOnly`);
+  await click('.fb-actions button', 'Save draft');
+  await waitFor(`/Saved draft fleet-flow/.test(document.querySelector('.fb-status').textContent)`, 'a blocked draft saves');
+  assert.deepEqual(JSON.parse(store.get('fleet-flow').yaml).steps.build.worker, { tags: ['cuda'] });
+  // A possible match that is offline: the step will wait.
+  await type('.fb-inspector [data-focus="step:build:worker-pool"]', 'review');
+  await type('.fb-inspector [data-focus="step:build:worker-tags"]', 'linux');
+  await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="wait"]')`, 'offline match waits');
+  assert.match(await evaluate(q('.fb-inspector .fb-placement') + '.textContent'), /Waits for a worker: a matching worker is offline.*pc-b is offline/s);
+  // A step override (worker ID) beats the flow default pool.
+  await click('[data-step="review"] .box');
+  await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="blocked"]')`);
+  const review = await evaluate(q('.fb-inspector .fb-placement') + '.textContent');
+  assert.match(review, /codex is not installed on pc-c/);
+  assert.doesNotMatch(review, /pc-a/, 'only the selected worker is considered');
+  assert.match(await evaluate(q('.fb-inspector .fb-placement-source') + '.textContent'), /this step.s own worker setting/);
+  await click('.fb-tab', 'Steps');
+  assert.deepEqual(await evaluate(`['build', 'pipe', 'review'].map(id => document.querySelector('[data-row="' + id + '"] .fb-placement-chip')?.textContent)`), ['Waits', 'Blocked', 'Blocked']);
+  await click('.fb-tab', 'Graph');
+  await shot('desktop-placement');
+});
+
+test('an ambiguous program asks for requires_command; declaring it clears the block', async () => {
+  await click('[data-step="pipe"] .box');
+  await waitFor(`document.querySelector('.fb-inspector [data-field="requires_command"].invalid')`, 'requires_command is required');
+  const field = await evaluate(`(() => { const w = document.querySelector('.fb-inspector [data-field="requires_command"]'), i = w.querySelector('input');
+    return { error: w.querySelector('.fb-field-error').textContent, invalid: i.getAttribute('aria-invalid'), required: i.required }; })()`);
+  assert.match(field.error, /cannot be inferred.*declare it/);
+  assert.equal(field.invalid, 'true');
+  assert.equal(field.required, true);
+  assert.match(await evaluate(q('.fb-inspector .fb-placement') + '.textContent'), /executable cannot be determined safely/);
+  await type('.fb-inspector [data-focus="step:requires_command"]', 'bash');
+  await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="ready"]')`, 'declared: ready');
+  assert.match(await evaluate(q('.fb-inspector .fb-placement') + '.textContent'), /bash installed/);
+  assert.equal(await evaluate(`document.querySelector('.fb-inspector [data-field="requires_command"]').classList.contains('invalid')`), false);
+  await waitFor(`document.querySelector('.fb-yaml').value.includes('"requires_command": "bash"') && !document.querySelector('.fb-yaml').readOnly`);
+  // Switching the step to an agent and back keeps the declaration (agent steps cannot have one).
+  await choose('.fb-inspector [data-focus="step:kind"]', 'agent');
+  await waitFor(`!document.querySelector('.fb-yaml').value.includes('requires_command') && !document.querySelector('.fb-yaml').readOnly`);
+  await choose('.fb-inspector [data-focus="step:kind"]', 'program');
+  await waitFor(`document.querySelector('.fb-yaml').value.includes('"requires_command": "bash"') && !document.querySelector('.fb-yaml').readOnly`);
+  await click('.fb-actions button', 'Save draft');
+  await waitFor(`/Saved draft fleet-flow/.test(document.querySelector('.fb-status').textContent)`);
+  assert.equal(JSON.parse(store.get('fleet-flow').yaml).steps.pipe.requires_command, 'bash');
+  await click('.fb-close');
+  await waitFor('!document.querySelector("#flows-dialog").open');
 });
 
 test('no uncaught page errors', () => {

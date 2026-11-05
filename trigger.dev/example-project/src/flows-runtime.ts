@@ -6,22 +6,28 @@
 // (plain trigger + polling: a run can only have one *AndWait in flight, which would serialize
 // independent branches) and records step -> run id in its metadata for the board.
 // Steps run the shared Python executor (agents/flowkit) through the native bridge, so like
-// agent-session they need the local development worker.
+// agent-session they need the local development worker. A step placed on the fleet runs on the
+// shared execution service (flowkit.stdio reports engine "trigger" in its execution record).
 import { metadata, runs, task } from "@trigger.dev/sdk";
 import { agentInput, runAgentSession } from "./trigger/agent-session.js";
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 type StepDef = { kind: "program" | "agent"; needs: string[]; retries: number; timeout_minutes: number } & Record<string, Json>;
-export type FlowDef = { name: string; description: string; input: Record<string, Json>; steps: Record<string, StepDef> };
+export type FlowDef = { name: string; description: string; input: Record<string, Json>; steps: Record<string, StepDef>; _asset_snapshot?: { name: string; revision: string; digest: string } };
 type StepPayload = { flowRunId: string; context: { input: Record<string, Json>; steps: Record<string, { output: Json }>; _flow_restart?: Json } };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+// A placed step waits for its fleet worker inside its run, so waiting steps can fill the local
+// worker's concurrency. Development runs leave the queue after ten minutes by default; a queued
+// step (or flow) must instead stay queued as long as its parent can run (maxDuration 86400).
+const QUEUE_TTL = "1d";
 
 export function defineFlow(def: FlowDef) {
   const steps = Object.fromEntries(Object.entries(def.steps).map(([id, step]) => [id, task({
     id: `flow-${def.name}-${id}`,
     description: `${def.name}: ${step.kind} step ${id}`,
     maxDuration: step.timeout_minutes * 60,
+    ttl: QUEUE_TTL,
     retry: { maxAttempts: step.retries + 1 },
     run: async (payload: StepPayload, { ctx, signal }) => {
       if (ctx.environment.type !== "DEVELOPMENT") throw new Error("Flow steps run on the local development worker");
@@ -48,6 +54,7 @@ export function defineFlow(def: FlowDef) {
     id: `flow-${def.name}`,
     description: def.description || `Flow ${def.name}`,
     maxDuration: 86400,
+    ttl: QUEUE_TTL,
     retry: { maxAttempts: 1 },
     run: async (params: Record<string, Json>, { ctx }) => {
       const { flowRestart: _flow_restart, flowExecution: _flow_execution, ...userInput } = params ?? {};

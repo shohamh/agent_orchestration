@@ -122,6 +122,42 @@ class FlowHost:
     async def validate_routing(self, execution, steps):
         return await self._request('POST', '/workers/validate', {'execution': execution, 'steps': list(steps)})
 
+    @staticmethod
+    def _definition(flow):
+        # The definition text avoids re-expanding a synthesized setup step.
+        return flow.get('yaml') or {k: v for k, v in flow.items() if k not in ('yaml', 'environment', 'revision')}
+
+    async def validate_launch(self, flow, execution=None, engine=None):
+        body = {'flow': self._definition(flow), **({'execution': execution} if execution is not None else {}),
+                **({'engine': engine} if engine else {})}
+        return await self._request('POST', '/launch/validate', body, timeout=30)
+
+    async def validate_card(self, agent, worker, engine=None):
+        body = {'card': {'agent': agent, 'worker': worker}, **({'engine': engine} if engine else {})}
+        return await self._request('POST', '/launch/validate', body, timeout=30)
+
+    # Fleet management (the board's fleet tab). Each returns (HTTP status, body) for pass-through.
+    async def fleet(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet', timeout=30)
+
+    async def fleet_metrics(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet/metrics')
+
+    async def fleet_tags(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet/tags')
+
+    async def add_fleet_tag(self, name: str) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/tags', {'name': name})
+
+    async def register_worker(self, worker: dict) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/workers', worker, timeout=30)
+
+    async def update_worker(self, worker_id: str, worker: dict) -> tuple[int, Any]:
+        return await self._call('PUT', f'/fleet/workers/{quote(worker_id, safe="")}', worker, timeout=30)
+
+    async def refresh_capabilities(self, worker_id: str) -> tuple[int, Any]:
+        return await self._call('POST', f'/fleet/workers/{quote(worker_id, safe="")}/capabilities/refresh', {}, timeout=90)
+
     async def execution(self, run_id):
         return (await self._request('GET', f'/execution/{quote(run_id, safe="")}'))['steps']
 
@@ -140,8 +176,12 @@ class FlowHost:
             await asyncio.gather(*(read(r) for r, final in runs.items() if not (final and r in self._executions)))
         return {r: self._executions[r] for r in runs if r in self._executions}
 
-    async def set_selection(self, run_id, step, worker):
-        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', {'step': step, 'worker': worker})
+    async def set_selection(self, run_id, step, worker, flow=None):
+        body = {'step': step, 'worker': worker, **({'flow': self._definition(flow)} if flow is not None else {})}
+        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', body)
+
+    async def mark_cancelled(self, run_id):
+        return await self._request('POST', f'/execution/{quote(run_id, safe="")}/cancel', {}, timeout=3)
 
     async def close(self) -> None:
         if self._session:

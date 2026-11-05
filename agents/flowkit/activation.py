@@ -57,6 +57,20 @@ def atomic_write(path: Path, data: str | bytes) -> None:
         raise
 
 
+def atomic_write_once(path: Path, data: str) -> None:
+    """Publish immutable content exactly once, including across competing activations."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp', delete=False) as file:
+        temporary = Path(file.name)
+        file.write(data.encode('utf-8'))
+        file.flush(); os.fsync(file.fileno())
+    try:
+        try: os.link(temporary, path)
+        except FileExistsError: pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def check_layout(layout: Any) -> dict:
     """{"version": 1, "positions": {step id: {"x", "y"}}, "viewport"?: {"x", "y", "zoom"}}."""
     finite = lambda v: type(v) in (int, float) and math.isfinite(v) and abs(v) < 1e9
@@ -135,9 +149,79 @@ class Store:
     def snapshot_path(self, name: str, rev: str) -> Path:
         return self.state / "active" / name / f"{rev.removeprefix('sha256:')}.yaml"
 
+    def asset_manifest_path(self, name: str, rev: str) -> Path:
+        if not FLOW_NAME.fullmatch(name) or not rev.startswith('sha256:') or len(rev) != 71 or any(c not in '0123456789abcdef' for c in rev[7:]):
+            raise ValueError('Invalid immutable asset reference')
+        return self.state / 'active' / name / (rev[7:] + '.assets.json')
+
+    def asset_reference(self, name: str, rev: str) -> dict:
+        path = self.asset_manifest_path(name, rev).with_suffix('.assetref')
+        try: digest = path.read_text(encoding='utf-8').strip()
+        except OSError as exc:
+            raise FlowError('Immutable flow assets are unavailable; reactivate the flow') from exc
+        if not isinstance(digest, str) or not digest.startswith('sha256:') or len(digest) != 71 or any(c not in '0123456789abcdef' for c in digest[7:]):
+            raise FlowError('Immutable flow asset snapshot has an invalid digest')
+        return {'name': name, 'revision': rev, 'digest': digest}
+
+    def snapshot_assets(self, ref: dict) -> dict:
+        from .artifacts import validate
+        if not isinstance(ref, dict) or set(ref) != {'name', 'revision', 'digest'}:
+            raise ValueError('Invalid immutable asset reference')
+        path = self.asset_manifest_path(ref['name'], ref['revision'])
+        try: data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise FlowError('Immutable flow assets are unavailable; reactivate the flow') from exc
+        if not isinstance(data, dict) or set(data) != {'digest', 'files'}:
+            raise FlowError('Immutable flow asset snapshot is invalid')
+        canonical = json.dumps(data['files'], sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        if revision(canonical) != data['digest'] or data['digest'] != ref['digest']:
+            raise FlowError('Immutable flow asset snapshot does not match its digest')
+        return validate(data['files'])
+
+    def load_bound_flow(self, ref: dict, definition: dict) -> Flow:
+        from .definition import parse
+        self.snapshot_assets(ref)
+        expected = self.asset_reference(ref['name'], ref['revision'])
+        if ref != expected: raise FlowError('Flow asset revision does not match its stored reference')
+        stored = parse_text(self.snapshot_text(ref['name'], ref['revision']))
+        incoming = parse(definition)
+        if incoming.to_json() != stored.to_json():
+            raise FlowError('Flow definition does not match its immutable revision')
+        stored._asset_snapshot = ref
+        return stored
+
+    def current_assets(self) -> tuple[dict, str]:
+        from .artifacts import snapshot
+        files = {name: value for name, value in snapshot(self.drafts).items()
+                 if '__pycache__' not in name.split('/') and not name.endswith(('.pyc', '.pyo'))
+                 and ('/' in name or not (name.endswith('.yaml') or name.endswith('.layout.json')))}
+        for asset_name in files:
+            parts = asset_name.lower().split('/')
+            base = parts[-1]
+            if (any(part.startswith('.') for part in parts)
+                    or base.endswith(('.pem', '.key', '.p12', '.pfx'))
+                    or base.startswith(('id_rsa', 'id_ed25519', 'id_ecdsa'))
+                    or any(word in base for word in ('credential', 'secret', 'password', 'private_key', 'api_token'))):
+                raise FlowError(f'Possible credential or secret file in flow assets: {asset_name}; move it outside the flows directory')
+        canonical = json.dumps(files, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        expected = revision(canonical)
+        return files, expected
+
     def write_snapshot(self, name: str, text: str) -> str:
         rev = revision(text)
         path = self.snapshot_path(name, rev)
+        assets_path = self.asset_manifest_path(name, rev)
+        files, expected = self.current_assets()
+        if not assets_path.exists():
+            atomic_write_once(assets_path, json.dumps({'digest': expected, 'files': files}, ensure_ascii=False))
+        try: stored = json.loads(assets_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc: raise FlowError('Immutable flow asset snapshot is unavailable') from exc
+        if not isinstance(stored, dict) or stored.get('digest') != expected:
+            raise FlowError('Flow assets have changed for this revision; change the flow YAML before activating')
+        reference_path = assets_path.with_suffix('.assetref')
+        atomic_write_once(reference_path, expected)
+        if reference_path.read_text(encoding='utf-8').strip() != expected:
+            raise FlowError('Flow assets have changed for this revision; change the flow YAML before activating')
         if not path.exists():  # content-addressed and never rewritten
             atomic_write(path, text)
         return rev
@@ -163,6 +247,9 @@ class Store:
                 flow = parse_text(self.snapshot_text(name, rev))
                 if flow.name != name:
                     raise FlowError(f"snapshot is named {flow.name!r}")
+                ref = self.asset_reference(name, rev)
+                self.snapshot_assets(ref)  # fail closed if an old revision has no bound assets
+                flow._asset_snapshot = ref
                 flows[name] = flow
             except (FlowError, OSError) as exc:
                 broken[name] = str(exc)

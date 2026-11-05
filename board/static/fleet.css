@@ -1,0 +1,106 @@
+/* Fleet tab (fleet.js): registered PCs, live CPU/RAM, capabilities and the registration form.
+   Colours come from the board's theme variables, so light and dark both work. States are always
+   written out in words; colour only repeats them. No external fonts or assets. */
+dialog.fl-dialog { width: min(1180px, 98vw); height: min(920px, 94vh); max-width: none; max-height: none; padding: 0; overflow: hidden; }
+dialog.fl-dialog[open] { display: flex; flex-direction: column; }
+.fl { display: flex; flex-direction: column; min-height: 0; flex: 1; overscroll-behavior: contain; }
+.fl-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.fl-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.fl-title { font-size: 16px; margin: 0; }
+.fl-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.fl-status { flex: 1 1 100%; margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.fl-status.error { color: var(--danger); }
+.fl-stale { margin: 8px 16px 0; padding: 8px 10px; border-radius: 6px; background: var(--chip); border-left: 3px solid var(--warn); font-size: 12px; }
+.fl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.fl-hint { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.fl-empty { color: var(--muted); text-align: center; padding: 24px; margin: 0; }
+.fl-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px; }
+.fl-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fl-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 8px; margin: 0 4px 4px 0; border-radius: 999px; background: var(--chip); color: var(--ink); overflow-wrap: anywhere; }
+
+/* Worker list */
+.fl-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.fl-worker { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.fl-worker-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; }
+.fl-worker-head h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.fl-worker-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.fl-worker-actions button { font-size: 12px; padding: 4px 10px; }
+.fl-worker-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.fl-state { margin: 0; font-weight: 600; }
+.fl-state[data-status="online"] { color: var(--ok); }
+.fl-state:not([data-status="online"]) { color: var(--warn); }
+.fl-host { color: var(--muted); font-weight: 400; }
+.fl-metrics { display: flex; flex-direction: column; gap: 4px; }
+.fl-metric { display: grid; grid-template-columns: 38px 48px minmax(60px, 1fr); grid-template-rows: auto auto; column-gap: 8px; align-items: center; font-size: 13px; }
+.fl-metric-name { font-weight: 600; }
+.fl-metric-value { font-variant-numeric: tabular-nums; text-align: right; }
+.fl-metric-detail { grid-column: 2 / 4; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.fl-bar { position: relative; height: 8px; border-radius: 4px; background: var(--chip); overflow: hidden; }
+.fl-fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); }
+.fl-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ink); opacity: .6; }
+.fl-over .fl-fill { background: var(--danger); }
+.fl-over .fl-metric-detail { color: var(--danger); }
+.fl-unknown .fl-metric-value, .fl-outdated .fl-metric-value { color: var(--muted); }
+.fl-basis, .fl-slots { margin: 0; font-size: 12px; color: var(--muted); }
+.fl-engines, .fl-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.fl-engines li { overflow-wrap: anywhere; }
+.fl-connected { color: var(--ok); }
+.fl-unconfirmed { color: var(--warn); }
+.fl-not-connected { color: var(--muted); }
+.fl-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 13px; }
+.fl-facts dt { color: var(--muted); }
+.fl-facts dd { margin: 0; overflow-wrap: anywhere; }
+.fl-sync { color: var(--muted); }
+.fl-capabilities { border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.fl-refreshed { margin: 0; font-size: 12px; }
+.fl-results { flex-direction: row; flex-wrap: wrap; gap: 2px 12px; }
+.fl-glyph { display: inline-block; width: 1em; text-align: center; font-weight: 700; }
+.fl-installed .fl-glyph { color: var(--ok); }
+.fl-absent .fl-glyph { color: var(--danger); }
+.fl-unknown .fl-glyph, .fl-error .fl-glyph { color: var(--warn); }
+.fl-result-word { color: var(--muted); }
+.fl-when { color: var(--muted); font-size: 11px; }
+
+/* Registration and settings form */
+.fl-form-body { display: flex; flex-direction: column; gap: 12px; max-width: 900px; }
+.fl-form-body h3 { margin: 0; font-size: 15px; }
+.fl-form-body fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 12px; margin: 0; display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.fl-form-body legend { font-weight: 600; padding: 0 4px; }
+.fl-check { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; cursor: pointer; color: var(--ink); font-size: 14px; }
+.fl-field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 260px; min-width: 0; font-size: 13px; color: var(--muted); }
+.fl-field input { color: var(--ink); }
+.fl-field input[readonly] { background: var(--chip); }
+.fl-field small, .fl-form-body small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; flex: 1 1 100%; }
+.fl-settings .fl-field { flex: 1 1 160px; }
+.fl-pool-list { display: flex; flex-wrap: wrap; gap: 4px 16px; flex: 1 1 100%; }
+.fl-chosen-tags { flex: 1 1 100%; min-height: 4px; }
+.fl-x { border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; padding: 0 2px; border-radius: 50%; }
+.fl-x:hover, .fl-x:focus-visible { color: var(--danger); }
+.fl-combo { position: relative; flex: 1 1 320px; }
+.fl-combo input { width: 100%; }
+.fl-tag-options { position: absolute; z-index: 3; left: 0; right: 0; top: calc(100% + 2px); margin: 0; padding: 4px; list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 12px rgba(0, 0, 0, .15); max-height: 220px; overflow-y: auto; }
+.fl-tag-options li { padding: 6px 8px; border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+.fl-tag-options li[aria-selected="true"], .fl-tag-options li:hover { background: var(--chip); outline: 2px solid var(--accent); outline-offset: -2px; }
+.fl-tag-options .fl-create { font-style: italic; }
+.fl-instructions { display: flex; flex-direction: column; gap: 10px; border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; }
+.fl-step h4 { margin: 0 0 4px; font-size: 13px; }
+.fl-step p { margin: 0 0 6px; font-size: 13px; overflow-wrap: anywhere; }
+.fl-code { margin: 0 0 6px; padding: 8px 10px; background: var(--chip); border-radius: 6px; overflow-x: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.fl-warning { margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--chip); border-left: 3px solid var(--warn); font-size: 13px; }
+.fl-form-error { color: var(--danger); font-size: 13px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fl-form-error:empty { display: none; }
+.fl-form-error p { margin: 0; }
+.fl-form-actions { justify-content: flex-end; }
+.fl button:focus-visible, .fl input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+
+@media (max-width: 700px), (pointer: coarse) {
+  .fl button, .fl input:not([type="checkbox"]):not([type="radio"]) { min-height: 44px; }
+  .fl-check { min-height: 44px; }
+  .fl-check input { width: 22px; height: 22px; }
+}
+@media (max-width: 700px) {
+  dialog.fl-dialog { width: 100vw; height: 100vh; height: 100dvh; max-width: 100vw; margin: 0; border: 0; border-radius: 0; }
+  .fl-list { grid-template-columns: minmax(0, 1fr); }
+  .fl-top, .fl-body { padding: 8px 12px; }
+}
+@media (prefers-reduced-motion: reduce) { .fl * { transition: none !important; } }

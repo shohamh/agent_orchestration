@@ -1,10 +1,15 @@
 # Copy to ignored workers.local.yaml on the coordinator PC. Start a service on each execution PC.
-# Tags/pool must match that service's FLOW_WORKER_POOL and FLOW_WORKER_TAGS exactly.
+# The coordinator owns pools, tags and limits. Keep token values in workers.local.env.
+version: 2
 workers:
   - id: local
     url: http://127.0.0.1:8096
-    pool: default
+    pools: [default]
+    engines: [hatchet, prefect, trigger]  # engines that may place work on this PC
     tags: []
+    slots: 1
+    cpu_limit: 90
+    ram_limit: 90
     token_env: FLOW_WORKER_TOKEN
   # - id: linux-build
   #   url: https://worker-pc.example.internal:8096

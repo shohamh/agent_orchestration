@@ -19,6 +19,9 @@
   /api/flow-documents[/{name}[/layout|/activation|/activate]], /api/flow-documents/parse|serialize
                                                       workflow builder: drafts, revisions, layout and
                                                       confirmed activation (2026-11-03-workflow-builder-api.md)
+  POST /api/launch/validate {flow|document|card, execution?, system?}
+                                                      -> ready | wait | blocked, with per-worker reasons
+  GET  /api/cards/{system}/{run_id}/execution         -> placement records: executing PC, waiting reason
   POST /api/cards/{system}/{run_id}/steer             {instruction}
   POST /api/cards/{system}/{run_id}/{stop|cancel|replay}
   POST /api/queues/{system}/{queue}/pause             {paused: bool}   (Trigger.dev only)
@@ -150,7 +153,7 @@ async def move_card(request: web.Request) -> web.Response:
     elif action == "start_now":
         await adapter.start_now(card)
     elif action == "cancel":
-        await adapter.cancel(run_id)
+        await cancel_run(request, adapter, run_id)
     elif action == "stop":
         await adapter.steer(run_id, {"action": "stop"})
     elif action == "mark_done":
@@ -235,6 +238,9 @@ async def card_events(request: web.Request) -> web.Response:
     return web.json_response({"dropped": dropped, "events": events})
 
 
+SESSION_AGENTS = ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo")
+
+
 async def create_card(request: web.Request) -> web.Response:
     body = await json_object(request)
     kind = body.get("kind", "steerable-agent")
@@ -246,7 +252,7 @@ async def create_card(request: web.Request) -> web.Response:
     options = {}
     if kind == "agent-session":
         agent = body.get("agent", "codex")
-        if agent not in ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"):
+        if agent not in SESSION_AGENTS:
             raise ValueError("agent must be codex, claude, opencode, opencode2, omp, pi or demo")
         workspace = body.get("workspace", "")
         if not isinstance(workspace, str) or len(workspace) > 4096 or "\x00" in workspace:
@@ -256,6 +262,22 @@ async def create_card(request: web.Request) -> web.Response:
         if body.get('resumeSessionId'):
             if not workspace.strip(): raise ValueError('resuming a session requires its original workspace')
             options['session_options']['resumeSessionId'] = text_field(body, 'resumeSessionId', 512)
+        worker = worker_selector(body.get('worker'))
+        if not worker and not workspace.strip() and not body.get('resumeSessionId') and request.match_info['system'] in ('hatchet', 'prefect'):
+            worker = {'tags': []}  # default to any compatible fleet worker for new disposable sessions
+        if worker:  # placed on the fleet by the engine adapter (agents/flowkit/distributed.py)
+            if request.match_info['system'] not in ('hatchet', 'prefect'):
+                raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
+            if workspace.strip() or body.get('resumeSessionId'):
+                raise ValueError('a card placed on a fleet worker runs in a new workspace there; clear the workspace')
+            # As for flows: a confirmed mismatch blocks launch; offline, busy or unchecked matches wait.
+            launch = await request.app['flow_host'].validate_card(agent, worker, engine=SYSTEM_ENGINES.get(request.match_info['system']))
+            if launch['status'] == 'blocked':
+                card = launch['card']
+                return web.json_response({'error': f"Cannot launch: {card['message']} {card['resolution']}", 'launch': launch}, status=409)
+            options['session_options']['worker'] = worker
+            options['launch'] = launch
+    launch = options.pop('launch', None)
     run_id = await adapter_for(request).create(
         request.match_info["board"],
         kind,
@@ -264,7 +286,29 @@ async def create_card(request: web.Request) -> web.Response:
         bounded_int(body, "stepSeconds", 5, 1, 3600),
         **options,
     )
-    return web.json_response({"id": run_id}, status=201)
+    return web.json_response({"id": run_id, **({'launch': launch} if launch else {})}, status=201)
+
+
+def worker_selector(value: Any) -> dict[str, Any]:
+    """A card's fleet requirement: {id?, pool?, tags?}; empty or absent runs the card as before."""
+    if value is None or value == {}:
+        return {}
+    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'tags'}:
+        raise ValueError('worker must contain id, pool and/or tags')
+    for key in ('id', 'pool'):
+        if key in value and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 100):
+            raise ValueError(f'worker {key} must be nonempty text (max 100)')
+    tags = value.get('tags', [])
+    if not isinstance(tags, list) or len(tags) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in tags):
+        raise ValueError('worker tags must be a list of at most 50 nonempty strings')
+    return dict(value)
+
+
+async def card_execution(request: web.Request) -> web.Response:
+    """Where a standalone card actually runs (`execution`, or null) and every placed flow step's
+    record (`steps`): executing PC, engine, state and waiting reason. The drawer polls it."""
+    execution = await request.app['flow_host'].execution(request.match_info['run_id'])
+    return web.json_response({'execution': execution.get('card'), 'steps': execution})
 
 
 async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Response:
@@ -289,8 +333,52 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
     title = str(body.get("title") or (f"{name}: {first}" if first else name))[:200]
     if 'execution' in body:
         params['flowExecution'] = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
+    # A confirmed mismatch blocks launch; offline, busy or unchecked matches launch and wait.
+    launch = await request.app['flow_host'].validate_launch(flow, params.get('flowExecution'),
+                                                           engine=SYSTEM_ENGINES.get(request.match_info['system']))
+    if launch['status'] == 'blocked':
+        problems = [f"{sid}: {d['message']} {d['resolution']}" for sid, d in launch['steps'].items() if d['status'] == 'blocked']
+        return web.json_response({'error': 'Cannot launch: ' + ' | '.join(problems), 'launch': launch}, status=409)
     run_id = await adapter_for(request).create_flow(request.match_info["board"], name, params, title)
-    return web.json_response({"id": run_id}, status=201)
+    return web.json_response({"id": run_id, 'launch': launch}, status=201)
+
+
+async def launch_validate(request: web.Request) -> web.Response:
+    """Pre-launch check for the card and flow creation dialogs; saving is never blocked.
+    One of: `flow` (an active flow's name), `document` (the flow builder's unsaved draft) or
+    `card` ({agent, worker}: a standalone card placed on the fleet)."""
+    body = await json_object(request)
+    system = body.get('system')
+    if system is not None and system not in SYSTEM_ENGINES:
+        raise ValueError('unknown system')
+    engine = SYSTEM_ENGINES.get(system)
+    if sum(key in body for key in ('flow', 'document', 'card')) != 1:
+        raise ValueError('send one of flow, document or card')
+    if 'card' in body:
+        card = body['card']
+        if not isinstance(card, dict) or set(card) - {'agent', 'worker'}:
+            raise ValueError('card must contain agent and worker')
+        if card.get('agent') not in SESSION_AGENTS:
+            raise ValueError('agent must be codex, claude, opencode, opencode2, omp, pi or demo')
+        worker = worker_selector(card.get('worker'))
+        if not worker:
+            raise ValueError('choose a worker, a pool or tags to place the card')
+        if system not in ('hatchet', 'prefect'):
+            raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
+        return web.json_response(await request.app['flow_host'].validate_card(card['agent'], worker, engine=engine))
+    if 'document' in body:
+        flow = body['document']
+        if not isinstance(flow, dict) or not isinstance(flow.get('steps'), dict) or len(json.dumps(flow)) > 200000:
+            raise ValueError('document must be a flow mapping with steps (at most 200000 characters)')
+    else:
+        name = text_field(body, 'flow', 100)
+        flow = (await request.app['flow_host'].flows()).get(name)
+        if flow is None:
+            raise ValueError(f'unknown flow {name!r}')
+    execution = None
+    if 'execution' in body:
+        execution = await request.app['flow_host'].validate_routing(body['execution'], list(flow['steps']))
+    return web.json_response(await request.app['flow_host'].validate_launch(flow, execution, engine=engine))
 
 
 async def json_object(request: web.Request) -> dict[str, Any]:
@@ -446,13 +534,13 @@ async def node_transcript(request: web.Request) -> web.Response:
 
 
 async def node_restart(request: web.Request) -> web.Response:
-    info, _, node, _ = await flow_node(request)
+    info, flow, node, _ = await flow_node(request)
     adapter = adapter_for(request)
     if info["column"] not in ("done", "stopped"):
         raise web.HTTPConflict(text="Stop or finish the flow before restarting a step")
     body = await json_object(request)
-    if 'worker' in body:
-        await request.app['flow_host'].set_selection(request.match_info['run_id'], node.step, body['worker'])
+    if 'worker' in body:  # the flow host checks the step's software too, as at launch
+        await request.app['flow_host'].set_selection(request.match_info['run_id'], node.step, body['worker'], flow)
     if not hasattr(adapter, 'restart_node'):
         if request.match_info['system'] not in ('prefect', 'trigger-dev'):
             raise NotImplementedError('This backend has no step restart support')
@@ -467,6 +555,95 @@ async def flows_list(request: web.Request) -> web.Response:
 
 async def workers_list(request: web.Request) -> web.Response:
     return web.json_response(await request.app['flow_host'].workers())
+
+
+# ---------------------------------------------------------------- fleet tab
+# The flow host owns the registry and talks to the workers; the board only passes requests on.
+# Its answers are filtered once more here, so a fleet listing in the browser can never carry an
+# endpoint, a token name or a token, whatever a flow host version returns.
+SYSTEM_ENGINES = {'hatchet': 'hatchet', 'prefect': 'prefect', 'trigger-dev': 'trigger', 'trigger': 'trigger'}
+FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
+PUBLIC_WORKER = {'id', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
+                 'status', 'hostname', 'active', 'warnings'}
+PUBLIC_CAPACITY = {'state', 'reason', 'cpu_percent', 'ram_percent', 'sample_age_seconds', 'window_seconds', 'ram_basis',
+                   'leases', 'settings'}
+PUBLIC_RESULT = {'status', 'checked_at', 'auth_status'}
+
+
+def public_inventory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    section = lambda name: {k: {f: v[f] for f in PUBLIC_RESULT if f in v} for k, v in (value.get(name) or {}).items()
+                            if isinstance(k, str) and isinstance(v, dict)} if isinstance(value.get(name), dict) else {}
+    return {'agents': section('agents'), 'commands': section('commands'), 'refreshed_at': value.get('refreshed_at'),
+            'cached': bool(value.get('cached'))}
+
+
+def public_worker(worker: Any) -> dict[str, Any]:
+    if not isinstance(worker, dict):
+        return {}
+    result = {k: worker[k] for k in PUBLIC_WORKER if k in worker}
+    if isinstance(worker.get('capacity'), dict):
+        result['capacity'] = {k: worker['capacity'][k] for k in PUBLIC_CAPACITY if k in worker['capacity']}
+    if 'inventory' in worker:
+        result['inventory'] = public_inventory(worker['inventory'])
+    if isinstance(worker.get('engine_status'), dict):
+        result['engine_status'] = {e: {k: s[k] for k in ('route', 'coordinator', 'state', 'connected') if k in s}
+                                   for e, s in worker['engine_status'].items() if isinstance(s, dict)}
+    if isinstance(worker.get('settings_sync'), dict):
+        result['settings_sync'] = {k: str(worker['settings_sync'][k])[:300] for k in ('state', 'message') if k in worker['settings_sync']}
+    return result
+
+
+def fleet_answer(result: tuple[int, Any]) -> web.Response:
+    status, body = result
+    if status < 400 and isinstance(body, dict):
+        body = dict(body)
+        if isinstance(body.get('workers'), list):
+            body['workers'] = [public_worker(w) for w in body['workers']]
+        if 'worker' in body:
+            body['worker'] = public_worker(body['worker'])
+        if 'inventory' in body:
+            body['inventory'] = public_inventory(body['inventory'])
+        if isinstance(body.get('settings_sync'), dict):
+            body['settings_sync'] = public_worker({'settings_sync': body['settings_sync']}).get('settings_sync')
+    return web.json_response(body, status=status)
+
+
+async def fleet_worker_body(request: web.Request) -> dict[str, Any]:
+    body = await json_object(request)
+    unknown = set(body) - FLEET_FIELDS
+    if unknown:
+        raise ValueError('unknown worker fields: ' + ', '.join(sorted(unknown)))
+    return body
+
+
+async def fleet_list(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].fleet())
+
+
+async def fleet_metrics(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].fleet_metrics())
+
+
+async def fleet_tags(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].fleet_tags())
+
+
+async def fleet_add_tag(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].add_fleet_tag(text_field(await json_object(request), 'name', 100)))
+
+
+async def fleet_register(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].register_worker(await fleet_worker_body(request)))
+
+
+async def fleet_update(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
+
+
+async def fleet_refresh(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].refresh_capabilities(request.match_info['worker_id']))
 
 
 async def flows_validate(request: web.Request) -> web.Response:
@@ -592,6 +769,16 @@ async def node_logs(request: web.Request) -> web.Response:
     return web.json_response(lines_page(request, await adapter_for(request).node_lines(request.match_info["ref"])))
 
 
+async def cancel_run(request: web.Request, adapter: Any, run_id: str) -> None:
+    """A user cancellation: tell the flow host first so a waiting step records `cancelled`
+    rather than an engine timeout or interruption. Never blocks the cancellation itself."""
+    try:
+        await request.app['flow_host'].mark_cancelled(run_id)
+    except Exception as exc:  # flow host down, or not a portable flow
+        log.info('could not mark %s cancelled on the flow host: %s', run_id, exc)
+    await adapter.cancel(run_id)
+
+
 async def card_action(request: web.Request) -> web.Response:
     adapter = adapter_for(request)
     run_id, action = request.match_info["run_id"], request.match_info["action"]
@@ -603,7 +790,7 @@ async def card_action(request: web.Request) -> web.Response:
     elif action == "stop":
         await adapter.steer(run_id, {"action": "stop"})
     elif action == "cancel":
-        await adapter.cancel(run_id)
+        await cancel_run(request, adapter, run_id)
     elif action == "replay":
         await adapter.replay(run_id)
     else:
@@ -663,6 +850,7 @@ def make_app() -> web.Application:
     app.router.add_get("/api/cards/{system}/{run_id}/transcript", card_transcript)
     app.router.add_get("/api/cards/{system}/{run_id}/logs", card_logs)
     app.router.add_get("/api/cards/{system}/{run_id}/events", card_events)
+    app.router.add_get("/api/cards/{system}/{run_id}/execution", card_execution)
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/logs", node_logs)
     app.router.add_post("/api/cards/{system}/{run_id}/nodes/{ref}/input", node_input)
     app.router.add_get("/api/cards/{system}/{run_id}/nodes/{ref}/transcript", node_transcript)
@@ -678,6 +866,14 @@ def make_app() -> web.Application:
     app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
     app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
     app.router.add_get('/api/workers', workers_list)
+    app.router.add_get('/api/fleet', fleet_list)
+    app.router.add_get('/api/fleet/metrics', fleet_metrics)
+    app.router.add_get('/api/fleet/tags', fleet_tags)
+    app.router.add_post('/api/fleet/tags', fleet_add_tag)
+    app.router.add_post('/api/fleet/workers', fleet_register)
+    app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
+    app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)
+    app.router.add_post('/api/launch/validate', launch_validate)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)
     app.router.add_delete("/api/flows/{name}", flows_delete)

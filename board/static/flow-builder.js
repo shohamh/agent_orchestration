@@ -11,7 +11,7 @@
   const NODE_W = 184, NODE_H = 56, GAP_X = 36, GAP_Y = 64, PAD = 24;
   // Keys the forms edit. Anything else (environment, setup, keys added later) stays in the
   // document untouched and is shown as "edit in YAML".
-  const FORM_STEP_KEYS = new Set(['kind', 'description', 'needs', 'agent', 'review', 'worker', 'retries', 'timeout_minutes', 'run', 'prompt']);
+  const FORM_STEP_KEYS = new Set(['kind', 'description', 'needs', 'agent', 'review', 'worker', 'retries', 'timeout_minutes', 'run', 'requires_command', 'prompt']);
   const FORM_FLOW_KEYS = new Set(['name', 'description', 'input', 'worker', 'steps']);
   const STATES = {
     active: ['Active', 'Active: new runs use this draft.'],
@@ -287,13 +287,94 @@
   }
   const errorText = (r) => r.data?.error || (r.data?.errors || []).map((e) => e.message).join(' ') || `Request failed (HTTP ${r.status})`;
 
+  // ------------------------------------------------------------------ Fleet placement
+  // Words for the flow host's launch check (POST /api/launch/validate: ready | wait | blocked with
+  // per-worker reasons) and for execution records (state, waiting_reason). Shared with the New
+  // card dialog and the card drawer in index.html, so every view explains placement the same way.
+  const WAITING_WORDS = {
+    offline: 'a matching worker is offline',
+    credentials_unavailable: 'the coordinator has no usable credentials for a matching worker',
+    full_slots: 'every matching worker is busy (no free slot)',
+    high_cpu: 'CPU on the matching workers is at or above their limit',
+    high_ram: 'RAM on the matching workers is at or above their limit',
+    gate_unavailable: 'the worker admission gate or its settings could not be verified; check or update the worker service',
+    missing_metrics: 'waiting for a complete 10-second CPU and RAM measurement',
+    cooldown: 'the worker waits for a fresh 10-second measurement after its last start',
+    software_unknown: 'the required software has not been checked on a matching worker yet',
+    software_stale: 'the required software was last checked over a day ago and is checked again',
+    software_missing: 'the required software was missing on the chosen worker; looking for another one',
+    intervention_needed: 'no registered worker can run it now',
+    awaiting_authorization: 'the worker admitted it and waits for the coordinator to confirm the start',
+    coordinator_unreachable: 'the worker cannot reach the coordinator',
+    starting: 'starting',
+  };
+  const waitingWords = (code) => WAITING_WORDS[code] || String(code || 'unknown reason').replaceAll('_', ' ');
+  const PLACEMENT_LABELS = { ready: 'Ready', wait: 'Will wait', blocked: 'Blocked', local: 'Coordinator', unknown: 'Unknown' };
+  const PLACEMENT_CHIPS = { ready: 'Ready', wait: 'Waits', blocked: 'Blocked', local: 'Coordinator' };
+  const MATCH_WORDS = { compatible: 'Compatible', unknown: 'Might match, waiting', incompatible: 'Not compatible' };
+  const SOFTWARE_WORDS = { installed: 'installed', absent: 'not installed', unknown: 'unknown', error: 'check failed' };
+
+  function placementStatus(decision) { return !decision ? 'unknown' : decision.fleet === false ? 'local' : decision.status; }
+  function placementHeadline(decision) {
+    const status = placementStatus(decision);
+    if (status === 'local') return 'Runs on the coordinator: no worker is selected anywhere, so the fleet is not used.';
+    if (status === 'ready') return `Can start now on ${(decision.candidates || []).join(', ')}.`;
+    if (status === 'wait') return `Waits for a worker: ${waitingWords(decision.waiting_reason)}. It starts by itself once a matching worker can take it.`;
+    if (status === 'blocked') return decision.message || 'No registered worker can run this.';
+    return 'Not checked yet.';
+  }
+  // A step's or card's record: queued, waiting, running, done, failed, cancelled, timed_out, interrupted.
+  function executionText(record) {
+    if (!record) return 'Not placed yet';
+    const reason = record.waiting_reason && record.waiting_reason !== 'intervention_needed' ? `: ${waitingWords(record.waiting_reason)}` : '';
+    const on = record.worker?.id ? ` on ${record.worker.id}${record.worker.hostname && record.worker.hostname !== record.worker.id ? ` (${record.worker.hostname})` : ''}` : '';
+    switch (record.state) {
+      case 'queued': return reason ? `Queued on a worker${reason}` : 'Queued: choosing a worker';
+      case 'waiting': return record.intervention_needed || record.waiting_reason === 'intervention_needed'
+        ? `Intervention needed: ${record.message || WAITING_WORDS.intervention_needed}` : `Waiting for a worker${reason}`;
+      case 'running': return `Running${on}`;
+      case 'done': return `Done${on}`;
+      case 'failed': return `Failed${on}`;
+      case 'cancelled': return `Cancelled${reason ? ` while waiting${reason}` : ''}`;
+      case 'timed_out': return `Timed out after ${record.timeout_minutes ?? '?'} minutes${reason ? ` while waiting${reason}` : ''}`;
+      case 'interrupted': return `Interrupted by the engine${reason ? ` while waiting${reason}` : ''}`;
+      default: return String(record.state || 'unknown').replaceAll('_', ' ');
+    }
+  }
+  const localTime = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString(); };
+  function detectedNodes(list) {
+    return (list || []).flatMap((d) => [` · ${d.name} ${SOFTWARE_WORDS[d.status] || d.status}`,
+      d.checked_at ? ', checked ' : ', never checked', d.checked_at ? h('time', { datetime: d.checked_at }, localTime(d.checked_at)) : null,
+      d.cached ? ' (last known: the PC is offline)' : null]);
+  }
+  function placementView(decision, { title } = {}) {
+    const status = placementStatus(decision);
+    const workers = (decision?.workers || []).map((m) => h('li', { 'data-worker': m.worker, 'data-match': m.status },
+      h('strong', {}, m.worker), ` · ${MATCH_WORDS[m.status] || m.status}`, m.reasons?.length ? `: ${m.reasons.map((r) => r.message).join('; ')}` : '', ...detectedNodes(m.detected)));
+    return h('div', { class: `fb-placement fb-placement-${status}`, 'data-status': status },
+      title ? h('h4', {}, title) : null,
+      h('p', { class: 'fb-placement-head' }, h('strong', {}, PLACEMENT_LABELS[status] || status), ' ', placementHeadline(decision)),
+      status === 'blocked' && decision.resolution ? h('p', { class: 'fb-placement-fix' }, `How to fix: ${decision.resolution}`) : null,
+      workers.length ? h('ul', { class: 'fb-placement-workers', 'aria-label': 'Registered workers' }, ...workers) : null);
+  }
+  function executionView(record, { label } = {}) {
+    const state = record?.state || 'none';
+    const unfinished = ['queued', 'waiting', 'cancelled', 'timed_out', 'interrupted'].includes(state);
+    const reasons = unfinished ? (record?.waiting || []).map((r) => r.message).filter(Boolean) : [];
+    return h('div', { class: `fb-exec fb-exec-${state}`, 'data-state': state },
+      h('p', {}, label ? h('strong', {}, `${label} `) : null, executionText(record), record?.engine ? h('span', { class: 'fb-hint' }, ` · ${ENGINE_LABELS[record.engine] || record.engine}`) : null),
+      reasons.length ? h('ul', { class: 'fb-placement-workers' }, ...reasons.map((m) => h('li', {}, m))) : null,
+      state === 'waiting' && record.resolution ? h('p', { class: 'fb-placement-fix' }, `How to fix: ${record.resolution}`) : null);
+  }
+
   // ------------------------------------------------------------------ Editor
   function mount(container, options = {}) {
     const win = container.ownerDocument.defaultView;
     const request = options.request || fetchJson;
     const narrow = () => !!win.matchMedia?.('(max-width: 700px)').matches;
     const S = { docs: [], cur: null, sel: null, view: narrow() ? 'steps' : 'graph', vp: { x: 0, y: 0, k: 1 }, inspecting: false,
-      drafts: {}, picker: null, caret: {}, lastName: null, visible: false, losslessAsk: null };
+      drafts: {}, picker: null, caret: {}, lastName: null, visible: false, losslessAsk: null,
+      placement: { key: null, serial: 0, result: null, error: null } };
 
     // ---- skeleton
     const title = h('h2', { class: 'fb-title', id: 'fb-title' }, 'Flows');
@@ -402,6 +483,7 @@
       if (next?.yamlInvalid && !next.doc) S.view = 'yaml';
       yamlArea.value = next?.yaml ?? '';
       renderAll();
+      schedulePlacement();
     }
     async function openDoc(name) {
       if (S.cur && S.cur.name === name && !S.cur.isNew) return;
@@ -443,7 +525,7 @@
       if (result.unchanged) return result;
       c.doc = result.doc; c.pendingEdit = true;
       notify('');
-      scheduleSerialize();
+      scheduleSerialize(); schedulePlacement();
       renderList(); renderTop(); renderBanner(); renderGraph(); renderSteps();
       if (rebuild) renderInspector();
       return result;
@@ -490,6 +572,7 @@
         if (S.sel?.type === 'edge' && !needsOf(c.doc.steps?.[S.sel.to]).includes(S.sel.from)) S.sel = null;
         S.drafts = {};
         notify('');
+        schedulePlacement();
       } else c.yamlInvalid = true;   // the last valid document stays as it was
       renderAll({ keepYaml: true });
     }
@@ -500,6 +583,63 @@
       if (c.goodYaml != null) { c.yaml = c.goodYaml; yamlArea.value = c.yaml; c.yamlEdited = true; await flushParse(); }
       else if (c.doc) { c.yamlInvalid = false; c.pendingEdit = true; await flushSerialize(); }
     }
+
+    // ---- fleet placement: the current document is checked the way the New card dialog launches
+    // it (with a run-level selection, so every step is placed). Saving is never blocked by it.
+    let placementTimer = null;
+    function schedulePlacement() { clearTimeout(placementTimer); placementTimer = setTimeout(checkPlacement, 400); }
+    async function checkPlacement() {
+      const c = S.cur, P = S.placement;
+      if (!S.visible || !c?.doc) return;
+      const doc = c.doc, key = canonical(doc);
+      if (key === P.key) return;
+      Object.assign(P, { key, result: null, error: null });
+      const serial = ++P.serial;
+      const r = await request('POST', '/api/launch/validate', { document: doc, execution: {} });
+      if (serial !== P.serial || S.cur !== c) return;
+      Object.assign(P, r.ok ? { result: r.data, error: null } : { result: null, error: errorText(r) });
+      renderSteps(); renderPlacement();
+      if (r.ok && r.data?.status === 'blocked') placementTimer = setTimeout(() => { if (S.visible && S.cur === c) { P.key = null; checkPlacement(); } }, 5000);
+    }
+    // The check of the document as it is now, or null while it is not back yet.
+    const placementFor = () => (S.cur?.doc && S.placement.key === canonical(S.cur.doc) && S.placement.result ? S.placement.result : null);
+    const decisionFor = (id) => placementFor()?.steps?.[id] || null;
+    const ambiguous = (id) => !!decisionFor(id)?.reasons?.some((r) => r.code === 'ambiguous_command');
+    function placementChip(id) {
+      const d = decisionFor(id), status = d ? placementStatus(d) : null;
+      return status ? h('span', { class: `fb-chip fb-placement-chip fb-chip-${status}`, title: placementHeadline(d) }, PLACEMENT_CHIPS[status] || status) : null;
+    }
+    function placementSource(id) {
+      const doc = S.cur.doc, own = doc.steps[id]?.worker;
+      const source = own?.id ? `Uses this step's own worker setting: worker ${own.id}, which overrides the flow default.`
+        : own ? "Uses this step's own worker setting, on top of the default worker in Flow settings."
+        : doc.worker ? 'Uses the default worker in Flow settings.' : 'No worker is selected: any registered worker can run it, or choose one when you start a run.';
+      const blocked = decisionFor(id)?.status === 'blocked' ? ' You can save this draft; launch is blocked until this is resolved.' : '';
+      return h('p', { class: 'fb-hint fb-placement-source' }, source, blocked);
+    }
+    function placementBox(id) {
+      const result = placementFor();
+      if (S.placement.error) return [h('p', { class: 'fb-hint' }, `Couldn't check the fleet: ${S.placement.error}. Saving still works.`)];
+      if (!result) return [h('p', { class: 'fb-hint', role: 'status' }, 'Checking the fleet…')];
+      if (result.fleet === false) return [placementView(result)];
+      if (id === null) return [h('ul', { class: 'fb-placement-summary' }, ...stepIds(S.cur.doc).map((sid) => h('li', {}, h('strong', {}, sid), ' ', placementChip(sid), ' ',
+        decisionFor(sid) ? placementHeadline(decisionFor(sid)) : '')))];
+      const d = decisionFor(id);
+      return d ? [placementView(d), placementSource(id)] : [h('p', { class: 'fb-hint' }, 'Not checked.')];
+    }
+    // Updates the open form in place, so typing is never interrupted by a check coming back.
+    function renderPlacement() {
+      const slot = inspector.querySelector('.fb-placement-slot');
+      if (slot) slot.replaceChildren(h('h4', {}, slot.dataset.title), ...placementBox(slot.dataset.step || null));
+      const wrap = inspector.querySelector('.fb-field[data-field="requires_command"]');
+      if (wrap) {
+        const needed = ambiguous(wrap.dataset.step), input = wrap.querySelector('input');
+        wrap.dataset.extra = needed ? REQUIRES_COMMAND_ERROR : '';
+        setFieldErrors(wrap, errorsFor(wrap.dataset.step, 'requires_command'));
+        input.required = needed; input.setAttribute('aria-required', String(needed));
+      }
+    }
+    const REQUIRES_COMMAND_ERROR = 'The executable cannot be inferred from this command, so the fleet cannot check it: declare it here, for example bash. Launch is blocked until you do.';
 
     // ---- saving
     async function save(overwrite) {
@@ -1084,6 +1224,7 @@
             h('button', { type: 'button', class: 'fb-step-open', 'data-focus': `row:${id}`, 'aria-label': `Edit step ${id}${errs.length ? `, ${plural(errs.length, 'problem')}` : ''}`,
               onclick: () => select({ type: 'step', id }, { inspect: true }) },
             h('span', { class: 'fb-step-id' }, id), h('span', { class: `fb-chip fb-kind-${step?.kind}` }, step?.kind === 'agent' ? `agent · ${step.agent || 'demo'}` : String(step?.kind ?? '?')),
+            placementChip(id),
             step?.review ? h('span', { class: 'fb-chip' }, 'review') : null,
             step?.description ? h('span', { class: 'fb-step-desc' }, step.description) : null,
             errs.length ? h('span', { class: 'fb-err-count' }, errs.map((x) => x.message).join(' ')) : null),
@@ -1226,11 +1367,11 @@
       return edit((doc) => {
         const next = clone(doc), step = next.steps[id], stash = (S.cur.stash[id] ||= {});
         if (step.kind === kind) return ok(doc, { unchanged: true });
-        const own = step.kind === 'agent' ? ['agent', 'prompt', 'review', 'setup'] : ['run'];
+        const own = step.kind === 'agent' ? ['agent', 'prompt', 'review', 'setup'] : ['run', 'requires_command'];
         for (const k of own) if (k in step) { stash[k] = step[k]; delete step[k]; }
         step.kind = kind;
         const defaults = newStep(kind);
-        for (const k of kind === 'agent' ? ['agent', 'review', 'prompt', 'setup'] : ['run']) if (k in stash) step[k] = stash[k]; else if (k in defaults) step[k] = defaults[k];
+        for (const k of kind === 'agent' ? ['agent', 'review', 'prompt', 'setup'] : ['run', 'requires_command']) if (k in stash) step[k] = stash[k]; else if (k in defaults) step[k] = defaults[k];
         return ok(next);
       }, { inspector: true });
     }
@@ -1276,7 +1417,15 @@
           h('label', {}, h('input', { type: 'checkbox', 'data-focus': 'step:review', checked: !!step.review, onchange: (e) => { const v = e.target.checked; edit(mutate((d) => { d.steps[id].review = v; })); } }),
             ' Wait for me to mark this step done (review)'), h('p', { class: 'fb-field-error', id: 'fb-review-error', hidden: true })),
         templateField(id, 'prompt', 'Prompt')] : [];
-      const programFields = kind === 'program' ? [templateField(id, 'run', 'Command')] : [];
+      const needed = kind === 'program' && ambiguous(id);
+      const commandInput = kind === 'program' ? h('input', { 'data-focus': 'step:requires_command', value: draft('step:requires_command', step.requires_command ?? ''), placeholder: 'Inferred from the command',
+        autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-required': String(needed),
+        oninput: (e) => { remember('step:requires_command')(e); const v = e.target.value.trim(); edit(mutate((d) => setKey(d.steps[id], 'requires_command', v || undefined))); },
+        onchange: forget('step:requires_command') }) : null;
+      if (commandInput) commandInput.required = needed;
+      const programFields = kind === 'program' ? [templateField(id, 'run', 'Command'),
+        field('Executable (requires_command)', commandInput, { key: 'requires_command', step: id, extraError: needed ? REQUIRES_COMMAND_ERROR : '',
+          hint: 'The program this step runs, checked on the worker before it starts. Leave blank when it is the first word of a simple command; declare it for pipes, variables and scripts.' })] : [];
       const idError = S.drafts['step:id:error'];
       return [
         h('h3', { tabindex: '-1' }, `Step ${id}`),
@@ -1287,6 +1436,7 @@
         needsField, ...agentFields, ...programFields,
         h('div', { class: 'fb-pair' }, numberField(id, 'retries', 'Retries', 0, 10, '0', '0–10'), numberField(id, 'timeout_minutes', 'Timeout (minutes)', 1, 1440, '60', '1–1440')),
         workerFields(`step:${id}`, step.worker, (value) => edit(mutate((d) => setKey(d.steps[id], 'worker', value)))),
+        h('section', { class: 'fb-placement-slot', 'data-step': id, 'data-title': 'Where this step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where this step can run'), ...placementBox(id)),
         extras(step, FORM_STEP_KEYS),
         h('div', { class: 'fb-row' }, h('button', { type: 'button', class: 'secondary', 'data-focus': 'step:after', onclick: () => addNewStep('program', id) }, '+ Program step after this'),
           h('button', { type: 'button', class: 'secondary', 'data-focus': 'step:after-agent', onclick: () => addNewStep('agent', id) }, '+ Agent step after this')),
@@ -1346,6 +1496,7 @@
           h('button', { type: 'button', class: 'secondary', 'data-focus': 'flow:add-input', onclick: () => edit(mutate((d) => { d.input = d.input || {}; let i = 1; while (`input_${i}` in d.input) i++; d.input[`input_${i}`] = ''; }), { inspector: true }) }, '+ Add input'),
           h('p', { class: 'fb-field-error', id: 'fb-input-error', hidden: true })),
         workerFields('flow', doc.worker, (value) => edit(mutate((d) => setKey(d, 'worker', value)))),
+        h('section', { class: 'fb-placement-slot', 'data-title': 'Where each step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where each step can run'), ...placementBox(null)),
         'environment' in doc ? h('div', { class: 'fb-extra' }, h('h4', {}, 'Environment setup'),
           p('This flow prepares an environment (a setup_environment step runs first). Edit it in the YAML tab; graph edits keep it.'),
           h('details', {}, h('summary', {}, 'environment'), h('pre', {}, JSON.stringify(doc.environment, null, 2)))) : null,
@@ -1357,8 +1508,9 @@
     renderAll();
     return {
       async open() {
-        S.visible = true;
+        S.visible = true; S.placement.key = null;  // the fleet may have changed since the last look
         await refreshList();
+        schedulePlacement();
         if (S.cur && (isDirty() || S.cur.isNew)) { renderAll({ keepYaml: true }); return; }
         const name = S.cur?.name || S.lastName;
         const target = S.docs.some((d) => d.name === name) ? name : S.docs[0]?.name;
@@ -1377,7 +1529,8 @@
   }
 
   const api = { AGENTS, NODE_W, NODE_H, checkStepId, uniqueStepId, addStep, removeStep, renameStep, renameInput, referencesTo, addDependency, removeDependency,
-    dependsOn, dependencyOptions, layers, autoLayout, layout, bounds, referenceCandidates, insertText, compareDocuments, TEMPLATES, mount };
+    dependsOn, dependencyOptions, layers, autoLayout, layout, bounds, referenceCandidates, insertText, compareDocuments, TEMPLATES, mount,
+    waitingWords, placementHeadline, executionText, placementView, executionView };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FlowBuilder = api;
 })(typeof window !== 'undefined' ? window : globalThis);

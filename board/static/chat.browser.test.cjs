@@ -104,7 +104,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       if (url.pathname === '/api/flows') { response.end(JSON.stringify({ flows: [{name:'worker-flow',input:{topic:'test'},steps:{build:{kind:'program',needs:[]},review:{kind:'agent',needs:['build']}}}], broken: {} })); return; }
       if (url.pathname === '/api/workers') { response.end(JSON.stringify({workers:[{id:'pc-a',pool:'builds',tags:['linux'],online:true},{id:'pc-b',pool:'review',tags:[],online:true}]})); return; }
       const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
-      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css'].includes(file)) { response.writeHead(404).end(); return; }
+      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'].includes(file)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
       response.end(fs.readFileSync(path.join(__dirname, file)));
     } catch (error) { response.writeHead(500).end(JSON.stringify({ error: error.message })); }
@@ -117,7 +117,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     let port;
     for (let i = 0; i < 100; i++) {
       const active = path.join(profile, 'DevToolsActivePort');
-      if (fs.existsSync(active)) { port = fs.readFileSync(active, 'utf8').split('\n')[0]; break; }
+      try { port = fs.readFileSync(active, 'utf8').split('\n')[0]; if (port) break; }
+      catch (error) { if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) throw error; }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.ok(port, 'Chrome debugging endpoint starts');

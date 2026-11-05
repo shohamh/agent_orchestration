@@ -148,3 +148,23 @@ test('starter templates produce valid-looking documents', () => {
   const parallel = fb.layers(fb.TEMPLATES.parallel.make('p'));
   assert.deepEqual(parallel.rows, [['brief'], ['design', 'review'], ['plan']]);
 });
+
+test('placement words: every launch decision and execution state is a sentence, never a bare code', () => {
+  assert.equal(fb.placementHeadline({ status: 'ready', candidates: ['pc-a', 'pc-b'] }), 'Can start now on pc-a, pc-b.');
+  assert.match(fb.placementHeadline({ status: 'wait', waiting_reason: 'high_ram' }), /^Waits for a worker: RAM on the matching workers is at or above their limit\./);
+  assert.equal(fb.placementHeadline({ status: 'blocked', message: 'No registered worker can run this step: x' }), 'No registered worker can run this step: x');
+  assert.match(fb.placementHeadline({ status: 'ready', fleet: false, steps: {} }), /coordinator/);
+  const record = (state, extra = {}) => fb.executionText({ state, waiting_reason: 'offline', ...extra });
+  assert.equal(record('waiting'), 'Waiting for a worker: a matching worker is offline');
+  assert.equal(record('waiting', { waiting_reason: 'intervention_needed', intervention_needed: true, message: 'pc-a lacks gpu' }), 'Intervention needed: pc-a lacks gpu');
+  assert.equal(record('queued', { waiting_reason: 'awaiting_authorization' }), 'Queued on a worker: the worker admitted it and waits for the coordinator to confirm the start');
+  assert.equal(record('queued', { waiting_reason: null }), 'Queued: choosing a worker');
+  assert.equal(record('running', { waiting_reason: null, worker: { id: 'pc-a', hostname: 'build-01' } }), 'Running on pc-a (build-01)');
+  assert.equal(record('cancelled'), 'Cancelled while waiting: a matching worker is offline');
+  assert.equal(record('cancelled', { waiting_reason: null }), 'Cancelled');
+  assert.equal(record('timed_out', { timeout_minutes: 60 }), 'Timed out after 60 minutes while waiting: a matching worker is offline');
+  assert.equal(record('interrupted'), 'Interrupted by the engine while waiting: a matching worker is offline');
+  for (const code of ['offline', 'credentials_unavailable', 'full_slots', 'high_cpu', 'high_ram', 'missing_metrics', 'cooldown', 'software_unknown', 'software_stale',
+    'software_missing', 'awaiting_authorization', 'coordinator_unreachable']) assert.doesNotMatch(fb.waitingWords(code), /_/, code);
+  assert.equal(fb.waitingWords('some_new_code'), 'some new code');
+});

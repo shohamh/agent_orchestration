@@ -19,7 +19,17 @@ async def main():
         return json.loads(line)
     async def sink(event):
         print(json.dumps(event, ensure_ascii=False), flush=True)
-    output = await run_step(parse(start['flow']), start['step'], start['context'], start['runId'], receive, sink)
+    flow = parse(start['flow']) if 'session' not in start else None
+    if os.environ.get('FLOW_CAPACITY_HANDSHAKE') == '1':
+        await sink({'type':'capacity_ready'})
+        if json.loads(await reader.readline()) != {'type':'capacity_go'}:
+            raise RuntimeError('Worker start was not authorized')
+        await sink({'type':'capacity_started'})
+    if 'session' in start:  # a standalone card placed on this PC: a new workspace here, as for a blank card
+        from agentdriver.session import run_session
+        output = await run_session({**start['session'], 'workspace': ''}, receive, sink)
+    else:
+        output = await run_step(flow, start['step'], start['context'], start['runId'], receive, sink)
     await sink({'type': 'result', 'output': output})
 
 
