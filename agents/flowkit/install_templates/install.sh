@@ -4,10 +4,11 @@
 #   AGENT_INSTALL_PREFIX     install folder (default ~/.agent-worker)
 #   AGENT_INSTALL_NO_SERVICE set to 1 to skip the startup entry and the registration (testing)
 #   AGENT_INSTALL_PYTHON     the Python to use (default python3)
+#   AGENT_INSTALL_PORT       the worker's local port (default 8096; it listens on 127.0.0.1 only)
 main() {
   set -euo pipefail
   local SERVER=@@SERVER@@ CODE=@@CODE@@ NAME=@@NAME@@ SLOTS=@@SLOTS@@ TARGET_OS=@@OS@@
-  local PREFIX="${AGENT_INSTALL_PREFIX:-$HOME/.agent-worker}" STEP=check PORT=8096
+  local PREFIX="${AGENT_INSTALL_PREFIX:-$HOME/.agent-worker}" STEP=check PORT="${AGENT_INSTALL_PORT:-8096}"
   local PYTHON="${AGENT_INSTALL_PYTHON:-python3}"
 
   report() {  # report <step> [state] [message]: tell the server where the install is (best effort)

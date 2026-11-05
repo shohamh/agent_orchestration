@@ -15,21 +15,100 @@ PC-affinity guarantee.
 ## Register a PC
 
 One registration is one PC, however many engines and pools it serves. In the board, open
-**Fleet**, then **Register PC**:
+**Fleet**, then **Register PC**. Registering is a short form plus one command:
 
-1. Choose the engines and the operating system. The form shows setup steps generated for that
-   choice (the same steps as below).
-2. Enter the worker ID, the endpoint (`http(s)://<pc host>:8096`) and the name of the environment
-   variable that holds its token (default `FLOW_WORKER_TOKEN_<ID>`). The board never asks for the
-   token itself. Leave the endpoint blank to save the PC as **awaiting connection** and add the
-   endpoint later.
-3. Choose one or more pools (or add one) and tags. Tags autocomplete from the tag catalog, and a
-   new tag can be created inline. Tags are declared attributes, separate from detected software.
-4. Set the slots and the CPU and RAM limits (defaults 1, 90% and 90%).
+1. **Fill in the form.** Name, the PC's operating system, the engines it serves, a pool (or a new
+   one), optional tags, the slots and the CPU and RAM limits (defaults 1, 90% and 90%), and the
+   address the PC uses to reach this server (pre-filled from the page; it cannot be `localhost`).
+   Nothing is created until every field is valid: the page checks them first and the server checks
+   them again.
+2. **Copy the command.** The board creates a one-time install link and shows one command per shell:
+   - Windows PowerShell: `irm 'http://<server>/install/<code>/install.ps1' | iex`
+   - Windows Command Prompt: the same, wrapped in `powershell -NoProfile -ExecutionPolicy Bypass -Command "..."`
+   - Linux and macOS: `curl -fsSL 'http://<server>/install/<code>/install.sh' | bash`
 
-On the PC, install the agents environment and the coding agent CLIs it should run (see the
-[agent instructions](../agents/README.md); for an offline PC the fleet tab lists the wheelhouse
-and npm mirror steps), then start the service:
+   **Run it as a normal user. Do not use Administrator or sudo.** Everything installs for that
+   user, and nothing on the PC is opened to the network.
+3. **Watch it connect.** The page shows each step (checking, downloading, Python packages, agent
+   adapters, token, service, registering, waiting for the connection) and then "Connected". A
+   failed step is shown with its reason. Closing the tab does not lose the install: it stays
+   listed under "Waiting to be installed" with **Show command** and **Cancel**.
+
+The link works once, expires after 30 minutes, and carries only a random code (256 bits). The
+settings from the form stay on the server.
+
+### What the command does on the PC
+
+1. Checks for Python 3.10+ and Node.js 18+ (and tar, curl or `tar.exe`). If something is missing
+   it stops and prints the exact install command for that OS, for example
+   `winget install Python.Python.3.12`. It never installs them itself.
+2. Downloads the worker (`agents/` without tests, virtual environments or secrets) from this
+   server, creates a virtual environment and installs `agents/requirements-worker.txt` from PyPI,
+   then installs the agent adapters (`npm ci`) from the npm registry. The PC needs to reach only
+   this server, PyPI and npm.
+3. Creates its own token on the PC (`secrets.token_urlsafe(32)`), stored in a file only that user
+   can read. The token is sent to the server once, when registering, and never shown in the board.
+4. Installs a per-user startup entry and starts the worker: a Scheduled Task at logon on Windows
+   (no Administrator needed), a `systemd --user` unit on Linux (run
+   `sudo loginctl enable-linger $USER` once to keep it running when nobody is logged in), a
+   LaunchAgent on macOS. Without a per-user service manager it falls back to a background process
+   and says so. `~/.agent-worker/uninstall.sh` (or `uninstall.ps1`) removes it again.
+5. Registers the PC with the server and waits until it is connected.
+
+Environment variables for testing: `AGENT_INSTALL_PREFIX` (install folder, default
+`%LOCALAPPDATA%\AgentWorker` or `~/.agent-worker`), `AGENT_INSTALL_NO_SERVICE=1` (download and
+install, but no startup entry and no registration), `AGENT_INSTALL_PYTHON` and
+`AGENT_INSTALL_PORT` (the worker's local port, default 8096).
+
+### Why the PC needs no open port: the relay
+
+The coordinator calls the PC (submit a job, poll it, cancel it, read its health), so a directly
+reachable PC needs an inbound port and, on Windows, an administrator-created firewall rule. A PC
+registered with the install command is reached the other way round instead:
+
+```
+coordinator code  ->  relay (127.0.0.1:8097)  <-  long poll  <-  connector on the PC  ->  execution service (127.0.0.1)
+```
+
+- The execution service on the PC listens on `127.0.0.1` only. A **connector**
+  (`agents/relay_connector.py`, run by `agents/worker_runner.py`) holds an outbound long poll
+  (`GET /relay/<id>/next?wait=25`) to this server's board, which passes `/install/*` and
+  `/relay/*` through to the relay service. Both skip the board login: they authenticate with the
+  install code or the PC's own token.
+- A coordinator call to `http://127.0.0.1:8097/w/<id>/...` (the PC's registry URL) is queued, the
+  connector collects it, makes it against the local service and sends the answer back. Bodies
+  stream in both directions and are never buffered (workspace transfers reach 190 MB), and the
+  `X-Flow-Gate-ID` and `X-Flow-Settings-Revision` headers are forwarded.
+- The PC pushes its `/health` answer every 5 seconds; the relay serves it for up to 15 seconds, so
+  the Fleet tab and placement read health without a round trip per PC.
+- A PC that has not polled for 40 seconds is offline. A call to an offline PC, or one nobody
+  collects within 30 seconds, is answered by dropping the connection, which the coordinator
+  already treats as "worker offline" (the step waits visibly and resumes when the PC returns).
+- Job polls through the relay are 1 second apart instead of 0.2 seconds. Sizing: idle PCs cost one
+  held request each and about 0.04 reconnects a second; a few hundred PCs are fine on one relay
+  process.
+
+Install records live in `FLOW_STATE_DIR/installs/` (git-ignored). The relay runs as its own
+process under the flow host (`FLOW_RELAY_SERVICE=0` turns it off, `FLOW_RELAY_PORT` sets the port,
+`FLOW_RELAY_BIND` the interface). The board container reaches it through `FLOW_RELAY_URL`
+(default `http://host.docker.internal:8097`); `FLOW_RELAY_LOCAL_URL` is the address coordinators
+use (default `http://127.0.0.1:<port>`).
+
+**Security.** The plain `http://` install link and relay traffic cross your network as the board
+does: use an `https://` address (for example a Tailscale Funnel or a reverse proxy) outside a
+trusted private network. The form warns about plain http addresses outside private ranges. A wrong
+install code gets one generic 404 after a short delay and is rate limited per source address. The
+PC's token is compared in constant time on both sides of the relay.
+
+### Advanced: register a PC the server can reach directly
+
+For a PC that already accepts connections from the coordinator, **Register by URL (advanced)**
+keeps the earlier flow: choose engines and operating system, enter the endpoint
+(`http(s)://<pc host>:8096`) and the name of the environment variable that holds its token
+(default `FLOW_WORKER_TOKEN_<ID>`), choose pools and tags, and set the limits. The board never
+asks for the token itself. Leave the endpoint blank to save the PC as **awaiting connection**.
+The form lists the manual setup steps (agents environment from a wheelhouse and npm mirror,
+protected token file, service start). On that PC:
 
 ```powershell
 $env:FLOW_WORKER_ID = 'build-pc'          # must equal the registered worker ID
@@ -50,13 +129,19 @@ on execution PCs. Agent credentials, Confluence tokens and source file paths bel
 runs the step. `FLOW_WORKER_POOL` and `FLOW_WORKER_TAGS` on the PC are legacy and informational
 only: the registry owns pools, tags and limits.
 
-When the PC connects, the coordinator checks that `/health` reports the registered ID (otherwise
-the PC is shown as an identity mismatch and nothing is placed on it), then pushes the registry's
-slots and CPU/RAM limits to its capacity gate. The fleet tab shows each PC's state (online,
-awaiting connection, credentials unavailable, unauthorized, identity mismatch or unreachable),
-live CPU and RAM, slot use, per-engine status, pools, tags, limits and their sync state, and the
-detected agents and commands with their last check time. The board receives only this sanitized
-view, never endpoints, token variable names or tokens.
+### After a PC connects
+
+The coordinator checks that `/health` reports the registered ID (otherwise the PC is shown as an
+identity mismatch and nothing is placed on it), then pushes the registry's slots and CPU/RAM limits
+to its capacity gate. The fleet tab shows each PC's state (online, awaiting connection,
+credentials unavailable, unauthorized, identity mismatch or unreachable), live CPU and RAM, slot
+use, per-engine status, pools, tags, limits and their sync state, and the detected agents and
+commands with their last check time. The board receives only this sanitized view, never endpoints,
+token variable names or tokens.
+
+A hand-edited `workers.local.yaml` that changes limits without bumping `settings_revision` is
+refused by the gate as stale and the PC waits with `gate_unavailable`; edit through the Fleet tab,
+which bumps the revision.
 
 To let a registered PC serve another engine, edit it and add the engine. Registering the same ID
 again is refused with a pointer to the existing entry, so a PC is never registered twice.

@@ -21,6 +21,8 @@ __pycache__/
 agents/runtime/
 workers.local.yaml
 workers.local.env
+workers.local.yaml.*
+workers.local.env.tmp
 .flow-state/
 agents/*.log
 .venv/

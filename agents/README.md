@@ -108,14 +108,20 @@ Exact outputs and definition fingerprints live in the worker's run workspace; se
 
 ## Execution PCs (fleet)
 
-Flow steps and coding agent cards can run on other PCs. Each PC runs the shared execution service
-(`agents/flow_execution_worker.py`) and is registered once in the board's **Fleet** tab, which
-generates the setup steps for the chosen engines and operating system, including an offline
-install from a wheelhouse and npm mirror. The coordinator's registry (`workers.local.yaml`, token
-values in `workers.local.env`) owns pools, tags, slots and the CPU and RAM limits (90% by
-default); a legacy registry keeps working and is migrated idempotently, with a backup-and-restore
-rollback. Native engine placement is not enabled: Hatchet, Prefect and Trigger.dev all reach a PC
-through its execution service, and Trigger.dev cards always run on the coordinator.
+Flow steps and coding agent cards can run on other PCs. In the board's **Fleet** tab, **Register
+PC** takes a short form (name, operating system, engines, pool, tags, slots and limits, and the
+address the PC uses to reach the server). When it is valid you get one command per shell
+(PowerShell, cmd, or bash) to paste on the PC **as a normal user, with no Administrator or sudo**.
+It downloads the worker from the server, installs it from PyPI and npm, creates the PC's own token,
+starts a per-user startup entry and registers the PC. Nothing on the PC is opened to the network:
+the PC connects out to the server and the server's relay carries the coordinator's calls over that
+connection (see [Why the PC needs no open port](../docs/workers-and-context.md#why-the-pc-needs-no-open-port-the-relay)).
+The coordinator's registry (`workers.local.yaml`, token values in `workers.local.env`) owns pools,
+tags, slots and the CPU and RAM limits (90% by default); **Register by URL (advanced)** and
+legacy registries keep working for PCs the coordinator can reach directly, and a legacy registry is
+migrated idempotently, with a backup-and-restore rollback. Native engine placement is not enabled:
+Hatchet, Prefect and Trigger.dev all reach a PC through its execution service, and Trigger.dev
+cards always run on the coordinator.
 
 When you start a flow or a placed card, the New card dialog shows where each step can run: ready,
 will wait (a matching PC is offline, busy or not freshly checked) or blocked (no registered PC can

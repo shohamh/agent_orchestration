@@ -3,12 +3,13 @@
 #   $env:AGENT_INSTALL_PREFIX      install folder (default %LOCALAPPDATA%\AgentWorker)
 #   $env:AGENT_INSTALL_NO_SERVICE  set to 1 to skip the startup task and the registration (testing)
 #   $env:AGENT_INSTALL_PYTHON      the Python to use (default: py -3, python, python3)
+#   $env:AGENT_INSTALL_PORT        the worker's local port (default 8096; it listens on 127.0.0.1 only)
 & {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $Server = @@SERVER@@; $Code = @@CODE@@; $Name = @@NAME@@; $Slots = @@SLOTS@@; $TargetOs = @@OS@@
     $Prefix = if ($env:AGENT_INSTALL_PREFIX) { $env:AGENT_INSTALL_PREFIX } else { Join-Path $env:LOCALAPPDATA 'AgentWorker' }
-    $Port = 8096
+    $Port = if ($env:AGENT_INSTALL_PORT) { [int]$env:AGENT_INSTALL_PORT } else { 8096 }
     $State = @{ Step = 'check' }
 
     function Report([string]$step, [string]$state = 'running', [string]$message = '') {
@@ -25,8 +26,10 @@
         foreach ($candidate in $candidates) {
             if (-not (Get-Command $candidate.Exe -ErrorAction SilentlyContinue)) { continue }
             $extra = $candidate.Args
-            try { $version = (& $candidate.Exe @extra -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null | Select-Object -First 1) } catch { continue }
-            if ($LASTEXITCODE -eq 0 -and $version -match '^(\d+)\.(\d+)$' -and ([int]$Matches[1] -gt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -ge 10))) { return $candidate }
+            # Capture everything before reading the exit code: Select-Object -First would close the pipe early and make it -1.
+            try { $output = & $candidate.Exe @extra -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null; $exit = $LASTEXITCODE } catch { continue }
+            $version = @($output)[0]
+            if ($exit -eq 0 -and $version -match '^(\d+)\.(\d+)$' -and ([int]$Matches[1] -gt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -ge 10))) { return $candidate }
         }
         return $null
     }
@@ -62,7 +65,7 @@
         & npm.cmd ci --prefix (Join-Path $Prefix 'agents') --no-audit --no-fund --loglevel=error; Check-Exit 'npm could not install the agent adapters (is the npm registry reachable?)'
 
         Step 'token' "Creating this PC's token"
-        $token = (& $venvPython -c 'import secrets; print(secrets.token_urlsafe(32))' | Select-Object -First 1).Trim()
+        $token = ([string]@(& $venvPython -c 'import secrets; print(secrets.token_urlsafe(32))')[0]).Trim()
         $tokenFile = Join-Path $Prefix 'token'
         [IO.File]::WriteAllText($tokenFile, $token)
         $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
