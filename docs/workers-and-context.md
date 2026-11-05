@@ -3,8 +3,7 @@
 Start `agents/flow_host.py` as before. It also supervises a loopback execution service on 8096
 (the implicit `local` worker); this stays up when flow definitions re-register. Other PCs run
 the same execution service and are registered in the coordinator's fleet registry, which the
-board's **Fleet** tab edits. Older engine runs without worker selections keep their local
-executor and workspace behavior.
+board's **Fleet** tab edits. Engine-launched flows without an explicit selection use any compatible fleet worker. Standalone sessions with an existing workspace or resume ID retain their local executor behavior.
 
 Each native task is still scheduled, retried and cancelled by its engine. Its Python coordinator
 dispatches the command or agent to an execution service chosen from the fleet. The node panel
@@ -77,6 +76,30 @@ Standalone Trigger.dev cards always run on the coordinator, and Trigger.dev prod
 to other PCs is not supported. A worker's `engines` list (default: all three) limits which engines
 may place work on it; a step or card on another engine treats that PC as not compatible.
 
+## Immutable flow assets and upgrade
+
+Activation binds each YAML revision to a snapshot of the flow asset directory. Root-level flow
+YAML and layout sidecars are draft controls and are excluded; helper files and nested files are
+included. Old runs keep their original snapshot even when draft files change. If only assets
+change, activation refuses to silently reuse the old snapshot: edit the flow YAML (for example,
+update its description) to create a new revision before activating. Assets are limited by the
+existing workspace transfer limits. Keep credentials outside the flows directory: activation
+rejects hidden and common credential filenames, but filename checks cannot identify every secret.
+
+An active revision from an older installation has no immutable asset snapshot. Its historical
+assets cannot be reconstructed, so updated workers refuse to run it until an operator reactivates
+the flow, explicitly binding its current assets. Existing queued Trigger.dev tasks without an
+asset reference also fail safely; start a new run after activation. A step restart from an older
+Hatchet or Prefect run whose saved definition predates asset binding is rejected; start a new
+flow run because its original assets cannot be established. Activation can restart workers
+and interrupt work; use the board preview before applying it. No activation is performed by this
+upgrade itself.
+
+When `FLOW_STATE_DIR` is customized, set it to the same absolute directory for the flow host and
+the separately launched `trigger dev` process. Trigger.dev uses its local Python bridge to read
+the immutable snapshot; a missing or mismatched directory fails the flow rather than falling
+back to mutable files.
+
 ## Registry, migration and rollback
 
 The registry is `workers.local.yaml` on the coordinator (`FLOW_WORKERS_FILE` overrides it); token
@@ -132,7 +155,7 @@ check time (for an offline PC, its last known result, marked as such).
 or tags, on Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the
 coordinator there) and when a workspace or resume ID is filled in: a placed card runs in a new
 workspace on that PC. The same compatibility panel is shown, and a blocked card cannot be created.
-Without a selection the card runs on the coordinator as before and is not checked.
+With a blank workspace and no selection, new Hatchet and Prefect cards check all registered workers and run on a compatible one. Cards using an existing workspace or resume ID run locally as before.
 
 **Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
 draft, placed the way **New card** starts it, and where its selection comes from (its own worker
@@ -165,6 +188,7 @@ and reuses unaffected results. Clearing a restart override returns to the flow's
 | `credentials_unavailable` | the coordinator has no usable credentials for a matching worker |
 | `full_slots` | every matching worker is busy (no free slot) |
 | `high_cpu` / `high_ram` | CPU or RAM on the matching workers is at or above their limit |
+| `gate_unavailable` | admission gate or registry settings could not be verified; check or update the worker service |
 | `missing_metrics` | waiting for a complete 10-second CPU and RAM measurement |
 | `cooldown` | the worker waits for a fresh 10-second measurement after its last start |
 | `software_unknown` / `software_stale` | the required software has not been checked, or was last checked over a day ago; it is probed |
@@ -404,9 +428,7 @@ and `waiting_reason`. For a flow step, the record is under `/execution/<run>` (`
 For a card, it is under `steps.card`, which the board serves at
 `GET /api/cards/<system>/<run>/execution`. The record never contains endpoints or credentials.
 
-A standalone card is placed only when it has a `worker` selection (`id`, `pool`, `tags`); its
-requirement adds the card's agent. Without a selection it runs on the engine worker exactly as
-before. A placed card runs in a new workspace on the executing PC, as a blank-workspace card does.
+The board defaults a new blank-workspace Hatchet or Prefect card to any compatible fleet worker; its requirement includes the agent. The board sends an empty `tags` selection for this default. Existing engine jobs without a `worker` selection continue to run on the engine worker. A placed card runs in a new workspace on the executing PC, as a blank-workspace card does.
 A host workspace path or a resumed session (bound to its original workspace) is refused for a
 placed card, both when it is created and by the worker service, rather than assumed to exist on
 another PC. A card transcript keeps its event schema: the executing PC is in the record, not the

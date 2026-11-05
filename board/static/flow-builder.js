@@ -297,6 +297,7 @@
     full_slots: 'every matching worker is busy (no free slot)',
     high_cpu: 'CPU on the matching workers is at or above their limit',
     high_ram: 'RAM on the matching workers is at or above their limit',
+    gate_unavailable: 'the worker admission gate or its settings could not be verified; check or update the worker service',
     missing_metrics: 'waiting for a complete 10-second CPU and RAM measurement',
     cooldown: 'the worker waits for a fresh 10-second measurement after its last start',
     software_unknown: 'the required software has not been checked on a matching worker yet',
@@ -598,6 +599,7 @@
       if (serial !== P.serial || S.cur !== c) return;
       Object.assign(P, r.ok ? { result: r.data, error: null } : { result: null, error: errorText(r) });
       renderSteps(); renderPlacement();
+      if (r.ok && r.data?.status === 'blocked') placementTimer = setTimeout(() => { if (S.visible && S.cur === c) { P.key = null; checkPlacement(); } }, 5000);
     }
     // The check of the document as it is now, or null while it is not back yet.
     const placementFor = () => (S.cur?.doc && S.placement.key === canonical(S.cur.doc) && S.placement.result ? S.placement.result : null);

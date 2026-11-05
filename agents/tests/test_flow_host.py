@@ -193,6 +193,26 @@ class DraftTests(HostCase):
 
 
 class ActivationTests(HostCase):
+    def test_preview_explains_asset_only_changes_before_activation(self):
+        (self.drafts/'helper.py').write_text('print(1)', encoding='utf-8')
+        preview = self.host.preview('hello-flow')
+        self.assertTrue(any('assets' in error['message'].lower() for error in preview['errors']))
+        self.assertTrue(all(engine['action'] == 'none' for engine in preview['engines']))
+
+    def test_legacy_asset_migration_preview_and_activation_reload_workers(self):
+        manifest = self.store.manifest()
+        rev = manifest['flows']['hello-flow']['revision']
+        self.store.asset_manifest_path('hello-flow', rev).with_suffix('.assetref').unlink()
+        preview = self.host.preview('hello-flow')
+        actions = {entry['engine']: entry['action'] for entry in preview['engines']}
+        self.assertEqual(actions['hatchet'], 'reload worker')
+        self.assertEqual(actions['prefect'], 'reload worker')
+        before = len(self.supervisor.restarts)
+        status, _ = self.activate()
+        self.assertEqual(status, 200)
+        self.assertGreater(len(self.supervisor.restarts), before)
+        self.assertTrue(self.store.asset_reference('hello-flow', rev))
+
     def test_activation_applies_each_engine_once(self):
         edited = HELLO.replace("world", "activated")
         self.save(edited, revision(HELLO))

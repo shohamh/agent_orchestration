@@ -44,16 +44,30 @@ def _first_word(run):
     return name
 
 
+# Only commands with the same name in both shells can be omitted from the
+# fleet requirement. Other builtins must be checked on the execution PC.
+_COMMON_BUILTINS = {'echo', 'cd'}
+_POSIX_BUILTINS = {'alias', 'bg', 'break', 'cd', 'command', 'continue', 'echo', 'eval',
+                   'exec', 'exit', 'export', 'false', 'fg', 'getopts', 'hash', 'jobs',
+                   'pwd', 'read', 'readonly', 'return', 'set', 'shift', 'test', 'times',
+                   'trap', 'true', 'type', 'ulimit', 'umask', 'unalias', 'unset', 'wait'}
+
+
+def _builtin_on_platform(name, platform):
+    if platform == 'nt':
+        from .template import _CMD_BUILTINS
+        return name.lower() in _CMD_BUILTINS
+    return name in _POSIX_BUILTINS
+
+
 def shell_builtin(run):
-    """A single literal shell builtin (echo, cd, ...) needs no external executable."""
-    from .template import _CMD_BUILTINS
-    name = _first_word(run)
-    return bool(name) and name.lower() in _CMD_BUILTINS
+    """A portable shell builtin requires no worker-specific software check."""
+    return _first_word(run) in _COMMON_BUILTINS
 
 
 def infer_command(run):
     name = _first_word(run)
-    if name is None or shell_builtin(run):
+    if name is None or name.lower() in {'command', 'exec', 'eval', 'call', 'start'} or shell_builtin(run):
         return None
     return name
 
@@ -62,7 +76,8 @@ def probe_command(name):
     try:
         if not isinstance(name, str) or not name or any(c in name for c in '\x00\r\n'):
             return _result('unknown')
-        found = (Path(sys.executable).is_file() if name == 'python' else bool(shutil.which(name)))
+        found = (_builtin_on_platform(name, os.name) or
+                 (Path(sys.executable).is_file() if name == 'python' else bool(shutil.which(name))))
         return _result('installed' if found else 'absent')
     except (OSError, ValueError):
         return _result('unknown')

@@ -117,7 +117,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     let port;
     for (let i = 0; i < 100; i++) {
       const active = path.join(profile, 'DevToolsActivePort');
-      if (fs.existsSync(active)) { port = fs.readFileSync(active, 'utf8').split('\n')[0]; break; }
+      try { port = fs.readFileSync(active, 'utf8').split('\n')[0]; if (port) break; }
+      catch (error) { if (!['ENOENT', 'EBUSY', 'EPERM'].includes(error.code)) throw error; }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.ok(port, 'Chrome debugging endpoint starts');

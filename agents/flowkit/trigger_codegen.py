@@ -30,7 +30,9 @@ def render(flows: dict[str, Flow]) -> str:
              'import { defineFlow } from "../flows-runtime.js";', ""]
     for flow in flows.values():
         name = ident(flow.name)
-        lines.append(f"const {name} = defineFlow({json.dumps(flow.to_json(), ensure_ascii=False)});")
+        definition = flow.to_json()
+        if getattr(flow, "_asset_snapshot", None): definition["_asset_snapshot"] = flow._asset_snapshot
+        lines.append(f"const {name} = defineFlow({json.dumps(definition, ensure_ascii=False)});")
         lines.append(f"export const flow_{name} = {name}.parent;")
         lines += [f'export const flow_{name}__{sid} = {name}.steps["{sid}"];' for sid in flow.steps]
         lines.append("")

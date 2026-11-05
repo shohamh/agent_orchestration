@@ -84,6 +84,14 @@ class Fixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigureRouteTests(Fixture):
+    async def test_configure_rejects_another_gate_identity(self):
+        app, server, gate, _ = await self.service()
+        before = gate.metrics()['settings']
+        async with TestClient(server) as client:
+            response = await client.post('/capacity/settings', json={'slots': 2, 'cpu_limit': 50, 'ram_limit': 60}, headers={'Authorization': f'Bearer {TOKEN}', 'X-Flow-Gate-ID': 'another-gate'})
+            self.assertNotEqual(response.status, 200)
+        self.assertEqual(gate.metrics()['settings'], before)
+
     async def test_configure_route_is_authenticated_validated_and_limits_only(self):
         app, server, gate, _ = await self.service()
         async with TestClient(server) as client:
@@ -253,7 +261,7 @@ class EngineMatchTests(unittest.TestCase):
     def test_a_worker_only_serves_its_registered_engines(self):
         from flowkit.fleet_matching import match_worker, validate_launch, with_engine
         worker = {'id': 'pc-a', 'pools': ['build'], 'tags': [], 'online': True, 'active': 0, 'slots': 1,
-                  'capacity': {'state': 'known', 'cpu_percent': 1, 'ram_percent': 1}, 'engines': ['hatchet']}
+                  'capacity': {'state': 'known', 'cpu_percent': 1, 'ram_percent': 1, 'gate_id': 'test-gate'}, 'settings_sync': {'state': 'applied'}, 'engines': ['hatchet']}
         self.assertEqual(with_engine({'pool': 'build'}, 'prefect'), {'pool': 'build', 'engine': 'prefect'})
         self.assertEqual(with_engine({'pool': 'build'}, None), {'pool': 'build'})
         self.assertEqual(match_worker(worker, {'pool': 'build', 'engine': 'hatchet'})['status'], 'compatible')

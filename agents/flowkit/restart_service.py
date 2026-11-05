@@ -88,6 +88,8 @@ async def restart_node(system, run_id, ref):
             params, tags, title = run.get('payload') or {}, run.get('tags') or [], (run.get('metadata') or {}).get('title') or name
         selected = next((sid for sid, node in nodes.items() if node['ref'] == ref), None)
         if selected is None: raise ValueError('Step does not belong to the source run')
+        from .distributed import reconcile_source_attempts
+        await reconcile_source_attempts(run_id)
         plan = build_plan(flow, selected, nodes, run_id)
         execution = params.get('flowExecution')
         params = {key: params.get(key, default) for key, default in flow.input.items()}

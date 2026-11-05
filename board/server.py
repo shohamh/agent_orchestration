@@ -241,6 +241,8 @@ async def create_card(request: web.Request) -> web.Response:
             if not workspace.strip(): raise ValueError('resuming a session requires its original workspace')
             options['session_options']['resumeSessionId'] = text_field(body, 'resumeSessionId', 512)
         worker = worker_selector(body.get('worker'))
+        if not worker and not workspace.strip() and not body.get('resumeSessionId') and request.match_info['system'] in ('hatchet', 'prefect'):
+            worker = {'tags': []}  # default to any compatible fleet worker for new disposable sessions
         if worker:  # placed on the fleet by the engine adapter (agents/flowkit/distributed.py)
             if request.match_info['system'] not in ('hatchet', 'prefect'):
                 raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
@@ -337,7 +339,7 @@ async def launch_validate(request: web.Request) -> web.Response:
         if card.get('agent') not in SESSION_AGENTS:
             raise ValueError('agent must be codex, claude, opencode, opencode2, omp, pi or demo')
         worker = worker_selector(card.get('worker'))
-        if not any(worker.values()):
+        if not worker:
             raise ValueError('choose a worker, a pool or tags to place the card')
         if system not in ('hatchet', 'prefect'):
             raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')

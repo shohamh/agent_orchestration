@@ -40,6 +40,26 @@ class RestartRuntime(unittest.TestCase):
         self.assertIsNone(read_result(target, 'a'))
         self.assertEqual(read_result(target, 'independent'), 'x' * 5000)
 
+    def test_legacy_source_without_asset_binding_is_not_mixed_with_new_revision(self):
+        self.flow._asset_snapshot = {'name': self.flow.name, 'revision': 'sha256:' + '1' * 64, 'digest': 'sha256:' + '2' * 64}
+        with self.assertRaisesRegex(ValueError, 'definition.*changed'):
+            build_plan(self.flow, 'b', self.nodes, 'source')
+
+    def test_restart_does_not_copy_source_cancellation_marker(self):
+        from flowkit.restart import atomic_json, prepare_workspace
+        source = workspace_path('source')
+        atomic_json(source/'.flow-cancel.json', {'at': 1})
+        plan = build_plan(self.flow, 'b', self.nodes, 'source')
+        target = prepare_workspace(self.flow, 'new', plan)
+        self.assertTrue((source/'.flow-cancel.json').exists())
+        self.assertFalse((target/'.flow-cancel.json').exists())
+
+    def test_restart_refuses_unresolved_remote_attempt(self):
+        from flowkit.restart import atomic_json
+        atomic_json(workspace_path('source') / '.flow-attempts' / 'b.json', 'possibly-running-job')
+        with self.assertRaisesRegex(ValueError, 'attempt.*still|attempt.*confirm'):
+            build_plan(self.flow, 'b', self.nodes, 'source')
+
     def test_missing_output_and_nonterminal_sibling_are_rejected(self):
         self.nodes['independent']['column'] = 'running'
         with self.assertRaisesRegex(ValueError, 'still active'):

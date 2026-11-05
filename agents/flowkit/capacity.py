@@ -108,15 +108,20 @@ class CapacityGate:
         with self.transaction() as db:
             db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, value TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS leases (job TEXT PRIMARY KEY, owner TEXT, fence TEXT, expires REAL)')
+            db.execute('CREATE TABLE IF NOT EXISTS revocations (job TEXT PRIMARY KEY)')
             columns = {row[1] for row in db.execute('PRAGMA table_info(leases)')}
             if 'details' not in columns: db.execute("ALTER TABLE leases ADD COLUMN details TEXT NOT NULL DEFAULT '{}'")
             row = db.execute('SELECT value FROM state WHERE id=1').fetchone()
             state = json.loads(row[0]) if row else {}
+            gate_id = state.get('gate_id') or uuid.uuid4().hex
+            settings_revision = state.get('settings_revision', -1)
             settings = state.get('settings', {'slots':slots,'cpu_limit':cpu_limit,'ram_limit':ram_limit})
             if self.boot is not None and state.get('boot_verified') and state.get('boot') is not None and state['boot'] != self.boot:
                 db.execute('DELETE FROM leases')  # OS boot UUID proves all old processes died.
             if not state or state.get('boot') != self.boot:
                 state = {'boot':self.boot, 'samples':[], 'last_start':self.clock()-10}
+            state['gate_id'] = gate_id
+            state['settings_revision'] = settings_revision
             state['boot_verified'] = self.boot is not None
             state['settings'] = settings
             self._save(db,state)
@@ -136,10 +141,20 @@ class CapacityGate:
     def _state(self, db): return json.loads(db.execute('SELECT value FROM state WHERE id=1').fetchone()[0])
     def _save(self, db, state): db.execute('INSERT OR REPLACE INTO state VALUES (1,?)',(json.dumps(state),))
 
-    def configure(self, *, slots, cpu_limit=90, ram_limit=90):
+    def configure(self, *, slots, cpu_limit=90, ram_limit=90, expected_gate_id=None, settings_revision=None):
         if not 1<=slots<=MAX_SLOTS or not 0<cpu_limit<=100 or not 0<ram_limit<=100: raise ValueError('Invalid capacity settings')
         with self.transaction() as db:
-            s=self._state(db); s['settings']={'slots':slots,'cpu_limit':cpu_limit,'ram_limit':ram_limit}; self._save(db,s)
+            s=self._state(db)
+            if expected_gate_id is not None and s.get('gate_id') != expected_gate_id: raise ValueError('Worker capacity gate identity changed')
+            wanted = {'slots':slots,'cpu_limit':cpu_limit,'ram_limit':ram_limit}
+            if settings_revision is not None:
+                prior = s.get('settings_revision', -1)
+                if settings_revision < prior or (settings_revision == prior and s['settings'] != wanted):
+                    raise ValueError('Stale worker settings revision')
+                s['settings_revision'] = settings_revision
+            else:
+                s['settings_revision'] = -1  # local administrative override requires coordinator resync
+            s['settings']=wanted; self._save(db,s)
 
     def observe(self, cpu_percent, ram_percent, monotonic_time):
         if not all(math.isfinite(x) for x in (cpu_percent,ram_percent,monotonic_time)) or not all(0<=x<=100 for x in (cpu_percent,ram_percent)):
@@ -176,13 +191,19 @@ class CapacityGate:
         """The current window plus the enforced settings and the PC-wide reservation count."""
         with self.transaction() as db:
             s=self._state(db)
-            return {**self._metrics(s,self.clock()),'settings':s['settings'],
+            return {**self._metrics(s,self.clock()),'gate_id':s['gate_id'],'settings_revision':s.get('settings_revision', -1),'settings':s['settings'],
                     'leases':db.execute('SELECT COUNT(*) FROM leases').fetchone()[0]}
 
-    def try_acquire(self,job_id):
+    def try_acquire(self,job_id, expected_gate_id=None, expected_settings_revision=None):
         with self.transaction() as db:
             now=self.clock(); s=self._state(db); m=self._metrics(s,now); settings=s['settings']
+            if expected_gate_id is not None and s.get('gate_id') != expected_gate_id:
+                return {'acquired': False, 'reason': 'gate_changed', 'metrics': m}
+            if expected_settings_revision is not None and s.get('settings_revision', -1) != expected_settings_revision:
+                return {'acquired': False, 'reason': 'settings_changed', 'metrics': m}
             self._reclaim(db)
+            if db.execute('SELECT 1 FROM revocations WHERE job=?', (job_id,)).fetchone():
+                return {'acquired': False, 'reason': 'revoked', 'metrics': m}
             reason=None
             if db.execute('SELECT COUNT(*) FROM leases').fetchone()[0]>=settings['slots']: reason='full_slots'
             elif any(json.loads(row[0]).get('phase') in ('pending','launching') for row in db.execute('SELECT details FROM leases')): reason='pending_start'
@@ -238,6 +259,28 @@ class CapacityGate:
         with self.transaction() as db:
             if not self._valid(db,job,fence): raise RuntimeError('Capacity lease expired; publication fenced')
             return callback()
+
+    def revoke_absent(self, job_id, expected_gate_id=None):
+        """Prevent a delayed submit from acquiring capacity, unless a live lease exists."""
+        with self.transaction() as db:
+            if expected_gate_id is not None and self._state(db).get('gate_id') != expected_gate_id:
+                return False
+            self._reclaim(db)
+            if db.execute('SELECT 1 FROM leases WHERE job=?', (job_id,)).fetchone():
+                return False
+            db.execute('INSERT OR IGNORE INTO revocations VALUES (?)', (job_id,))
+            return True
+
+    def finish(self, job_id, expected_gate_id=None):
+        """Release this execution and revoke its ID atomically across all service processes."""
+        with self.transaction() as db:
+            if expected_gate_id is not None and self._state(db).get('gate_id') != expected_gate_id:
+                raise RuntimeError('Worker capacity gate identity changed during cleanup')
+            row = db.execute('SELECT owner FROM leases WHERE job=?', (job_id,)).fetchone()
+            if row and row[0] != self.owner:
+                raise RuntimeError('Another worker owns the job capacity lease')
+            db.execute('DELETE FROM leases WHERE job=? AND owner=?', (job_id, self.owner))
+            db.execute('INSERT OR IGNORE INTO revocations VALUES (?)', (job_id,))
 
     def release(self,job_id):
         with self.transaction() as db: db.execute('DELETE FROM leases WHERE job=? AND owner=?',(job_id,self.owner))

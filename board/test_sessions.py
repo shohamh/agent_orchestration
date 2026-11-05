@@ -48,6 +48,13 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
         self.client.app['flow_host'].validate_card = validate_card
         return checks
 
+    async def test_blank_workspace_card_defaults_to_any_compatible_fleet_worker(self):
+        checks = self.fake_card_check({'status': 'blocked', 'message': 'Codex is absent', 'resolution': 'Install Codex', 'workers': []})
+        response = await self.client.post('/api/boards/hatchet/demo/cards', json={'kind': 'agent-session', 'goal': 'x', 'agent': 'codex'})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(checks, [('codex', {'tags': []}, 'hatchet')])
+        self.assertEqual(self.calls, [])
+
     async def test_card_launch_check_for_the_creation_dialog(self):
         checks = self.fake_card_check({'status': 'wait', 'waiting_reason': 'offline', 'workers': []})
         response = await self.client.post('/api/launch/validate', json={'card': {'agent': 'codex', 'worker': {'pool': 'build', 'tags': ['gpu']}}, 'system': 'hatchet'})
@@ -76,10 +83,10 @@ class APIContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['launch']['status'], 'blocked')
         self.assertEqual(checks, [('codex', {'tags': ['gpu']}, 'hatchet')])
         self.assertEqual(self.calls, [])
-        # A card without a fleet selection runs on the coordinator as before and is not checked.
+        # Blank-workspace cards also validate against the fleet by default.
         response = await self.client.post('/api/boards/hatchet/demo/cards', json={'kind': 'agent-session', 'goal': 'x', 'agent': 'demo'})
-        self.assertEqual(response.status, 201, await response.text())
-        self.assertEqual(len(checks), 1)
+        self.assertEqual(response.status, 409, await response.text())
+        self.assertEqual(checks[-1], ('demo', {'tags': []}, 'hatchet'))
 
     async def test_card_worker_requirement_is_forwarded_to_the_engine(self):
         checks = self.fake_card_check({'status': 'wait', 'waiting_reason': 'offline', 'workers': []})

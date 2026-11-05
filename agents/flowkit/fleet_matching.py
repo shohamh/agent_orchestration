@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 STALE_SECONDS = 86400  # a capability result older than the daily refresh is unknown again
 # Most actionable first; the first applicable one is the step's headline waiting reason.
-WAITING_ORDER = ('offline', 'credentials_unavailable', 'full_slots', 'high_cpu', 'high_ram', 'missing_metrics',
+WAITING_ORDER = ('offline', 'credentials_unavailable', 'gate_unavailable', 'full_slots', 'high_cpu', 'high_ram', 'missing_metrics',
                  'software_unknown', 'software_stale')
 RESOLUTIONS = {
     'no_workers': 'Register a worker in the fleet tab.',
@@ -124,6 +124,10 @@ def match_worker(worker, requirements, now=None):
             else:
                 unknown.append(_reason('offline', f'{wid} is offline'))
         else:
+            sync = worker.get('settings_sync')
+            capacity = worker.get('capacity')
+            if not isinstance(sync, dict) or sync.get('state') != 'applied' or not isinstance(capacity, dict) or not capacity.get('gate_id'):
+                unknown.append(_reason('gate_unavailable', f'{wid} cannot verify its admission gate and registry limits; check or update the worker service'))
             if (worker.get('active') or 0) >= (worker.get('slots') or 1):
                 unknown.append(_reason('full_slots', f'{wid} has no free slot'))
             capacity = worker.get('capacity')

@@ -59,6 +59,19 @@ class ArtifactTests(unittest.TestCase):
 
 
 class RemoteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_does_not_confirm_when_cleanup_fails(self):
+        from aiohttp import ClientSession
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                async def broken_cleanup(): raise RuntimeError('process cleanup failed')
+                task = asyncio.create_task(broken_cleanup())
+                await asyncio.sleep(0)
+                app['jobs']['job'] = SimpleNamespace(task=task, state='running', error=None, process=SimpleNamespace(returncode=None))
+                async with client.delete(service.make_url('/jobs/job')) as response:
+                    self.assertNotEqual(response.status, 200)
+
     async def test_failed_setup_remains_interactive_until_repaired(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); source=root/'missing.txt'
@@ -83,6 +96,110 @@ class RemoteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(repaired)
                 self.assertEqual(reviews,2)
                 self.assertTrue(output['validated'])
+
+    async def test_revocation_wins_against_submission_paused_in_inventory(self):
+        from aiohttp import ClientSession
+        from flowkit.capabilities import probe
+        import threading, uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                waiting, release = threading.Event(), threading.Event()
+                def slow_probe(kind, name):
+                    if kind == 'command' and name == 'python':
+                        waiting.set(); release.wait(10)
+                    return probe(kind, name)
+                app['probe'] = slow_probe
+                jid = str(uuid.uuid4())
+                flow = parse({'name': 'late', 'steps': {'run': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+                body = {'id': jid, 'files': {}, 'assets': {}, 'start': {'flow': flow.to_json(), 'step': 'run', 'runId': 'late-run', 'context': {'input': {}, 'steps': {}}}}
+                post = asyncio.create_task(client.post(service.make_url('/jobs'), json=body))
+                try:
+                    self.assertTrue(await asyncio.to_thread(waiting.wait, 10))
+                    async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                        self.assertEqual(response.status, 200)
+                    release.set()
+                    response = await asyncio.wait_for(post, 10)
+                    async with response: self.assertNotEqual(response.status, 200)
+                    self.assertNotIn(jid, app['jobs'])
+                finally:
+                    release.set()
+                    await asyncio.gather(post, return_exceptions=True)
+
+    async def test_revoke_requires_expected_capacity_gate_identity(self):
+        from aiohttp import ClientSession
+        import uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                jid = str(uuid.uuid4())
+                async with client.delete(service.make_url('/jobs/' + jid), headers={'X-Flow-Gate-ID': 'wrong-gate'}) as response:
+                    self.assertNotEqual(response.status, 200)
+                self.assertFalse((app['root']/'.terminated'/(jid + '.json')).exists())
+
+    async def test_revoke_absent_job_prevents_late_submission(self):
+        from aiohttp import ClientSession
+        import uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                jid = str(uuid.uuid4())
+                async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue((await response.json())['terminated'])
+                flow = parse({'name': 'late', 'steps': {'run': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+                async with client.post(service.make_url('/jobs'), json={'id': jid, 'files': {}, 'assets': {}, 'start': {'flow': flow.to_json(), 'step': 'run', 'runId': 'late-run', 'context': {'input': {}, 'steps': {}}}}) as response:
+                    self.assertNotEqual(response.status, 200)
+                self.assertNotIn(jid, app['jobs'])
+
+    async def test_immediately_cancelled_job_retains_termination_proof(self):
+        from aiohttp import ClientSession
+        from flowkit.worker_service import Job, termination_path
+        import uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                jid = str(uuid.uuid4())
+                job = Job(app, jid, {})
+                app['jobs'][jid] = job
+                job.task.cancel()  # before Job.run gets a chance to execute
+                await asyncio.gather(job.task, return_exceptions=True)
+                async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                    self.assertEqual(response.status, 200)
+                self.assertTrue(termination_path(app, jid).exists())
+                del app['jobs'][jid]
+                async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                    self.assertEqual(response.status, 200)
+
+    async def test_reaped_completed_job_retains_termination_proof(self):
+        from aiohttp import ClientSession
+        import uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                jid = str(uuid.uuid4())
+                flow = parse({'name': 'complete', 'steps': {'run': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+                await client.post(service.make_url('/jobs'), json={'id': jid, 'files': {}, 'assets': {}, 'start': {'flow': flow.to_json(), 'step': 'run', 'runId': 'finished-run', 'context': {'input': {}, 'steps': {}}}})
+                await asyncio.wait_for(app['jobs'][jid].task, 30)
+                del app['jobs'][jid]
+                async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue((await response.json())['terminated'])
+
+    async def test_cleanup_failure_never_reports_done(self):
+        from aiohttp import ClientSession
+        import uuid
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(worker_id='pc', root=Path(tmp))
+            async with TestServer(app) as service, ClientSession() as client:
+                jid = str(uuid.uuid4())
+                flow = parse({'name': 'cleanup', 'steps': {'run': {'kind': 'program', 'run': 'python -c "print(1)"'}}})
+                with patch.object(app['capacity'], 'finish', side_effect=RuntimeError('release failed')):
+                    await client.post(service.make_url('/jobs'), json={'id': jid, 'files': {}, 'assets': {}, 'start': {'flow': flow.to_json(), 'step': 'run', 'runId': 'cleanup-run', 'context': {'input': {}, 'steps': {}}}})
+                    await asyncio.gather(app['jobs'][jid].task, return_exceptions=True)
+                    self.assertNotEqual(app['jobs'][jid].state, 'done')
+                    async with client.delete(service.make_url('/jobs/' + jid)) as response:
+                        self.assertNotEqual(response.status, 200)
 
     async def test_worker_identity_survives_verbose_event_history(self):
         from aiohttp import ClientSession

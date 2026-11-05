@@ -28,6 +28,37 @@ class CapacityTests(unittest.TestCase):
         self.assertEqual(self.g.try_acquire('a')['reason'], 'high_ram')
         self.now += 4
         self.assertEqual(self.g.try_acquire('a')['reason'], 'missing_metrics')
+    def test_older_settings_update_cannot_overwrite_newer_revision(self):
+        gate_id = self.g.metrics()['gate_id']
+        self.g.configure(slots=1, cpu_limit=60, ram_limit=70, expected_gate_id=gate_id, settings_revision=2)
+        with self.assertRaises(ValueError):
+            self.g.configure(slots=1, cpu_limit=90, ram_limit=90, expected_gate_id=gate_id, settings_revision=1)
+        self.assertEqual(self.g.metrics()['settings']['cpu_limit'], 60)
+
+    def test_admission_rejects_stale_settings_revision(self):
+        self.sample()
+        gate_id = self.g.metrics()['gate_id']
+        self.g.configure(slots=1, cpu_limit=70, ram_limit=80, expected_gate_id=gate_id, settings_revision=2)
+        self.assertEqual(self.g.try_acquire('job', expected_gate_id=gate_id, expected_settings_revision=1)['reason'], 'settings_changed')
+        self.assertTrue(self.g.try_acquire('job', expected_gate_id=gate_id, expected_settings_revision=2)['acquired'])
+
+    def test_admission_and_completion_are_bound_to_gate_identity(self):
+        self.sample()
+        gate_id = self.g.metrics()['gate_id']
+        self.assertEqual(self.g.try_acquire('wrong', expected_gate_id='other')['reason'], 'gate_changed')
+        lease = self.g.try_acquire('job', expected_gate_id=gate_id)
+        self.assertTrue(lease['acquired'])
+        self.g.finish('job', expected_gate_id=gate_id)
+        self.assertEqual(self.gate().try_acquire('job', expected_gate_id=gate_id)['reason'], 'revoked')
+
+    def test_revocation_refuses_live_lease_and_blocks_late_acquisition(self):
+        self.sample()
+        self.assertTrue(self.g.try_acquire('active')['acquired'])
+        self.assertFalse(self.g.revoke_absent('active'))
+        self.g.release('active')
+        self.assertTrue(self.g.revoke_absent('active'))
+        self.assertEqual(self.gate().try_acquire('active')['reason'], 'revoked')
+
     def test_shared_slots_fencing_cooldown(self):
         self.sample()
         other = self.gate()
@@ -110,7 +141,8 @@ class CancellationTests(unittest.IsolatedAsyncioTestCase):
         from agents.flowkit.worker_service import Job
         with tempfile.TemporaryDirectory() as directory:
             gate=CapacityGate(Path(directory)/'gate.db')
-            job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'root':Path(directory)},'queued',{'files':{},'assets':{},'runId':'test'})
+            gate_id=gate.metrics()['gate_id']
+            job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'gate_id':gate_id,'root':Path(directory)},'00000000-0000-4000-8000-000000000002',{'files':{},'assets':{},'runId':'test'})
             await asyncio.sleep(.02)
             job.task.cancel()
             await asyncio.gather(job.task,return_exceptions=True)
@@ -227,7 +259,7 @@ class AsyncSupervisionTests(unittest.IsolatedAsyncioTestCase):
             for i in range(11): gate.observe(1,1,now-10+i)
             async def launch(*args,**kwargs): return process
             with patch('agents.flowkit.worker_service.asyncio.create_subprocess_exec',side_effect=launch), patch('agents.flowkit.executor._kill',side_effect=kill), patch('agentdriver.process_tree.ProcessTree'):
-                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'root':Path(directory),'stats':{'active':0},'identity':{}},'job',{'files':{},'assets':{},'runId':'test','start':{}})
+                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'gate_id':gate.metrics()['gate_id'],'root':Path(directory),'stats':{'active':0},'identity':{}},'00000000-0000-4000-8000-000000000001',{'files':{},'assets':{},'runId':'test','start':{}})
                 for _ in range(100):
                     await asyncio.sleep(.01)
                     if job.process: break
@@ -318,8 +350,9 @@ class RoundTwoTests(unittest.IsolatedAsyncioTestCase):
             gate=CapacityGate(Path(directory)/'gate.db')
             now=time.monotonic()
             for i in range(11): gate.observe(1,1,now-10+i)
+            gate_id=gate.metrics()['gate_id']
             with gate.transaction():
-                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'root':Path(directory)},'queued',{'files':{},'assets':{},'runId':'test'})
+                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'gate_id':gate_id,'root':Path(directory)},'00000000-0000-4000-8000-000000000002',{'files':{},'assets':{},'runId':'test'})
                 await asyncio.sleep(.04)
                 job.task.cancel()
                 await asyncio.wait_for(asyncio.gather(job.task,return_exceptions=True),.8)

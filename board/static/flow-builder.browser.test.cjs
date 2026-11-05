@@ -779,8 +779,10 @@ test('fleet compatibility per step: matches with detection times, waits, explain
   await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow'`, 'reopens the last flow');
   await waitFor(`[...document.querySelectorAll('.fb-flow-item')].some(b => b.textContent.includes('fleet-flow'))`, 'the new draft is listed');
   await click('.fb-flow-item', 'fleet-flow');
-  await waitFor(`document.querySelector('.fb-title').textContent === 'fleet-flow' && document.querySelectorAll('.fb-node').length === 3`, 'fleet-flow opens');
+  try { await waitFor(`document.querySelector('.fb-title').textContent === 'fleet-flow'`, 'fleet-flow opens'); }
+  catch (error) { error.message += `; state: ${JSON.stringify(await evaluate(`({title: document.querySelector('.fb-title')?.textContent, ask: document.querySelector('dialog.fb-ask')?.open, status: document.querySelector('.fb-status')?.textContent, width: innerWidth, flow: document.querySelector('.fb')?.className})`))}`; throw error; }
   await click('.fb-tab', 'Graph');
+  await waitFor(`document.querySelectorAll('.fb-node').length === 3`, 'fleet-flow graph renders');
   await click('[data-step="build"] .box');
   await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="ready"]')`, 'the step is checked against the fleet');
   const check = calls.filter((c) => c.path === '/api/launch/validate').at(-1).body;

@@ -13,7 +13,7 @@ import { agentInput, runAgentSession } from "./trigger/agent-session.js";
 
 type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 type StepDef = { kind: "program" | "agent"; needs: string[]; retries: number; timeout_minutes: number } & Record<string, Json>;
-export type FlowDef = { name: string; description: string; input: Record<string, Json>; steps: Record<string, StepDef> };
+export type FlowDef = { name: string; description: string; input: Record<string, Json>; steps: Record<string, StepDef>; _asset_snapshot?: { name: string; revision: string; digest: string } };
 type StepPayload = { flowRunId: string; context: { input: Record<string, Json>; steps: Record<string, { output: Json }>; _flow_restart?: Json } };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

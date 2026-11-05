@@ -637,7 +637,7 @@ async function pollPlacement(watch) {
   } catch (_) { /* the flow host may be restarting: keep the last state and try again */ }
   if (placementWatch !== watch) return;
   // A finished card was fetched once more above; nothing changes after that.
-  if (!["done", "stopped"].includes(cards.find((c) => c.id === id)?.column)) watch.timer = setTimeout(() => pollPlacement(watch), PLACEMENT_POLL_MS);
+  if (document.hidden || !["done", "stopped"].includes(cards.find((c) => c.id === id)?.column)) watch.timer = setTimeout(() => pollPlacement(watch), PLACEMENT_POLL_MS);
 }
 function showPlacement(watch, card, data) {
   const steps = data.steps || {}, text = JSON.stringify(steps);
@@ -1069,13 +1069,14 @@ function cardWorkerBlock() {
   return null;
 }
 function cardSelection() {
-  return !cardWorkerBlock() && Object.values(cardWorker).some((v) => (Array.isArray(v) ? v.length : v)) ? cardWorker : null;
+  if (cardWorkerBlock()) return null;
+  return Object.values(cardWorker).some((v) => (Array.isArray(v) ? v.length : v)) ? cardWorker : { tags: [] };
 }
 function syncCardWorker() {
   const box = $("n-card-worker"), key = JSON.stringify(executionWorkers);
   if (box.dataset.key !== key) {
     box.dataset.key = key;
-    box.replaceChildren(workerPicker("Run on (fleet worker)", cardWorker, (value) => { cardWorker = value; scheduleLaunchCheck(); }, "This coordinator (no fleet placement)"),
+    box.replaceChildren(workerPicker("Run on (fleet worker)", cardWorker, (value) => { cardWorker = value; scheduleLaunchCheck(); }, "Any compatible fleet worker"),
       el("p", { class: "fb-note" }));
   }
   const why = cardWorkerBlock(), note = box.querySelector(".fb-note");
@@ -1107,6 +1108,7 @@ async function checkLaunch() {
   if (serial !== launch.serial) return;
   Object.assign(launch, { result, blocked: result.data?.status === "blocked" });
   renderLaunch(); updateCreate();
+  if (result.data?.status === "blocked") launch.timer = setTimeout(() => { if ($("new-dialog").open) { launch.key = null; checkLaunch(); } }, 5000);
 }
 function renderLaunch() {
   const box = $("n-placement"), r = launch.result;

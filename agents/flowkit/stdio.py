@@ -38,7 +38,11 @@ async def main() -> None:
     start = json.loads(await reader.readline())
     if start.get("type") != "start":
         raise ValueError("First input must be a start message")
-    flow = parse(start["flow"])
+    definition = dict(start["flow"])
+    asset_snapshot = definition.pop("_asset_snapshot", None)
+    if asset_snapshot is None: raise ValueError("Flow has no immutable asset snapshot; reactivate it before launching")
+    from .activation import Store
+    flow = Store().load_bound_flow(asset_snapshot, definition)
     output = await run_step(flow, start["step"], start["context"], start["runId"], receive, sink, engine="trigger")
     write({"type": "result", "output": output})
 

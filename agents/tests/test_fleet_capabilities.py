@@ -6,9 +6,27 @@ from unittest.mock import patch
 from flowkit.capabilities import infer_command, probe_agent, probe_command
 
 class CapabilitiesTest(unittest.TestCase):
+    def test_platform_specific_builtin_is_resolved_on_worker(self):
+        self.assertEqual(infer_command('copy source dest'), 'copy')
+        from flowkit.capabilities import _builtin_on_platform
+        self.assertTrue(_builtin_on_platform('copy', 'nt'))
+        self.assertFalse(_builtin_on_platform('copy', 'posix'))
+        with patch('flowkit.capabilities.os.name', 'posix'), patch('shutil.which', return_value=None):
+            self.assertEqual(probe_command('copy')['status'], 'absent')
+        with patch('flowkit.capabilities.os.name', 'nt'):
+            self.assertEqual(probe_command('copy')['status'], 'installed')
+
     def test_inference(self):
         self.assertEqual(infer_command('python script.py'), 'python')
         self.assertIsNone(infer_command('python a.py | cat'))
+    def test_shell_wrappers_require_explicit_executable(self):
+        from flowkit.definition import parse
+        from flowkit.fleet_matching import software_requirement
+        for command in ('command missing', 'exec missing', 'eval missing'):
+            with self.subTest(command=command):
+                flow = parse({'name': 'test', 'steps': {'s': {'kind': 'program', 'run': command}}})
+                self.assertEqual(software_requirement(flow.steps['s']), {'ambiguous_command': True})
+
     def test_quoted_python_code_is_not_shell_control(self):
         self.assertEqual(infer_command('python -c "print(1); print(2)"'), 'python')
         self.assertIsNone(infer_command('python -c "print(1)"; echo unsafe'))

@@ -2,6 +2,7 @@
 import os
 import re
 import tempfile
+import time
 import threading
 import time
 from contextlib import contextmanager
@@ -81,6 +82,9 @@ def _normalize(item, stored=False):
     w['engines'] = engines
     if 'token_env' in w and (not isinstance(w['token_env'], str) or not TOKEN_ENV.match(w['token_env'])):
         raise ValueError('token_env must be an environment variable name (letters, digits and _)')
+    revision = w.get('settings_revision', 0)
+    if type(revision) is not int or revision < 0: raise ValueError('Invalid worker settings revision')
+    w['settings_revision'] = revision
     w.pop('_slots_configured', None)
     for field, default in [('slots', 1), ('cpu_limit', 90), ('ram_limit', 90)]:
         value = w.get(field, default)
@@ -174,6 +178,7 @@ def save_worker(worker, create=False):
         if create and existing is not None:
             raise AlreadyRegistered(f"Worker {worker['id']} is already registered; edit it to add engines, pools or tags")
         updated = _normalize({**(existing or {}), **worker})
+        updated['settings_revision'] = max(time.time_ns(), (existing or {}).get('settings_revision', 0) + 1)
         if updated.get('url'):
             u = urlsplit(updated['url'])
             tokens = {**dotenv_values(ROOT / 'workers.local.env'), **os.environ}

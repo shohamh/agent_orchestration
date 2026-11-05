@@ -297,7 +297,10 @@ class Host:
                     raise FlowError(f"the active snapshot of {name} cannot be read: {broken.get(name)}")
                 flows[name] = loaded[name]
             else:
-                flows[name] = parse_text(text)
+                # An already-snapshotted revision must render with its immutable asset
+                # reference in the preview, just as it does during activation.
+                loaded, _ = self.store.load({name: target})
+                flows[name] = loaded.get(name) or parse_text(text)
         return dict(sorted(flows.items()))
 
     def preview(self, name: str) -> dict:
@@ -309,7 +312,16 @@ class Host:
         target = draft.revision if draft else None
         errors = self.analyze(name, draft)[1] if draft else []
         active = (entry or {}).get("revision")
+        if draft and not errors:
+            try:
+                _, asset_digest = self.store.current_assets()
+                ref_path = self.store.asset_manifest_path(name, target).with_suffix('.assetref')
+                if ref_path.is_file() and self.store.asset_reference(name, target)['digest'] != asset_digest:
+                    raise FlowError('Flow assets have changed for this revision; change the flow YAML before activating')
+            except (FlowError, OSError, ValueError) as exc:
+                errors.append({'message': str(exc), 'step': None, 'field': 'assets'})
         change = "remove" if draft is None else "add" if not active else "update" if target != active else "none"
+        assets_missing = bool(target and not self.store.asset_manifest_path(name, target).with_suffix('.assetref').is_file())
         engines = []
         for engine in ENGINES:
             state = ((entry or {}).get("engines") or {}).get(engine) or {}
@@ -321,7 +333,7 @@ class Host:
                     except FlowError:
                         code = None
                     action = "regenerate tasks" if code != trigger_codegen.current(self.trigger_target) else "none"
-                elif state.get("revision") != target or state.get("state") != "active":
+                elif assets_missing or state.get("revision") != target or state.get("state") != "active":
                     action = "reload worker"
             engines.append({"engine": engine, "action": action, "enabled": self.enabled[engine],
                             "state": state.get("state"), "error": state.get("error")})
@@ -344,19 +356,20 @@ class Host:
                     draft, errors = current, self.analyze(name, current)[1]
                 if errors:
                     raise invalid(errors)
+                assets_missing = bool(target and not self.store.asset_manifest_path(name, target).with_suffix('.assetref').is_file())
                 if current and self.store.write_snapshot(name, current.text) != target:
                     raise invalid([{"message": "the draft could not be stored exactly; save it as UTF-8 text", "step": None, "field": None}])
             entry = manifest["flows"].setdefault(name, {"revision": None, "engines": {}})
             entry["revision"] = target
             self.store.write_manifest(manifest)
-            results = self._apply(name, target, manifest)
+            results = self._apply(name, target, manifest, force_reload=assets_missing)
             if target is None and not any((e or {}).get("revision") for e in entry["engines"].values()):
                 del manifest["flows"][name]
                 self.store.write_manifest(manifest)
             log(f"activated {name} {target or '(removal)'}: " + ", ".join(f"{r['engine']} {r['state']}" for r in results))
             return {"name": name, "activeRevision": target, "engines": results}
 
-    def _apply(self, name: str, target: str | None, manifest: dict) -> list[dict]:
+    def _apply(self, name: str, target: str | None, manifest: dict, force_reload: bool = False) -> list[dict]:
         """Trigger.dev first (a file write), then every worker restart at once, then wait for them."""
         engines = manifest["flows"][name].setdefault("engines", {})
         old = {e: engines.get(e) or {"revision": None, "state": None, "error": None} for e in ENGINES}
@@ -368,7 +381,7 @@ class Host:
             engines["trigger"] = self._apply_trigger(name, target, old["trigger"], manifest)
         self.store.write_manifest(manifest)
         restart = [e for e in ("hatchet", "prefect") if self.enabled[e] and not (
-            old[e].get("revision") == target and old[e].get("state") == "active" and self.supervisor.running(e))]
+            not force_reload and old[e].get("revision") == target and old[e].get("state") == "active" and self.supervisor.running(e))]
         for engine in restart:
             engines[engine] = {"revision": target, "state": "pending", "error": None}
         self.store.write_manifest(manifest)

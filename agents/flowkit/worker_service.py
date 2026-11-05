@@ -42,6 +42,18 @@ async def finish_despite_cancellation(task):
     return task.result()
 
 
+def termination_path(app, job_id):
+    """Durable proof exists only for a job whose local cleanup finished successfully."""
+    return app['root'] / '.terminated' / (str(uuid.UUID(job_id)) + '.json')
+
+
+def record_termination(app, job_id):
+    from .restart import atomic_json
+    if not app['capacity'].revoke_absent(job_id, app['gate_id']):
+        raise RuntimeError('The job still has an active capacity lease')
+    atomic_json(termination_path(app, job_id), {'terminated': True, 'gate_id': app['gate_id']})
+
+
 class Job:
     def __init__(self, app, job_id, config):
         self.app, self.id, self.config = app, job_id, config
@@ -74,13 +86,19 @@ class Job:
         work = asyncio.create_task(self._run())
         try:
             await asyncio.shield(work)
+            await asyncio.to_thread(record_termination, self.app, self.id)
         except asyncio.CancelledError:
             work.cancel()  # Exactly one cancellation reaches execution/cleanup.
             try: await finish_despite_cancellation(work)
             except asyncio.CancelledError: pass
+            await asyncio.to_thread(record_termination, self.app, self.id)
+            raise
+        except Exception as exc:
+            self.state, self.error = 'failed', str(exc)[-8000:]
             raise
 
     async def _run(self):
+        completed = False
         tree = None
         lease = None
         heartbeat = None
@@ -97,13 +115,16 @@ class Job:
                         await asyncio.sleep(.2)
                         continue
                     cancel_acquire = asyncio.Event()
-                    acquire = asyncio.create_task(capacity_call(self.app['capacity'].try_acquire, self.id, cancelled=cancel_acquire))
+                    acquire = asyncio.create_task(capacity_call(lambda: self.app['capacity'].try_acquire(self.id, expected_gate_id=self.config.get('gate_id'), expected_settings_revision=self.config.get('settings_revision')), cancelled=cancel_acquire))
                     try: lease = await asyncio.shield(acquire)
                     except asyncio.CancelledError:
                         cancel_acquire.set()
                         lease = await acquire  # Account for a reservation committed during cancellation.
                         raise
                     if not lease['acquired']:
+                        if lease['reason'] in ('revoked', 'gate_changed', 'settings_changed'):
+                            self.state, self.error, self.reason = 'rejected', 'Job was revoked or worker settings changed before execution', lease['reason']
+                            return
                         self.waiting_reason = lease['reason']
                         await asyncio.sleep(1)
                         continue
@@ -215,7 +236,7 @@ class Job:
                             raise
                         self.result_path = directory/'result-files.json'
                         self.config.clear()  # release transferred file payloads after execution
-                        self.state = 'done'
+                        completed = True
                     finally:
                         input_task.cancel()
                         errors.cancel()
@@ -236,7 +257,9 @@ class Job:
                 _kill(self.process, tree)
                 if tree: tree.close()
                 await self.process.wait()
-            if lease and lease.get('acquired'): await capacity_call(self.app['capacity'].release, self.id)
+            if lease and lease.get('acquired'):
+                await capacity_call(self.app['capacity'].finish, self.id, self.app['gate_id'])
+        if completed: self.state = 'done'
 
 
 def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=None, capacity=None, probe=None):
@@ -309,12 +332,21 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             raise ValueError(f'slots must be a whole number from 1 to {MAX_SLOTS}')
         if not all(number(data[k]) and 0 < data[k] <= 100 for k in ('cpu_limit', 'ram_limit')):
             raise ValueError('cpu_limit and ram_limit must be percentages above 0 and at most 100')
-        await capacity_call(lambda: app['capacity'].configure(**data))
+        expected = request.headers.get('X-Flow-Gate-ID')
+        if expected is not None and expected != app['gate_id']: raise ValueError('Worker capacity gate identity changed')
+        raw_revision = request.headers.get('X-Flow-Settings-Revision')
+        if raw_revision is not None and (not raw_revision.isascii() or not raw_revision.isdigit() or len(raw_revision) > 30):
+            raise ValueError('Invalid worker settings revision')
+        revision = int(raw_revision) if raw_revision is not None else None
+        await capacity_call(lambda: app['capacity'].configure(**data, expected_gate_id=expected, settings_revision=revision))
         return web.json_response({'settings': (await capacity_call(app['capacity'].metrics))['settings']})
     async def create(request):
         config = await request.json()
         job_id = str(uuid.UUID(config['id']))
+        if config.get('gate_id') is not None and (config['gate_id'] != app['gate_id'] or config['gate_id'] != (await capacity_call(app['capacity'].metrics))['gate_id']):
+            raise ValueError('Worker capacity gate identity changed')
         if job_id not in app['jobs']:
+            if termination_path(app, job_id).exists(): raise ValueError('A terminated job ID cannot be reused')
             if len(app['jobs']) >= 100: raise ValueError('Execution worker has too many retained jobs; retry later')
             start = config['start']
             if not re.fullmatch(r'[A-Za-z0-9_-]{1,150}', start['runId']): raise ValueError('Invalid run id')
@@ -330,6 +362,12 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             from .artifacts import validate
             validate(config['files']); validate(config['assets'])
             config['runId'] = start['runId']
+            # Capability refresh above yields; a concurrent submit or cancel may have
+            # registered or terminated this ID while it was in flight.
+            if config.get('gate_id') is not None and config['gate_id'] != (await capacity_call(app['capacity'].metrics))['gate_id']:
+                raise ValueError('Worker capacity gate identity changed')
+            if job_id in app['jobs']: return web.json_response({'id': job_id})
+            if termination_path(app, job_id).exists(): raise ValueError('A terminated job ID cannot be reused')
             app['jobs'][job_id] = Job(app, job_id, config)
         return web.json_response({'id': job_id})
     def job(request):
@@ -361,11 +399,37 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         item.authorized.set()
         return web.json_response({'ok': True})
     async def cancel(request):
+        expected = request.headers.get('X-Flow-Gate-ID')
+        current = (await capacity_call(app['capacity'].metrics))['gate_id']
+        if current != app['gate_id'] or (expected is not None and expected != current):
+            return web.json_response({'error': 'Worker capacity gate identity changed'}, status=409)
+        jid = request.match_info['id']
+        if jid not in app['jobs']:
+            try:
+                proof = json.loads(termination_path(app, jid).read_text(encoding='utf-8'))
+                terminated = proof.get('terminated') is True and proof.get('gate_id') == current
+            except (OSError, ValueError, AttributeError): terminated = False
+            if terminated: return web.json_response({'ok': True, 'terminated': True})
+            try: canonical = str(uuid.UUID(jid))
+            except (ValueError, AttributeError): raise web.HTTPNotFound()
+            if not await capacity_call(app['capacity'].revoke_absent, canonical, current):
+                return web.json_response({'error': 'A previous execution may still be running'}, status=409)
+            # The durable revocation prevents any delayed submit from acquiring capacity.
+            # Recheck this process after the database await, and do not yield before the marker.
+            if jid not in app['jobs']:
+                record_termination(app, canonical)
+                return web.json_response({'ok': True, 'terminated': True})
         item = job(request)
         item.task.cancel()
-        await asyncio.gather(item.task, return_exceptions=True)
+        results = await asyncio.gather(item.task, return_exceptions=True)
+        failure = results[0]
+        if (isinstance(failure, BaseException) and not isinstance(failure, asyncio.CancelledError)) or (item.process and item.process.returncode is None):
+            return web.json_response({'error': 'Worker cleanup did not confirm process termination'}, status=503)
+        if not await capacity_call(app['capacity'].revoke_absent, jid, current):
+            return web.json_response({'error': 'A previous execution may still be running'}, status=409)
         if item.state in ('queued','running'): item.state, item.error = 'cancelled', 'Execution cancelled'
-        return web.json_response({'ok': True})
+        await asyncio.to_thread(record_termination, app, jid)
+        return web.json_response({'ok': True, 'terminated': True})
     async def reap():
         while True:
             await asyncio.sleep(5)
@@ -390,6 +454,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     async def startup(app):
         if app['capacity'] is None:
             app['capacity'] = await capacity_call(lambda: CapacityGate(slots=count))
+        app['gate_id'] = (await capacity_call(app['capacity'].metrics))['gate_id']
         app['capacity_task'] = asyncio.create_task(sample_capacity())
         await refresh_inventory()
         app['inventory_task'] = asyncio.create_task(daily_inventory())

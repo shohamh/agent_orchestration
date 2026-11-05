@@ -372,9 +372,14 @@ class FlowIntegrityTests(ServiceFixture):
         _, server = await self.service('pc-a')
         write_registry(self.registry, [('pc-a', server.make_url(''), ['pools: [build]'])])
         flow = parse({'name': 'trigger-flow', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(\'bridged\')"'}}})
+        from flowkit.activation import Store
+        import yaml
+        store = Store(self.root/'drafts', self.root/'state')
+        rev = store.write_snapshot(flow.name, yaml.safe_dump(flow.to_json()))
+        definition = {**flow.to_json(), '_asset_snapshot': store.asset_reference(flow.name, rev)}
         process = await asyncio.create_subprocess_exec(sys.executable, '-u', '-m', 'flowkit.stdio', cwd=AGENTS,
-            env=stdio_bridge_env(self.root, self.registry), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        start = {'type': 'start', 'flow': flow.to_json(), 'step': 'go', 'context': {'input': {}, 'steps': {}}, 'runId': 'run_trigger1'}
+            env={**stdio_bridge_env(self.root, self.registry), 'FLOW_STATE_DIR': str(self.root/'state')}, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        start = {'type': 'start', 'flow': definition, 'step': 'go', 'context': {'input': {}, 'steps': {}}, 'runId': 'run_trigger1'}
         process.stdin.write((json.dumps(start) + '\n').encode()); await process.stdin.drain()
         stdout, stderr = await asyncio.wait_for(process.communicate(), 90)
         self.assertEqual(process.returncode, 0, stderr.decode(errors='replace'))
@@ -403,12 +408,29 @@ class FlowIntegrityTests(ServiceFixture):
         gate_file.write_text('go')
         await asyncio.wait_for(slow, 30)
 
+    async def test_old_revision_executes_old_assets_after_draft_changes(self):
+        from flowkit.activation import Store
+        from flowkit.distributed import execute_step
+        _, server = await self.service('pc-a')
+        write_registry(self.registry, [('pc-a', server.make_url(''), ['pools: [build]'])])
+        drafts = self.root/'drafts'; drafts.mkdir()
+        script = drafts/'task.py'; script.write_text("print('old asset')", encoding='utf-8')
+        store = Store(drafts, self.root/'state')
+        rev = store.write_snapshot('asset-flow', 'name: asset-flow\nworker: {pool: build}\nsteps:\n  go: {kind: program, run: "python {flow_dir}/task.py"}\n')
+        script.write_text("print('new asset')", encoding='utf-8')
+        flow = store.load({'asset-flow': rev})[0]['asset-flow']
+        with patch.dict(os.environ, {'FLOW_STATE_DIR': str(self.root/'state')}):
+            output = await execute_step(flow, 'go', {'input': {}, 'steps': {}}, 'asset-run', self.receive, self.sink, engine='prefect')
+        self.assertEqual(output['stdout'].strip(), 'old asset')
+
     async def test_failed_update_keeps_old_run_on_its_revision(self):
         from flowkit.activation import Store
         from flowkit.distributed import execute_step
         app, server = await self.service('pc-a')
         write_registry(self.registry, [('pc-a', server.make_url(''), ['pools: [build]'])])
         store = Store(self.root/'drafts', self.root/'state')
+        state_env = patch.dict(os.environ, {'FLOW_STATE_DIR': str(self.root/'state')})
+        state_env.start(); self.addCleanup(state_env.stop)
         v1 = 'name: updated\nworker: {pool: build}\nsteps:\n  a: {kind: program, run: "python -c \\"print(1)\\""}\n  b: {kind: program, needs: [a], run: "python -c \\"print(\'v1\')\\""}\n'
         v2 = v1.replace("'v1'", "'v2'")
         rev1, rev2 = store.write_snapshot('updated', v1), store.write_snapshot('updated', v2)

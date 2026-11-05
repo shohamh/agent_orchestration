@@ -22,7 +22,9 @@ def workspace_path(run_id):
 
 
 def definition_hash(flow):
-    return hashlib.sha256(json.dumps(flow.to_json(), sort_keys=True).encode()).hexdigest()
+    definition = flow.to_json()
+    if getattr(flow, '_asset_snapshot', None): definition['_asset_snapshot'] = flow._asset_snapshot
+    return hashlib.sha256(json.dumps(definition, sort_keys=True).encode()).hexdigest()
 
 
 def atomic_json(path, value):
@@ -117,6 +119,8 @@ def build_plan(flow, step, nodes, source):
     if any(n['column'] not in ('done', 'stopped', 'pending') for n in nodes.values()):
         raise ValueError('A source step is still active; stop or finish every step first')
     path = validate_source(flow, source)
+    if any((path / '.flow-attempts').glob('*.json')):
+        raise ValueError('A source attempt may still be running; confirm it has stopped before restarting')
     rerun = descendants(flow, step)
     for sid in flow.steps:
         if sid in rerun: continue
@@ -139,6 +143,7 @@ def prepare_workspace(flow, run_id, plan=None):
     with tempfile.TemporaryDirectory(prefix='restart-', dir=path.parent) as directory:
         staged = Path(directory) / 'workspace'
         shutil.copytree(source, staged)
+        (staged / '.flow-cancel.json').unlink(missing_ok=True)
         try:
             staged.rename(path)  # publish one complete workspace across parallel Python processes
         except OSError:

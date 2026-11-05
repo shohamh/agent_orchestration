@@ -86,27 +86,33 @@ async def push_limits(client, worker, capacity):
     limits to future admissions only; running work is never interrupted."""
     import time
     wanted = limits(worker)
-    if isinstance(capacity, dict) and capacity.get('settings') == wanted:
+    revision = worker.get('settings_revision', 0)
+    if isinstance(capacity, dict) and capacity.get('settings') == wanted and capacity.get('settings_revision') == revision:
         _PUSH_BACKOFF.pop(worker['id'], None)
         return {'state': 'applied'}
     held = _PUSH_BACKOFF.get(worker['id'])
-    if held and held[0] == wanted and time.monotonic() < held[1]:
+    versioned = (wanted, revision)
+    if held and held[0] == versioned and time.monotonic() < held[1]:
         return held[2]
     result = await _push(client, worker, wanted, capacity)
     if result['state'] == 'applied': _PUSH_BACKOFF.pop(worker['id'], None)
-    else: _PUSH_BACKOFF[worker['id']] = (wanted, time.monotonic() + PUSH_RETRY_SECONDS[result['state']], result)
+    else: _PUSH_BACKOFF[worker['id']] = (versioned, time.monotonic() + PUSH_RETRY_SECONDS[result['state']], result)
     return result
 
 
 async def _push(client, worker, wanted, capacity):
     try:
-        async with client.post(worker['url'] + '/capacity/settings', json=wanted, headers=worker['_headers']) as response:
+        gate_id = capacity.get('gate_id') if isinstance(capacity, dict) else None
+        headers = {**worker['_headers'], 'X-Flow-Gate-ID': gate_id or 'unavailable', 'X-Flow-Settings-Revision': str(worker.get('settings_revision', 0))}
+        async with client.post(worker['url'] + '/capacity/settings', json=wanted, headers=headers) as response:
             if response.status == 404:
                 return {'state': 'unsupported', 'message': 'This execution service is older than limit settings; update it on the PC'}
             data = await response.json(content_type=None)
             if response.status != 200:
                 return {'state': 'failed', 'message': str((data or {}).get('error') or f'status {response.status}')[:300]}
-        if isinstance(capacity, dict): capacity['settings'] = wanted
+        if isinstance(capacity, dict):
+            capacity['settings'] = wanted
+            capacity['settings_revision'] = worker.get('settings_revision', 0)
         return {'state': 'applied'}
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return {'state': 'failed', 'message': 'The worker did not accept the limits; retried on the next check'}
@@ -281,6 +287,8 @@ async def fleet_status(requirements=(), probed=None, probe_interval=0):
     snapshot = registry()
     public = await catalog(snapshot)
     private = {w['id']: w for w in snapshot}
+    for entry in public:
+        private[entry['id']]['_gate_id'] = (entry.get('capacity') or {}).get('gate_id')
     commands = sorted({r['command'] for r in requirements if r.get('command')})
     agents = sorted({r['agent'] for r in requirements if r.get('agent')})
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as client:

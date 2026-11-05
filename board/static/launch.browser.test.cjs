@@ -163,7 +163,7 @@ const checked = (execution) => () => JSON.stringify(lastCheck()?.execution) === 
 test('standalone card: the fleet selector is offered on Hatchet and Prefect only, and never with a host workspace', async () => {
   await openNew('agent-session');
   await waitFor(`${q(cardPicker)} && !${q(cardPicker)}.disabled`, 'the card worker selector is enabled on Hatchet');
-  assert.match(await text('#n-card-worker'), /This coordinator \(no fleet placement\)/);
+  assert.match(await text('#n-card-worker'), /Any compatible fleet worker/);
   assert.equal(await evaluate(`${q('#n-card-worker .fb-note')}?.hidden ?? true`), true, 'no restriction note');
   await fill('#n-workspace', 'C:/work/repo');
   await waitFor(`${q(cardPicker)}.disabled`, 'a host workspace disables fleet placement');
@@ -226,7 +226,7 @@ test('standalone card: matching pool, tags and agent with last detected times; o
   assert.equal(post.body.workspace, '');
 });
 
-test('standalone card: a busy worker and an unchecked agent wait with their reasons; no selection is not checked', async () => {
+test('standalone card: a busy worker and an unchecked agent wait; default checks all workers', async () => {
   workers.find((w) => w.id === 'pc-a').active = 2;
   try {
     await openNew('agent-session');
@@ -237,11 +237,9 @@ test('standalone card: a busy worker and an unchecked agent wait with their reas
     await pick('#n-agent', 'pi');
     await waitFor(`/Whether pi is installed on pc-a is unknown.*pi unknown, never checked/s.test(document.querySelector('#n-placement').textContent)`, 'the agent change is checked again');
     assert.deepEqual(lastCheck().card, { agent: 'pi', worker: { id: 'pc-a' } });
-    const checks = calls.filter((c) => c.path === '/api/launch/validate').length;
-    await pick(cardPicker, 'This coordinator');
-    await waitFor(`!document.querySelector('#n-placement [data-status]')`, 'nothing to check without a fleet selection');
-    await sleep(500);
-    assert.equal(calls.filter((c) => c.path === '/api/launch/validate').length, checks, 'no launch check for a coordinator card');
+    await pick(cardPicker, 'Any compatible fleet worker');
+    await until(() => lastCheck()?.card?.worker && Array.isArray(lastCheck().card.worker.tags), 'default fleet check');
+    assert.deepEqual(lastCheck().card, { agent: 'pi', worker: { tags: [] } });
     await closeNew();
   } finally { workers = fake.fleet(); }
 });
