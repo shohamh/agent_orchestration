@@ -1,4 +1,5 @@
-"""One-line PC install: form validation, one-time records, the bundle, the scripts and the /install routes."""
+"""One-line PC install: form validation, one-time records, the command with the form's values as flags, the claim by a PC's
+uuid and the /install routes. No script is served: the command downloads the worker program and runs its `install`."""
 import asyncio
 import io
 import json
@@ -11,6 +12,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,12 +28,22 @@ FORM = {'id': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'p
 GOOD_TOKEN = 'abcdefghijklmnopqrstuvwxyzABCDEF0123456789_-'
 
 
+SECRET = 'pc-claim-secret-0123456789abcdefghij'
+
+
+def claim_body(**changes):
+    """What a PC running `agent-worker install <uuid> --server ...` sends to /claim."""
+    return {'claim': SECRET, 'host_os': 'windows', 'hostname': 'PC-1', **changes}
+
+
 class Isolated(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        binaries = self.root / 'binaries'; binaries.mkdir()
+        for name in install.TARGETS.values(): (binaries / name).write_bytes(b'MZ-fake-worker-' + name.encode())
         env = patch.dict(os.environ, {'FLOW_STATE_DIR': str(self.root/'state'), 'FLOW_WORKERS_FILE': str(self.root/'workers.yaml'),
-                                      'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env')})
+                                      'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env'), 'FLOW_WORKER_BINARIES': str(binaries)})
         env.start(); self.addCleanup(env.stop)
 
 
@@ -51,13 +63,20 @@ class FormTests(Isolated):
         with self.assertRaises(install.InstallError): install.validate_form({**FORM, 'extra': 1})
         with self.assertRaises(install.InstallError): install.validate_form('nope')
 
+    def test_the_install_id_is_a_server_generated_uuid(self):
+        a, b = install.create(FORM), install.create({**FORM, 'id': 'other'})
+        for record in (a, b):
+            self.assertTrue(install.CODE.match(record['code']))
+            self.assertEqual(str(uuid.UUID(record['code'])), record['code'])
+            self.assertEqual(uuid.UUID(record['code']).version, 4)
+        self.assertNotEqual(a['code'], b['code'])
+
     def test_the_server_address_must_be_reachable_from_another_pc(self):
         for address in ('', None, 'localhost:8090', 'http://localhost:8090', 'http://127.0.0.1:8090', 'http://[::1]:8090', 'http://0.0.0.0:8090', 'ftp://x:8090',
                         'http://u:p@host:8090', 'http://host:8090/path', 'http://host:8090?x=1', 'http://host:99999', 'http://', 'http://foo.localhost:8090'):
             with self.subTest(address=address), self.assertRaises(install.InstallError):
                 install.validate_form({**FORM, 'server': address})
         self.assertEqual(install.server_address('https://board.example.ts.net/'), 'https://board.example.ts.net')
-        self.assertEqual(install.server_address('http://10.0.0.5:8090'), 'http://10.0.0.5:8090')
 
     def test_names_already_registered_or_waiting_are_refused(self):
         with self.assertRaisesRegex(install.InstallError, 'already registered'): install.validate_form(FORM, registered={'build-pc'})
@@ -68,6 +87,10 @@ class FormTests(Isolated):
         with self.assertRaisesRegex(install.InstallError, 'waiting'): install.create(FORM)
         install.cancel(record['code'])
         self.assertEqual(install.create(FORM)['state'], 'pending')
+
+    def test_a_link_needs_a_worker_program_for_the_chosen_os(self):
+        for name in install.TARGETS.values(): (Path(os.environ['FLOW_WORKER_BINARIES']) / name).unlink()
+        with self.assertRaisesRegex(install.InstallError, 'no worker program for windows'): install.create(FORM)
 
 
 class RecordTests(Isolated):
@@ -84,18 +107,6 @@ class RecordTests(Isolated):
         self.assertNotIn('token', json.dumps(shown))
         with patch.object(install, 'now', lambda: record['expires_at'] + 1): self.assertEqual(install.view(record)['state'], 'expired')
 
-    def test_commands_are_one_line_per_shell_and_say_no_elevation(self):
-        record = install.create(FORM)
-        commands = install.commands(record)
-        for shell in ('powershell', 'cmd', 'bash'):
-            self.assertNotIn('\n', commands[shell])
-            self.assertIn(f'/install/{record["code"]}/', commands[shell])
-        self.assertTrue(commands['powershell'].startswith('irm ') and commands['powershell'].endswith('| iex'))
-        self.assertTrue(commands['cmd'].startswith('powershell -NoProfile'))
-        self.assertTrue(commands['bash'].startswith('curl -fsSL ') and commands['bash'].endswith('| bash'))
-        self.assertIn('normal user', commands['elevation'])
-        self.assertNotIn(GOOD_TOKEN, json.dumps(commands))
-
     def test_cancelled_records_are_unusable_and_old_finished_ones_are_removed(self):
         record = install.create(FORM)
         self.assertEqual(install.cancel(record['code'])['state'], 'cancelled')
@@ -110,8 +121,63 @@ class RecordTests(Isolated):
         self.assertEqual(install.token_env_for('build-pc', {'FLOW_WORKER_TOKEN_BUILD_PC'}), 'FLOW_WORKER_TOKEN_BUILD_PC_2')
 
 
+class CommandTests(Isolated):
+    def record(self, **changes): return install.create({**FORM, **changes})
+
+    def test_each_shell_gets_one_line_that_downloads_the_program_and_runs_install_with_the_uuid_and_the_server(self):
+        record = self.record()
+        commands = install.commands(record)
+        uid, origin = record['code'], 'http://192.168.1.10:8090'
+        for shell, quote in (('powershell', "'%s'"), ('cmd', '"%s"'), ('bash', "'%s'")):
+            text = commands[shell]
+            self.assertNotIn('\n', text, shell)
+            self.assertIn(f'{origin}/install/{uid}/agent-worker', text, shell)
+            self.assertIn(f' install {uid} --server ' + quote % origin, text, shell)
+            for flag in ('--name', '--slots', '--engine', '--pool', '--cpu-limit', '--os', '--code'):
+                self.assertNotIn(flag, text, f'{shell}: the program gets these from the server, not from the command')
+        self.assertIn('iwr -UseBasicParsing', commands['powershell'])
+        self.assertTrue(commands['cmd'].startswith('curl.exe -fsSL'))
+        self.assertTrue(commands['bash'].startswith('f=$(mktemp) && curl -fsSL'))
+        self.assertIn('normal user', commands['elevation'])
+
+    def test_no_script_is_involved_and_nothing_but_the_uuid_and_address_identify_the_install(self):
+        record = self.record(pool='anything goes', tags=['it is a tag'])
+        text = json.dumps(install.commands(record))
+        for forbidden in ('| iex', '| bash', '| sh', 'install.ps1', 'install.sh', 'Invoke-Expression', 'anything goes', 'it is a tag'):
+            self.assertNotIn(forbidden, text)
+        self.assertFalse((ROOT / 'agents' / 'flowkit' / 'install_templates').exists())
+
+    def test_the_bash_command_parses(self):
+        bash = shutil.which('bash')
+        if not bash: self.skipTest('bash is not installed')
+        self.assertEqual(subprocess.run([bash, '-n', '-c', install.commands(self.record())['bash']], capture_output=True, text=True).returncode, 0)
+
+    def test_the_powershell_command_parses(self):
+        powershell = shutil.which('powershell') or shutil.which('pwsh')
+        if not powershell: self.skipTest('PowerShell is not installed')
+        path = self.root / 'command.ps1'; path.write_text(install.commands(self.record())['powershell'], encoding='utf-8')
+        command = ("$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$null,[ref]$e); "
+                   "if($e){$e|%%{$_.Message}; exit 1}") % str(path).replace("'", "''")
+        result = subprocess.run([powershell, '-NoProfile', '-Command', command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_commands_never_ask_for_elevation_or_a_firewall_change(self):
+        text = json.dumps({k: v for k, v in install.commands(self.record()).items() if k != 'elevation'})
+        self.assertNotRegex(text, r'(?i)\bsudo\b|runas|-Verb|New-NetFirewallRule|netsh|firewall-cmd|ufw ')
+
+    def test_update_link_commands_run_the_downloaded_program_in_update_mode(self):
+        from flowkit import update
+        link = update.create_link('build-pc', 'linux')
+        commands = update.link_commands(link, 'http://192.168.1.10:8090')
+        for shell in ('powershell', 'cmd', 'bash'):
+            self.assertIn(f'/update/{link["code"]}/agent-worker', commands[shell])
+            self.assertIn('update --server', commands[shell]); self.assertIn('--force', commands[shell])
+            self.assertNotIn('| iex', commands[shell]); self.assertNotIn('| bash', commands[shell])
+        self.assertEqual(commands['local'], 'agent-worker update')
+
+
 class RegistrationTests(Isolated):
-    def test_registering_stores_the_token_privately_and_adds_a_relayed_worker(self):
+    def test_registering_stores_the_token_privately_and_adds_a_relayed_worker_keyed_by_the_installs_uuid(self):
         from flowkit.fleet_registry import _read
         from flowkit.relay import worker_url
         record = install.create(FORM)
@@ -119,108 +185,28 @@ class RegistrationTests(Isolated):
         self.assertIn(f'{env}={GOOD_TOKEN}', (self.root/'workers.env').read_text())
         if os.name != 'nt': self.assertEqual((self.root/'workers.env').stat().st_mode & 0o777, 0o600)
         worker = next(w for w in _read() if w['id'] == 'build-pc')
-        self.assertEqual((worker['url'], worker['pools'], worker['tags'], worker['engines'], worker['slots'], worker['cpu_limit'], worker['ram_limit'], worker['token_env']),
-                         (worker_url('build-pc'), ['build'], ['gpu'], ['hatchet', 'prefect'], 2, 80, 85, env))
+        self.assertEqual((worker['uuid'], worker['url'], worker['pools'], worker['tags'], worker['engines'], worker['slots'], worker['token_env']),
+                         (record['code'], worker_url(record['code']), ['build'], ['gpu'], ['hatchet', 'prefect'], 2, env))
         self.assertNotIn(GOOD_TOKEN, (self.root/'workers.yaml').read_text())  # tokens never go into the registry
+
+    def test_the_registry_never_holds_two_workers_with_one_uuid_or_changes_a_uuid(self):
+        from flowkit.fleet_registry import save_worker
+        pc = str(uuid.uuid4())
+        save_worker({'id': 'a', 'uuid': pc, 'pools': ['x'], 'slots': 1, 'url': 'http://127.0.0.1:8097/w/' + pc, 'token_env': 'A_TOKEN'}, create=True)
+        with self.assertRaisesRegex(ValueError, 'already registered as a'):
+            save_worker({'id': 'b', 'uuid': pc, 'pools': ['x'], 'slots': 1, 'url': 'http://127.0.0.1:8097/w/' + pc, 'token_env': 'B_TOKEN'}, create=True)
+        with self.assertRaisesRegex(ValueError, 'never changes'): save_worker({'id': 'a', 'uuid': str(uuid.uuid4())})
+        with self.assertRaisesRegex(ValueError, 'Invalid worker uuid'): save_worker({'id': 'c', 'uuid': 'nope', 'pools': ['x']}, create=True)
 
     def test_invalid_tokens_are_refused(self):
         record = install.create(FORM)
         for token in (None, '', 'short', 'x' * 201, GOOD_TOKEN + ' ', GOOD_TOKEN + '\n', 'a' * 40 + '=', 7):
             with self.subTest(token=token), self.assertRaises(install.InstallError): install.register(record, token)
 
-    def test_a_second_registration_of_the_same_name_is_refused_and_keeps_the_first(self):
-        record = install.create(FORM)
-        install.register(record, GOOD_TOKEN)
-        with self.assertRaisesRegex(install.InstallError, 'already registered'): install.register(record, 'z' * 40)
-
     def test_env_file_updates_replace_rather_than_duplicate(self):
         path = self.root/'workers.env'
         install.set_env_value('A_B', 'one', path); install.set_env_value('C', 'two', path); install.set_env_value('A_B', 'three', path)
         self.assertEqual(sorted(path.read_text().split()), ['A_B=three', 'C=two'])
-
-
-class BundleTests(unittest.TestCase):
-    def names(self):
-        with tarfile.open(fileobj=io.BytesIO(install.build_bundle()), mode='r:gz') as archive: return archive.getnames()
-
-    def test_the_bundle_has_what_a_pc_needs_and_nothing_else(self):
-        names = self.names()
-        for needed in ('agents/flow_execution_worker.py', 'agents/worker_runner.py', 'agents/relay_connector.py', 'agents/requirements-worker.txt',
-                       'agents/package.json', 'agents/package-lock.json', 'agents/flowkit/worker_service.py', 'agents/flowkit/connector.py'):
-            self.assertIn(needed, names)
-        for name in names:
-            self.assertFalse(re.search(r'(^|/)(\.venv|node_modules|runtime|tests|__pycache__|\.env|workers\.local)', name), name)
-            self.assertFalse(name.endswith(('.pyc', '.env', '.pem', '.key')), name)
-            self.assertFalse(name.startswith('/') or '..' in name.split('/'), name)
-        self.assertNotIn('agents/flow_host.py', names)  # the coordinator-only code stays home
-        self.assertNotIn('agents/flowkit/install.py', [n for n in names if n.endswith('never')])
-
-    def test_the_bundle_runs_without_the_repository(self):
-        """Extracted alone, the worker's modules import with only the packages in requirements-worker.txt."""
-        with tempfile.TemporaryDirectory() as directory, tarfile.open(fileobj=io.BytesIO(install.build_bundle()), mode='r:gz') as archive:
-            archive.extractall(directory, filter='data')
-            code = 'import worker_runner, relay_connector, flow_execution_worker; print("ok")'
-            result = subprocess.run([sys.executable, '-c', code], cwd=Path(directory)/'agents', capture_output=True, text=True, env={**os.environ, 'PYTHONPATH': ''})
-            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'ok'), result.stderr)
-
-    def test_the_bundle_is_cached_until_a_file_changes(self):
-        first = install.build_bundle()
-        self.assertIs(install.build_bundle(), first)
-
-    def test_worker_requirements_match_the_pinned_requirements(self):
-        def pins(path):
-            return {l.split('==')[0].lower(): l.split('==')[1] for l in (ROOT/'agents'/path).read_text().splitlines() if '==' in l and not l.startswith('#')}
-        worker, full = pins('requirements-worker.txt'), pins('requirements.txt')
-        self.assertTrue(worker)
-        for name, version in worker.items(): self.assertEqual(full.get(name), version, name)
-
-
-class ScriptTests(Isolated):
-    def record(self, **changes):
-        return {**install.create({**FORM, **changes}), }
-
-    def test_values_are_filled_in_and_quoted(self):
-        record = self.record()
-        sh, ps = install.render('sh', record), install.render('ps1', record)
-        for text in (sh, ps):
-            self.assertNotIn('@@', text)
-            self.assertIn(record['code'], text)
-            self.assertIn("'build-pc'", text)
-            self.assertIn("'http://192.168.1.10:8090'", text)
-        self.assertNotIn('\r', sh)
-        self.assertEqual(ps.count('\r\n'), ps.count('\n'))
-
-    def test_quoting_cannot_be_broken_out_of(self):
-        self.assertEqual(install.sh_quote("a'b"), "'a'\\''b'")
-        self.assertEqual(install.ps_quote("a'b"), "'a''b'")
-        record = {**self.record(), 'server': "http://h:1'; touch /tmp/pwned; '"}
-        self.assertNotIn("'; touch /tmp/pwned; '", install.render('sh', record).replace("'\\''", ''))
-
-    def test_the_bash_script_parses_after_rendering(self):
-        bash = shutil.which('bash')
-        if not bash: self.skipTest('bash is not installed')
-        path = self.root/'install.sh'
-        path.write_text(install.render('sh', self.record()), newline='\n')
-        result = subprocess.run([bash, '-n', str(path)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_the_powershell_script_parses_after_rendering(self):
-        powershell = shutil.which('powershell') or shutil.which('pwsh')
-        if not powershell: self.skipTest('PowerShell is not installed')
-        path = self.root/'install.ps1'
-        path.write_text(install.render('ps1', self.record()), encoding='utf-8', newline='')
-        command = ("$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$null,[ref]$e); "
-                   "if($e){$e|%%{$_.Message+' line '+$_.Extent.StartLineNumber}; exit 1}") % str(path).replace("'", "''")
-        result = subprocess.run([powershell, '-NoProfile', '-Command', command], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_the_scripts_never_ask_for_elevation_and_never_expose_the_token_in_arguments(self):
-        record = self.record()
-        for kind in ('sh', 'ps1'):
-            text = install.render(kind, record)
-            self.assertNotRegex(text, r'(?im)^\s*sudo\s')  # sudo appears only in hints the user may follow, never as a command the script runs
-            self.assertNotRegex(text, r'(?i)runas|-Verb\s+RunAs|New-NetFirewallRule|netsh|firewall-cmd|ufw ')
-            self.assertNotRegex(text, r'(?i)--token|FLOW_WORKER_TOKEN=')
 
 
 class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
@@ -236,75 +222,152 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
 
     def make(self, **changes): return install.create({**FORM, **changes})
 
-    async def test_scripts_and_the_bundle_are_served_for_a_pending_code(self):
+    async def claim(self, record, **changes):
+        async with self.http.post(f'{self.url}/install/{record["code"]}/claim', json=claim_body(**changes)) as response:
+            return response.status, await response.json()
+
+    async def test_the_worker_program_is_served_for_a_pending_install_and_no_script_exists(self):
         record = self.make()
-        for kind, marker in (('sh', '#!/usr/bin/env bash'), ('ps1', 'Installs this PC')):
-            async with self.http.get(f'{self.url}/install/{record["code"]}/install.{kind}') as response:
-                self.assertEqual(response.status, 200)
-                text = await response.text()
-                self.assertIn(marker, text); self.assertIn(record['code'], text)
-        async with self.http.get(f'{self.url}/install/{record["code"]}/bundle.tgz') as response:
+        async with self.http.get(f'{self.url}/install/{record["code"]}/agent-worker') as response:
             self.assertEqual(response.status, 200)
-            self.assertTrue((await response.read()).startswith(b'\x1f\x8b'))
+            self.assertEqual(await response.read(), b'MZ-fake-worker-agent-worker-x86_64-pc-windows-msvc.exe')
+            self.assertEqual(response.headers['X-Worker-Version'], install.binary_version('windows'))
+        for path in ('install.ps1', 'install.sh', 'settings', 'verify'):
+            async with self.http.get(f'{self.url}/install/{record["code"]}/{path}') as response: self.assertEqual(response.status, 404, path)
+
+    async def test_checking_in_claims_the_install_and_returns_what_the_form_saved(self):
+        record = self.make(tags=['gpu', 'cuda'])
+        status, body = await self.claim(record)
+        self.assertEqual(status, 200)
+        self.assertEqual({k: body[k] for k in ('ok', 'uuid', 'name', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit')},
+                         {'ok': True, 'uuid': record['code'], 'name': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu', 'cuda'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85})
+        shown = install.view(install.read_record(record['code']))
+        self.assertEqual((shown['uuid'], shown['claimed_host']), (record['code'], 'PC-1'))
+        self.assertNotIn(SECRET, json.dumps(install.read_record(record['code'])), 'only a hash of the secret is stored')
+
+    async def test_another_pc_running_the_same_command_is_refused_with_who_has_it(self):
+        record = self.make()
+        self.assertEqual((await self.claim(record, hostname='FIRST-PC'))[0], 200)
+        status, body = await self.claim(record, claim='another-pcs-own-secret-0123456789abc', hostname='SECOND-PC')
+        self.assertEqual(status, 409)
+        self.assertIn('already used by another PC (FIRST-PC', body['error'])
+        self.assertIn('create a new link', body['error'])
+
+    async def test_the_same_pc_may_check_in_again_after_a_failed_attempt(self):
+        record = self.make()
+        for _ in range(3): self.assertEqual((await self.claim(record))[0], 200)
+
+    async def test_the_pcs_real_os_must_match_the_form(self):
+        record = self.make()
+        status, body = await self.claim(record, host_os='linux')
+        self.assertEqual(status, 409)
+        self.assertIn('The form says this PC runs windows but it runs linux', body['error'])
+        self.assertIn('choose linux', body['error'])
+        self.assertIsNone(install.read_record(record['code']).get('claim_hash'), 'a refused PC claims nothing')
+
+    async def test_a_missing_or_weak_claim_secret_is_refused(self):
+        record = self.make()
+        for body in ({}, {'claim': ''}, {'claim': 'short'}, {'claim': 7}):
+            async with self.http.post(f'{self.url}/install/{record["code"]}/claim', json=body) as response: self.assertEqual(response.status, 400)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/claim', data='nope', headers={'Content-Type': 'application/json'}) as response: self.assertEqual(response.status, 400)
+
+    async def test_a_uuid_that_is_already_registered_cannot_be_claimed_again(self):
+        record = self.make()
+        install.register(record, GOOD_TOKEN)
+        status, body = await self.claim(record)
+        self.assertEqual(status, 409)
+        self.assertIn('already registered as build-pc', body['error'])
 
     async def test_unknown_wrong_expired_cancelled_and_used_codes_all_look_the_same(self):
         record = self.make()
         install.cancel(record['code'])
         expired = self.make(id='old')
-        with patch.object(install, 'now', lambda: expired['expires_at'] + 5):
-            async with self.http.get(f'{self.url}/install/{expired["code"]}/install.sh') as response: expired_body = (response.status, await response.text())
         results = []
-        for code in ('A' * 43, record['code'], 'short'):
-            async with self.http.get(f'{self.url}/install/{code}/install.sh') as response: results.append((response.status, await response.text()))
-        async with self.http.get(f'{self.url}/install/../../etc/passwd') as response: self.assertEqual(response.status, 404)  # never reaches a handler
-        self.assertEqual({r[0] for r in results} | {expired_body[0]}, {404})
-        self.assertEqual({r[1] for r in results}, {expired_body[1]})
+        with patch.object(install, 'now', lambda: expired['expires_at'] + 5):
+            async with self.http.post(f'{self.url}/install/{expired["code"]}/claim', json=claim_body()) as response: results.append((response.status, await response.text()))
+        for code in (str(uuid.uuid4()), record['code'], 'short'):
+            async with self.http.post(f'{self.url}/install/{code}/claim', json=claim_body()) as response: results.append((response.status, await response.text()))
+        async with self.http.get(f'{self.url}/install/../../etc/passwd') as response: self.assertEqual(response.status, 404)
+        self.assertEqual({r[0] for r in results}, {404})
+        self.assertEqual(len({r[1] for r in results}), 1)
 
-    async def test_wrong_codes_from_one_source_are_limited(self):
+    async def test_wrong_codes_from_one_source_are_limited_by_the_peer_the_board_names(self):
         statuses = []
         for i in range(14):
-            async with self.http.get(f'{self.url}/install/{"B" * 43}/install.sh') as response: statuses.append(response.status)
+            async with self.http.get(f'{self.url}/install/{str(uuid.UUID(int=7, version=4))}/agent-worker', headers={'X-Relay-Client': '10.1.1.1'}) as response: statuses.append(response.status)
         self.assertEqual(statuses[:10], [404] * 10)
         self.assertEqual(set(statuses[10:]), {429})
+        async with self.http.get(f'{self.url}/install/{str(uuid.UUID(int=7, version=4))}/agent-worker', headers={'X-Relay-Client': '10.2.2.2'}) as response: self.assertEqual(response.status, 404)
 
     async def test_progress_is_recorded_and_failures_show_their_reason(self):
         record = self.make()
-        async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'python', 'state': 'running'}) as response: self.assertEqual(response.status, 204)
-        self.assertEqual(install.view(install.read_record(record['code']))['step'], 'python')
-        async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'npm', 'state': 'failed', 'message': 'npm could not reach the registry'}) as response: self.assertEqual(response.status, 204)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'service', 'state': 'running'}) as response: self.assertEqual(response.status, 204)
+        self.assertEqual(install.view(install.read_record(record['code']))['step'], 'service')
+        async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'check', 'state': 'failed', 'message': 'A worker is already installed on this PC'}) as response: self.assertEqual(response.status, 204)
         shown = install.view(install.read_record(record['code']))
-        self.assertEqual((shown['step'], shown['error']), ('npm', 'npm could not reach the registry'))
+        self.assertEqual((shown['step'], shown['error']), ('check', 'A worker is already installed on this PC'))
         async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'bogus'}) as response: self.assertEqual(response.status, 400)
 
-    async def test_completion_registers_the_pc_once_and_burns_the_link(self):
+    async def test_completion_registers_the_pc_by_its_uuid_once_and_burns_the_link(self):
         from flowkit.fleet_registry import _read
         record = self.make()
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'hostname': 'PC-1'}) as response:
+        self.assertEqual((await self.claim(record))[0], 200)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET, 'hostname': 'PC-1'}) as response:
             self.assertEqual((response.status, await response.json()), (200, {'ok': True, 'id': 'build-pc'}))
-        self.assertTrue(any(w['id'] == 'build-pc' for w in _read()))
+        worker = next(w for w in _read() if w['id'] == 'build-pc')
+        self.assertEqual(worker['uuid'], record['code'])
         shown = install.view(install.read_record(record['code']))
-        self.assertEqual((shown['state'], shown['hostname']), ('registered', 'PC-1'))
-        for path in ('install.sh', 'install.ps1', 'bundle.tgz'):  # the link is dead for everything but the status
-            async with self.http.get(f'{self.url}/install/{record["code"]}/{path}') as response: self.assertEqual(response.status, 404)
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': 'q' * 40}) as response: self.assertEqual(response.status, 404)
+        self.assertEqual((shown['state'], shown['hostname'], shown['uuid']), ('registered', 'PC-1', record['code']))
+        async with self.http.get(f'{self.url}/install/{record["code"]}/agent-worker') as response: self.assertEqual(response.status, 404)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/claim', json=claim_body()) as response: self.assertEqual(response.status, 404)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': 'q' * 40, 'claim': SECRET}) as response: self.assertEqual(response.status, 404)
         self.assertEqual(len([w for w in _read() if w['id'] == 'build-pc']), 1)
+
+    async def test_a_registration_from_a_pc_that_did_not_claim_the_link_is_refused(self):
+        record = self.make()
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET}) as response:
+            self.assertEqual(response.status, 409)  # nobody has claimed it
+        self.assertEqual((await self.claim(record))[0], 200)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': 'someone-elses-secret-0123456789abcdef'}) as response:
+            self.assertEqual(response.status, 409)
+            self.assertIn('claimed by a different PC', (await response.json())['error'])
 
     async def test_a_bad_token_is_refused_and_the_link_stays_usable(self):
         record = self.make()
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': 'weak'}) as response: self.assertEqual(response.status, 409)
+        await self.claim(record)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': 'weak', 'claim': SECRET}) as response: self.assertEqual(response.status, 409)
         self.assertEqual(install.view(install.read_record(record['code']))['state'], 'pending')
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN}) as response: self.assertEqual(response.status, 200)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET}) as response: self.assertEqual(response.status, 200)
 
-    async def test_state_reports_connection_through_the_relay(self):
+    async def test_state_reports_connection_through_the_relay_by_uuid(self):
         record = self.make()
+        await self.claim(record)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET}) as response: self.assertEqual(response.status, 200)
         async with self.http.get(f'{self.url}/install/{record["code"]}/state') as response: self.assertFalse((await response.json())['connected'])
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN}) as response: self.assertEqual(response.status, 200)
-        relay = self.server.app['relay']
-        relay.peer('build-pc').last_poll = time.monotonic()
-        async with self.http.get(f'{self.url}/install/{record["code"]}/state') as response:
-            body = await response.json()
-        self.assertEqual((body['state'], body['connected']), ('registered', True))
+        self.server.app['relay'].peer(record['code']).last_poll = time.monotonic()
+        async with self.http.get(f'{self.url}/install/{record["code"]}/state') as response: body = await response.json()
+        self.assertEqual((body['state'], body['connected'], body['uuid']), ('registered', True, record['code']))
         self.assertNotIn(GOOD_TOKEN, json.dumps(body))
+
+
+class BundleTests(unittest.TestCase):
+    """The Python worker bundle (the legacy install path and the test oracle's reference)."""
+    def names(self):
+        with tarfile.open(fileobj=io.BytesIO(install.build_bundle()), mode='r:gz') as archive: return archive.getnames()
+
+    def test_the_bundle_has_what_a_python_pc_needs_and_nothing_else(self):
+        names = self.names()
+        for needed in ('agents/flow_execution_worker.py', 'agents/worker_runner.py', 'agents/relay_connector.py', 'agents/requirements-worker.txt', 'agents/flowkit/worker_service.py'):
+            self.assertIn(needed, names)
+        for name in names:
+            self.assertFalse(re.search(r'(^|/)(\.venv|node_modules|runtime|tests|__pycache__|\.env|workers\.local)', name), name)
+        self.assertNotIn('agents/flow_host.py', names)
+
+    def test_worker_requirements_match_the_pinned_requirements(self):
+        def pins(path):
+            return {l.split('==')[0].lower(): l.split('==')[1] for l in (ROOT/'agents'/path).read_text().splitlines() if '==' in l and not l.startswith('#')}
+        worker, full = pins('requirements-worker.txt'), pins('requirements.txt')
+        for name, version in worker.items(): self.assertEqual(full.get(name), version, name)
 
 
 if __name__ == '__main__':

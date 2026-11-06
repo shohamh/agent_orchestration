@@ -51,11 +51,11 @@ def write_state(data):
 
 # --------------------------------------------------------------------------- fleet target
 def start_fleet_update():
-    """Make the current bundle the fleet's target; connected PCs update within seconds, others when they connect."""
-    version = install.bundle_version()
+    """Make the server's current workers the fleet's target; connected PCs update within seconds, others when they connect."""
+    versions = {name: install.binary_version(name) for name in install.TARGETS}
     state = read_state()
-    if state.get('target') != version:
-        state = {'target': version, 'auto': True, 'started_at': time.time()}
+    if state.get('targets') != versions:
+        state = {'targets': versions, 'auto': True, 'started_at': time.time()}
     else:
         state.update(auto=True)
     write_state(state)
@@ -69,18 +69,19 @@ def stop_fleet_update():
     return state
 
 
-def target():
-    """The version PCs are being brought to, or None when no fleet update is active."""
+def target(os_name):
+    """The version PCs of this OS are being brought to, or None when no fleet update is active."""
     state = read_state()
-    return state.get('target') if state.get('auto') else None
+    return (state.get('targets') or {}).get(os_name) if state.get('auto') else None
 
 
 # --------------------------------------------------------------------------- links for PCs that are down
 def create_link(worker_id, os_name):
     if not install.NAME.match(str(worker_id)): raise install.InstallError('Unknown PC')
     if os_name not in install.OSES: raise install.InstallError("Choose the PC's operating system")
+    if install.binary_path(os_name) is None: raise install.InstallError(f'This server has no worker program for {os_name} yet')
     record = {'code': secrets.token_urlsafe(32), 'id': worker_id, 'os': os_name, 'state': 'pending', 'created_at': time.time(),
-              'expires_at': time.time() + LINK_VALID_SECONDS, 'version': install.bundle_version()}
+              'expires_at': time.time() + LINK_VALID_SECONDS, 'version': install.binary_version(os_name)}
     links_dir().mkdir(parents=True, exist_ok=True)
     atomic_json(links_dir() / f"{record['code']}.json", record)
     return record
@@ -93,21 +94,14 @@ def read_link(code):
 
 
 def link_commands(record, server):
-    base = f'{server.rstrip("/")}/update/{record["code"]}'
-    return {'powershell': f"irm '{base}/update.ps1' | iex",
-            'cmd': f"powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm '{base}/update.ps1' | iex\"",
-            'bash': f"curl -fsSL '{base}/update.sh' | bash",
+    """For a PC that cannot update itself (it was down, or its installed program is too old): download the new worker
+    program and let it install itself over the old one. `agent-worker update` does the same from an installed worker."""
+    origin = server.rstrip("/")
+    link = f'{origin}/update/{record["code"]}/agent-worker'
+    return {'powershell': f"$f = Join-Path $env:TEMP 'agent-worker-update.exe'; iwr -UseBasicParsing '{link}' -OutFile $f; & $f update --server '{origin}' --code '{record['code']}' --force",
+            'cmd': f'curl.exe -fsSL "{link}" -o "%TEMP%\\agent-worker-update.exe" && "%TEMP%\\agent-worker-update.exe" update --server "{origin}" --code "{record["code"]}" --force',
+            'bash': f"f=$(mktemp) && curl -fsSL '{link}' -o \"$f\" && chmod +x \"$f\" && \"$f\" update --server '{origin}' --code '{record['code']}' --force",
             'local': 'agent-worker update'}
-
-
-def render_link_script(kind, record, server):
-    name = 'update.ps1' if kind == 'ps1' else 'update.sh'
-    quote = install.ps_quote if kind == 'ps1' else install.sh_quote
-    text = (TEMPLATES / name).read_text(encoding='utf-8')
-    for key, value in {'SERVER': server.rstrip('/'), 'CODE': record['code'], 'NAME': record['id'], 'VERSION': record['version']}.items():
-        text = text.replace(f'@@{key}@@', quote(value))
-    text = text.replace('\r\n', '\n')
-    return text.replace('\n', '\r\n') if kind == 'ps1' else text
 
 
 # --------------------------------------------------------------------------- routes
@@ -124,28 +118,39 @@ def authorized_pc(request):
         raise web.HTTPUnauthorized(text=json.dumps({'error': 'Unauthorized'}), content_type='application/json')
 
 
+def requested_os(request):
+    name = request.query.get('os', '')
+    if name not in install.TARGETS or request.query.get('arch', 'x86_64') != 'x86_64':
+        raise web.HTTPBadRequest(text=json.dumps({'error': 'Only x86_64 workers for windows and linux are built'}), content_type='application/json')
+    return name
+
+
 async def pc_version(request):
     authorized_pc(request)
-    return web.json_response({'version': await asyncio.to_thread(install.bundle_version)})
+    return web.json_response({'version': await asyncio.to_thread(install.binary_version, requested_os(request))})
 
 
-async def pc_bundle(request):
+async def pc_binary(request):
     authorized_pc(request)
-    data = await asyncio.to_thread(install.build_bundle)
-    return web.Response(body=data, content_type='application/gzip', headers={'X-Worker-Version': await asyncio.to_thread(install.bundle_version), 'Cache-Control': 'no-store'})
+    name = requested_os(request)
+    path = install.binary_path(name)
+    if path is None: raise web.HTTPNotFound(text=json.dumps({'error': f'This server has no worker program for {name} yet'}), content_type='application/json')
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': install.binary_version(name), 'Cache-Control': 'no-store'})
 
 
 async def pc_deregister(request):
     """`agent-worker uninstall`: the PC asks to be removed from the fleet, authenticated by its own token."""
     authorized_pc(request)
-    worker_id = request.match_info['id']
-    from .fleet_registry import _locked, delete_worker
+    key = request.match_info['id']
+    from .fleet_registry import _read, delete_worker, relay_key
     def remove():
-        try: delete_worker(worker_id)
+        name = next((w['id'] for w in _read() if relay_key(w) == key), None)
+        if name is None: return False
+        try: delete_worker(name)
         except ValueError: return False
         return True
     removed = await asyncio.to_thread(remove)
-    peer = request.app['relay'].peers.pop(worker_id, None)
+    peer = request.app['relay'].peers.pop(key, None)
     if peer is not None:
         for call in list(peer.pending): call.closed = True
     return web.json_response({'removed': removed})
@@ -159,15 +164,11 @@ async def link_record(request):
     raise web.HTTPNotFound(text=json.dumps({'error': 'This update link is unknown, expired or already used. Create a new one in the Fleet tab.'}), content_type='application/json')
 
 
-async def link_script(request):
+async def link_binary(request):
     record = await link_record(request)
-    return web.Response(text=render_link_script('ps1' if request.match_info['kind'] == 'ps1' else 'sh', record, server_for(request)), content_type='text/plain', charset='utf-8', headers={'Cache-Control': 'no-store'})
-
-
-async def link_bundle(request):
-    record = await link_record(request)
-    data = await asyncio.to_thread(install.build_bundle)
-    return web.Response(body=data, content_type='application/gzip', headers={'X-Worker-Version': record['version'], 'Cache-Control': 'no-store'})
+    path = install.binary_path(record['os'])
+    if path is None: raise web.HTTPNotFound(text=json.dumps({'error': f"This server has no worker program for {record['os']} yet"}), content_type='application/json')
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': install.binary_version(record['os']), 'Cache-Control': 'no-store'})
 
 
 async def link_done(request):
@@ -182,7 +183,7 @@ async def link_done(request):
 # --------------------------------------------------------------------------- auto update from the relay
 def on_status(app, worker_id, status):
     """Called by the relay when a PC pushes its status: tell it to update if the fleet target says so."""
-    goal = target()
+    goal = target(status.get('worker_os'))
     if not goal: return
     version = str(status.get('worker_version') or '')
     peer = app['relay'].peer(worker_id)
@@ -199,31 +200,30 @@ def on_status(app, worker_id, status):
 def add_routes(app):
     from .relay import Relay  # noqa: F401  (the relay app must exist)
     app.router.add_get('/relay/{id}/update/version', pc_version)
-    app.router.add_get('/relay/{id}/update/bundle.tgz', pc_bundle)
+    app.router.add_get('/relay/{id}/update/binary', pc_binary)
     app.router.add_delete('/relay/{id}/registration', pc_deregister)
-    app.router.add_get('/update/{code}/update.{kind:ps1|sh}', link_script)
-    app.router.add_get('/update/{code}/bundle.tgz', link_bundle)
+    app.router.add_get('/update/{code}/agent-worker', link_binary)
     app.router.add_post('/update/{code}/done', link_done)
     app['on_status'] = on_status
 
 
 def view(relay_state):
     """The fleet's update picture: the target and, per relayed PC, its version and what happens next."""
-    from .fleet_registry import _read
+    from .fleet_registry import _read, relay_key
     from .relay import is_relayed
     goal = read_state()
-    latest = install.bundle_version()
+    latest = {name: install.binary_version(name) for name in install.TARGETS}
     out = []
     for worker in _read():
         if not is_relayed(worker.get('url')): continue
-        live = (relay_state or {}).get(worker['id'], {})
+        live = (relay_state or {}).get(relay_key(worker), {})
         version = live.get('version')
         online = bool(live.get('online'))
-        if version == latest: status = 'up_to_date'
+        if version and version == latest.get(live.get('os')): status = 'up_to_date'
         elif live.get('update_state') == 'running': status = 'updating'
         elif live.get('update_state') == 'failed': status = 'failed'
         elif not online: status = 'waiting' if goal.get('auto') else 'offline'
         elif goal.get('auto'): status = 'failed' if live.get('attempts', 0) >= MAX_ATTEMPTS else 'updating'
         else: status = 'outdated'
-        out.append({'id': worker['id'], 'version': version, 'online': online, 'status': status, 'error': live.get('update_error')})
+        out.append({'id': worker['id'], 'version': version, 'os': live.get('os'), 'online': online, 'status': status, 'error': live.get('update_error')})
     return {'latest': latest, 'auto': bool(goal.get('auto')), 'started_at': goal.get('started_at'), 'workers': out}

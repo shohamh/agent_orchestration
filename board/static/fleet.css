@@ -126,3 +126,14 @@ dialog.fl-dialog[open] { display: flex; flex-direction: column; }
 .fl-install-result { max-width: 760px; }
 .fl-warning:empty { display: none; }
 .fl-form-body .fl-tag-input { width: 100%; box-sizing: border-box; }
+
+/* Worker updates */
+.fl-uuid { display: block; color: var(--muted); font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.fl-version { margin: 0; font-size: 12px; }
+.fl-version.fl-ok { color: var(--ok); } .fl-version.fl-warn, .fl-version.fl-wait { color: var(--warn); } .fl-version.fl-error { color: var(--danger); }
+.fl-update-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.fl-update-row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+.fl-update-name { font-weight: 600; } .fl-update-version { color: var(--muted); font-size: 12px; }
+.fl-update-row.fl-ok .fl-update-state { color: var(--ok); } .fl-update-row.fl-error .fl-update-state { color: var(--danger); }
+.fl-update-row.fl-warn .fl-update-state, .fl-update-row.fl-wait .fl-update-state { color: var(--warn); }
+.fl-update-link { margin-top: 8px; }

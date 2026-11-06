@@ -564,7 +564,7 @@ async def workers_list(request: web.Request) -> web.Response:
 # endpoint, a token name or a token, whatever a flow host version returns.
 SYSTEM_ENGINES = {'hatchet': 'hatchet', 'prefect': 'prefect', 'trigger-dev': 'trigger', 'trigger': 'trigger'}
 FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
-PUBLIC_WORKER = {'id', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
+PUBLIC_WORKER = {'id', 'uuid', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
                  'status', 'hostname', 'active', 'warnings'}
 PUBLIC_CAPACITY = {'state', 'reason', 'cpu_percent', 'ram_percent', 'sample_age_seconds', 'window_seconds', 'ram_basis',
                    'leases', 'settings'}
@@ -644,6 +644,26 @@ async def fleet_update(request: web.Request) -> web.Response:
 
 
 INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server'}
+
+
+async def fleet_updates(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].fleet_updates())
+
+
+async def fleet_update_start(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].start_fleet_update())
+
+
+async def fleet_update_stop(request: web.Request) -> web.Response:
+    return passed_through(await request.app['flow_host'].stop_fleet_update())
+
+
+async def fleet_update_link(request: web.Request) -> web.Response:
+    body = await json_object(request)
+    unknown = set(body) - {'worker', 'os', 'server'}
+    if unknown:
+        raise ValueError('unknown update link fields: ' + ', '.join(sorted(unknown)))
+    return passed_through(await request.app['flow_host'].update_link(body))
 
 
 async def fleet_installs(request: web.Request) -> web.Response:
@@ -891,6 +911,10 @@ def make_app() -> web.Application:
     app.router.add_get('/api/fleet/metrics', fleet_metrics)
     app.router.add_get('/api/fleet/tags', fleet_tags)
     app.router.add_post('/api/fleet/tags', fleet_add_tag)
+    app.router.add_get('/api/fleet/updates', fleet_updates)
+    app.router.add_post('/api/fleet/updates', fleet_update_start)
+    app.router.add_delete('/api/fleet/updates', fleet_update_stop)
+    app.router.add_post('/api/fleet/updates/link', fleet_update_link)
     app.router.add_get('/api/fleet/installs', fleet_installs)
     app.router.add_post('/api/fleet/installs', fleet_install_create)
     app.router.add_delete('/api/fleet/installs/{code}', fleet_install_cancel)

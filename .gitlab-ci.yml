@@ -1,0 +1,96 @@
+# Builds the agent-worker program (one static binary per OS), tests it and, for a tag worker-vX.Y.Z, publishes a release.
+# The GitHub workflow (.github/workflows/worker-release.yml) runs the same scripts in worker/ci/ and does the same.
+#
+# Runners: the Linux jobs run on any Docker runner. The Windows job needs a Windows runner with Rust and the MSVC build
+# tools: on GitLab.com it uses the shared Windows runner; on a self-managed instance set WINDOWS_RUNNER_TAG to the tag of
+# your own Windows runner (a project/group CI variable).
+
+stages: [test, build, release]
+
+variables:
+  WINDOWS_RUNNER_TAG: saas-windows-medium-amd64
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+
+.worker-rules: &worker-rules
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^worker-v/
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: ['worker/**/*', '.gitlab-ci.yml']
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: ['worker/**/*', '.gitlab-ci.yml']
+
+worker:test:linux:
+  stage: test
+  image: rust:alpine
+  <<: *worker-rules
+  before_script: [apk add --no-cache build-base git]
+  script:
+    - cd worker && cargo test --locked
+  cache:
+    key: worker-cargo-linux
+    paths: [.cargo-home/registry, worker/target]
+
+worker:test:windows:
+  stage: test
+  tags: [$WINDOWS_RUNNER_TAG]
+  <<: *worker-rules
+  script:
+    - cd worker
+    - cargo test --locked
+
+worker:build:linux:
+  stage: build
+  image: rust:alpine   # musl by default: the build is one static binary
+  <<: *worker-rules
+  before_script: [apk add --no-cache build-base git file]
+  script:
+    - sh worker/ci/build.sh
+  artifacts:
+    paths: [dist/worker/agent-worker-x86_64-unknown-linux-musl, dist/worker/agent-worker-x86_64-unknown-linux-musl.sha256]
+    expire_in: 30 days
+  cache:
+    key: worker-cargo-linux
+    paths: [.cargo-home/registry, worker/target]
+
+worker:build:windows:
+  stage: build
+  tags: [$WINDOWS_RUNNER_TAG]
+  <<: *worker-rules
+  script:
+    - pwsh worker/ci/build.ps1
+  artifacts:
+    paths: [dist/worker/agent-worker-x86_64-pc-windows-msvc.exe, dist/worker/agent-worker-x86_64-pc-windows-msvc.exe.sha256]
+    expire_in: 30 days
+
+worker:release:
+  stage: release
+  image: alpine:latest
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^worker-v/
+  needs: ["worker:build:linux", "worker:build:windows"]
+  before_script: [apk add --no-cache curl coreutils]
+  script:
+    - sh worker/ci/check-version.sh "$CI_COMMIT_TAG"
+    - sh worker/ci/release-assets.sh dist/release
+    # Upload to the project's generic package registry; the release links to these files.
+    - |
+      VERSION="${CI_COMMIT_TAG#worker-v}"
+      for f in dist/release/*; do
+        curl --fail --silent --show-error --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/$VERSION/$(basename "$f")"
+      done
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: agent-worker $CI_COMMIT_TAG
+    description: "The agent-worker program for Windows x86_64 and Linux x86_64 (static). Install it from the Fleet tab; the coordinator serves these files (see worker/ci/fetch-release.sh)."
+    assets:
+      links:
+        - name: agent-worker-x86_64-pc-windows-msvc.exe
+          url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/${CI_COMMIT_TAG#worker-v}/agent-worker-x86_64-pc-windows-msvc.exe
+          link_type: package
+        - name: agent-worker-x86_64-unknown-linux-musl
+          url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/${CI_COMMIT_TAG#worker-v}/agent-worker-x86_64-unknown-linux-musl
+          link_type: package
+        - name: SHA256SUMS
+          url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/${CI_COMMIT_TAG#worker-v}/SHA256SUMS
+          link_type: other

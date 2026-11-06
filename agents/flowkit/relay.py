@@ -111,7 +111,7 @@ class Relay:
         for wid, p in self.peers.items():
             status = p.status or {}
             out[wid] = {'online': bool(p.online(now)), 'last_poll_seconds': None if not p.last_poll else round(now - p.last_poll, 1), 'queued': len(p.pending),
-                        'version': status.get('worker_version'), 'update_state': status.get('update_state'), 'update_error': status.get('update_error'),
+                        'version': status.get('worker_version'), 'os': status.get('worker_os'), 'update_state': status.get('update_state'), 'update_error': status.get('update_error'),
                         'attempts': getattr(p, 'update_attempts', 0)}
         return out
 
@@ -119,14 +119,14 @@ class Relay:
 def registry_token_for():
     """Tokens come from the registry's `token_env`, resolved from workers.local.env and the environment."""
     from dotenv import dotenv_values
-    from .fleet_registry import _read, env_path
+    from .fleet_registry import _read, env_path, relay_key
     cache = {'at': 0.0, 'tokens': {}}
     def lookup(worker_id):
         now = time.monotonic()
         if now - cache['at'] > 3.0:
             try:
                 values = {**dotenv_values(env_path()), **os.environ}
-                cache['tokens'] = {w['id']: values.get(w.get('token_env', ''), '') for w in _read()}
+                cache['tokens'] = {relay_key(w): values.get(w.get('token_env', ''), '') for w in _read()}
             except (OSError, ValueError): cache['tokens'] = {}
             cache['at'] = now
         return cache['tokens'].get(worker_id) or None

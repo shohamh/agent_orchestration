@@ -206,6 +206,19 @@
     return { text: `${stepText || record.step}…`, level: 'wait' };
   }
 
+  /* The words for one PC's update state; `link` when its user can use an update command. */
+  function updateStatusText(item) {
+    const states = {
+      up_to_date: { text: 'Up to date', level: 'ok', link: false },
+      updating: { text: 'Updating…', level: 'wait', link: false },
+      waiting: { text: 'Offline: updates when it connects', level: 'wait', link: true },
+      offline: { text: 'Offline', level: 'warn', link: true },
+      outdated: { text: 'Update available', level: 'warn', link: true },
+      failed: { text: `Update failed${item.error ? `: ${item.error}` : ''}`, level: 'error', link: true },
+    };
+    return states[item.status] || { text: 'Unknown', level: 'warn', link: false };
+  }
+
   function minutesLeft(expiresAt, now = Date.now()) {
     return Math.max(0, Math.ceil((expiresAt * 1000 - now) / 60000));
   }
@@ -236,7 +249,7 @@
   // ------------------------------------------------------------------ The tab
   function mount(container, options = {}) {
     const request = options.request || fetchJson;
-    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false, installs: [], installTimer: null };
+    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false, installs: [], installTimer: null, updates: null };
 
     const status = h('p', { class: 'fl-status', role: 'status' });
     // One polite live region for action results and connection changes; metric ticks are not announced.
@@ -251,6 +264,7 @@
       h('div', { class: 'fl-actions' },
         h('button', { type: 'button', class: 'primary', onclick: () => openInstall() }, 'Register PC'),
         h('button', { type: 'button', class: 'secondary', 'data-action': 'advanced', onclick: () => openForm(null) }, 'Register by URL (advanced)'),
+        h('button', { type: 'button', class: 'secondary', 'data-action': 'updates', onclick: () => openUpdates() }, 'Update workers'),
         h('button', { type: 'button', class: 'secondary', onclick: () => load(true) }, 'Reload'),
         h('button', { type: 'button', class: 'secondary', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')),
       status);
@@ -300,18 +314,26 @@
       ];
     }
 
+    function versionLine(worker) {
+      const item = S.updates?.workers?.find((w) => w.id === worker.id);
+      if (!item) return null;
+      const words = updateStatusText(item);
+      return h('p', { class: `fl-version fl-${words.level}`, 'data-version': item.version || '' }, `Worker version ${shortVersion(item.version)} · ${words.text}`);
+    }
+
     function workerNode(worker) {
       const inv = worker.inventory;
       const agents = Object.entries(inv?.agents || {}), commands = Object.entries(inv?.commands || {});
       const offlineNote = !worker.online ? h('p', { class: 'fl-hint' }, 'Capabilities are checked when it connects.') : null;
       return h('article', { class: 'fl-worker', role: 'listitem', 'data-worker': worker.id, 'aria-labelledby': `fl-w-${worker.id}` },
-        h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id),
+        h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id), worker.uuid ? h('small', { class: 'fl-uuid', 'data-uuid': worker.uuid, title: 'Unique id (generated for this PC)' }, worker.uuid) : null,
           h('div', { class: 'fl-worker-actions' },
             h('button', { type: 'button', class: 'secondary', 'data-action': 'edit', onclick: () => openForm(worker) }, 'Edit settings'),
             h('button', { type: 'button', class: 'secondary', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Check installed agents and commands now' : 'The PC must be connected',
               onclick: (e) => refresh(worker.id, e.currentTarget) }, 'Refresh capabilities'))),
         (worker.warnings || []).map((w) => h('p', { class: 'fl-warning' }, `Warning: ${w}`)),
         h('div', { class: 'fl-live-parts' }, liveParts(worker)),
+        versionLine(worker),
         h('dl', { class: 'fl-facts' },
           h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => h('span', { class: 'fl-chip' }, p))),
           h('dt', {}, 'Tags'), h('dd', {}, worker.tags.length ? worker.tags.map((t) => h('span', { class: 'fl-chip' }, t)) : h('span', { class: 'fl-hint' }, 'none')),
@@ -352,6 +374,7 @@
       const first = !S.states.size;
       S.workers = r.data.workers || []; S.tags = r.data.tags || []; S.pools = r.data.pools || [];
       loadInstalls();
+      loadUpdates().then(() => render());
       S.lastFull = S.lastMetrics = Date.now(); S.staleSince = null; stale.hidden = true;
       noteStates(S.workers, first);
       render();
@@ -591,6 +614,81 @@
       idInput.focus();
     }
 
+
+    // ---- worker updates: versions, "update all" and a command for a PC that was down
+    async function loadUpdates() {
+      const r = await request('GET', '/api/fleet/updates');
+      if (r.ok) S.updates = r.data;
+      return r.ok;
+    }
+
+    const shortVersion = (v) => (v ? String(v).slice(0, 8) : 'unknown');
+
+    function updateRow(item, onLink) {
+      const words = updateStatusText(item);
+      return h('li', { class: `fl-update-row fl-${words.level}`, 'data-update': item.id },
+        h('span', { class: 'fl-update-name' }, item.id), ' ',
+        h('span', { class: 'fl-update-version' }, `version ${shortVersion(item.version)}`), ' ',
+        h('span', { class: 'fl-update-state' }, words.text),
+        words.link ? h('button', { type: 'button', class: 'secondary', 'data-action': 'update-link', onclick: () => onLink(item) }, 'Get update command') : null);
+    }
+
+    /* The update view: what each PC runs, update them all, and a command for any PC that cannot update itself. */
+    function openUpdates() {
+      clearTimeout(S.installTimer);
+      S.form = { install: true, updates: true };
+      const summary = h('p', { class: 'fl-hint fl-update-summary', role: 'status' });
+      const listNode = h('ul', { class: 'fl-update-list', 'aria-label': 'Worker versions' });
+      const linkBox = h('div', { class: 'fl-update-link' });
+      const error = h('div', { class: 'fl-form-error', role: 'alert' });
+      const originInput = h('input', { name: 'server', type: 'url', value: typeof location !== 'undefined' && location.origin !== 'null' ? location.origin : '', 'aria-label': 'Address the PC uses to reach this server' });
+
+      const draw = () => {
+        const data = S.updates || { workers: [], latest: {} };
+        const counts = { up_to_date: 0, updating: 0, waiting: 0, failed: 0, outdated: 0, offline: 0 };
+        for (const w of data.workers) counts[w.status] = (counts[w.status] || 0) + 1;
+        summary.textContent = data.workers.length
+          ? `${counts.up_to_date || 0} up to date · ${(counts.updating || 0)} updating · ${(counts.waiting || 0) + (counts.offline || 0)} waiting for the PC to connect · ${(counts.outdated || 0)} outdated · ${(counts.failed || 0)} failed`
+          : 'No PC installed with the one-line command is registered yet.';
+        listNode.replaceChildren(...data.workers.map((w) => updateRow(w, showLink)));
+      };
+
+      async function showLink(item) {
+        error.textContent = '';
+        const os = item.os || (await promptOs());
+        const r = await request('POST', '/api/fleet/updates/link', { worker: item.id, os, server: originInput.value.trim() });
+        if (!r.ok) { error.textContent = errorText(r); return; }
+        const commands = installCommands(os, r.data.commands);
+        linkBox.replaceChildren(h('h4', {}, `Update ${item.id}`), h('p', { class: 'fl-hint' }, `Run on the PC as a normal user. It works once and expires in about ${minutesLeft(r.data.link.expires_at)} min. If the worker is installed and healthy, \`agent-worker update\` does the same.`),
+          ...commands.map((c) => h('section', { class: 'fl-command-block', 'aria-label': c.label }, h('h4', {}, c.label), h('pre', { class: 'fl-code fl-command', 'data-command': c.id, tabindex: '0' }, h('code', {}, c.text)),
+            h('div', { class: 'fl-row' }, h('button', { type: 'button', class: 'secondary', onclick: async (e) => { const ok = await copyText(c.text); e.currentTarget.textContent = ok ? 'Copied' : 'Select the command and copy it'; } }, 'Copy')))));
+      }
+      const promptOs = async () => (typeof window.prompt === 'function' ? (window.prompt('Operating system of this PC (windows or linux)', 'windows') || 'windows').trim().toLowerCase() : 'windows');
+
+      const updateAll = h('button', { type: 'button', class: 'primary', 'data-action': 'update-all', onclick: async () => {
+        error.textContent = '';
+        const r = await request('POST', '/api/fleet/updates');
+        if (!r.ok) { error.textContent = errorText(r); return; }
+        S.updates = r.data; draw(); announce('Fleet update started');
+      } }, 'Update all workers now');
+      const stop = h('button', { type: 'button', class: 'secondary', 'data-action': 'update-stop', onclick: async () => { const r = await request('DELETE', '/api/fleet/updates'); if (r.ok) { S.updates = r.data; draw(); } } }, 'Stop updating');
+      formPanel.replaceChildren(h('div', { class: 'fl-form-body fl-updates' },
+        h('h3', { id: 'fl-form-title' }, 'Worker updates'),
+        h('p', { class: 'fl-hint' }, 'Connected PCs update themselves within seconds: each waits for its running jobs to finish, swaps in the new worker and restarts, and goes back to the previous one if the new one fails. A PC that is down updates when it connects, or run the command below on it.'),
+        summary, listNode, error,
+        h('label', { class: 'fl-field' }, h('span', {}, 'Address the PC uses to reach this server (for the update command)'), originInput),
+        linkBox,
+        h('div', { class: 'fl-row fl-form-actions' }, h('button', { type: 'button', class: 'secondary', onclick: closeForm }, 'Close'), stop, updateAll)));
+      formPanel.hidden = false; list.hidden = true; pending.hidden = true;
+      draw();
+      const tick = async () => {
+        if (!S.form?.updates || !S.open) return;
+        await loadUpdates(); draw();
+        S.installTimer = setTimeout(tick, config.installMs);
+      };
+      tick();
+    }
+
     // ---- direct-URL registration and settings form
     function openForm(worker, preset = {}) {
       const editing = !!worker;
@@ -785,7 +883,7 @@
     };
   }
 
-  const api = { MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -155,6 +155,18 @@ class FlowHost:
     async def update_worker(self, worker_id: str, worker: dict) -> tuple[int, Any]:
         return await self._call('PUT', f'/fleet/workers/{quote(worker_id, safe="")}', worker, timeout=30)
 
+    async def fleet_updates(self) -> tuple[int, Any]:
+        return await self._call('GET', '/fleet/updates', timeout=15)
+
+    async def start_fleet_update(self) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/updates', {}, timeout=30)
+
+    async def stop_fleet_update(self) -> tuple[int, Any]:
+        return await self._call('DELETE', '/fleet/updates', timeout=15)
+
+    async def update_link(self, body: dict) -> tuple[int, Any]:
+        return await self._call('POST', '/fleet/updates/link', body, timeout=15)
+
     async def fleet_installs(self) -> tuple[int, Any]:
         return await self._call('GET', '/fleet/installs', timeout=15)
 

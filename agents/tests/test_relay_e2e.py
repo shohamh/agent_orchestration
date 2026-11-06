@@ -29,7 +29,9 @@ class RelayedPcTests(FleetFixture):
         await super().asyncSetUp()
         self.relay = TestServer(make_relay(install=install.add_routes)); await self.relay.start_server()
         self.addAsyncCleanup(self.relay.close)
-        env = patch.dict(os.environ, {'FLOW_RELAY_LOCAL_URL': f'http://127.0.0.1:{self.relay.port}', 'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env'),
+        binaries = self.root/'binaries'; binaries.mkdir()
+        for name in install.TARGETS.values(): (binaries/name).write_bytes(b'fake worker')  # a link needs a program to hand out
+        env = patch.dict(os.environ, {'FLOW_WORKER_BINARIES': str(binaries), 'FLOW_RELAY_LOCAL_URL': f'http://127.0.0.1:{self.relay.port}', 'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env'),
                                       'FLOW_STATE_DIR': str(self.root/'state')})
         env.start(); self.addCleanup(env.stop)
         for target, value in (('flowkit.relay.ONLINE_WINDOW', 3.0),):
@@ -37,20 +39,23 @@ class RelayedPcTests(FleetFixture):
 
     async def start_pc(self, register=True):
         """A PC: a real execution service on localhost and a connector, registered like a finished install."""
+        self.record = install.create(FORM)
+        self.uuid = self.record['code']  # the install's uuid is the worker's uuid and keys the relay
         self.service = make_app(worker_id='pc-r', root=self.root/'pc-r', slots=1, token=TOKEN)
+        self.service['identity']['uuid'] = self.uuid
         self.local = TestServer(self.service); await self.local.start_server()
         self.addAsyncCleanup(self.local.close)
         if register:
             from flowkit.fleet_registry import delete_worker
-            install.register(install.create(FORM), TOKEN)
+            install.register(self.record, TOKEN)
             delete_worker('local')  # the default entry would point at this machine's real service
         return await self.connect()
 
     async def connect(self):
-        connector = Connector(f'http://127.0.0.1:{self.relay.port}', 'pc-r', TOKEN, self.local.port)
+        connector = Connector(f'http://127.0.0.1:{self.relay.port}', self.uuid, TOKEN, self.local.port)
         task = asyncio.create_task(connector.run())
         self.addAsyncCleanup(self.stop, task)
-        await until(lambda: 'pc-r' in self.relay.app['relay'].peers and self.relay.app['relay'].peers['pc-r'].online(), message='connector online')
+        await until(lambda: self.uuid in self.relay.app['relay'].peers and self.relay.app['relay'].peers[self.uuid].online(), message='connector online')
         return task
 
     async def stop(self, task):
@@ -73,7 +78,7 @@ class RelayedPcTests(FleetFixture):
         from flowkit.distributed import execute_step
         task = await self.start_pc()
         await self.stop(task)
-        await until(lambda: not self.relay.app['relay'].peers['pc-r'].online(), timeout=10, message='offline')
+        await until(lambda: not self.relay.app['relay'].peers[self.uuid].online(), timeout=10, message='offline')
         run = asyncio.create_task(execute_step(parse(FLOW), 'go', {'input': {}, 'steps': {}}, 'offline-run', self.receive, self.sink))
         try:
             await until(lambda: info(self.root, 'offline-run', 'go').get('waiting_reason') == 'offline', message='waiting as offline')
@@ -115,12 +120,14 @@ class RelayedPcTests(FleetFixture):
         patcher = patch.dict(os.environ, env); patcher.start(); self.addCleanup(patcher.stop)
         board = TestServer(board_server.make_app()); await board.start_server(); self.addAsyncCleanup(board.close)
         from flowkit.fleet_registry import delete_worker
+        record = install.create(FORM)
         self.service = make_app(worker_id='pc-r', root=self.root/'pc-r', slots=1, token=TOKEN)
+        self.service['identity']['uuid'] = record['code']
         self.local = TestServer(self.service); await self.local.start_server(); self.addAsyncCleanup(self.local.close)
-        install.register(install.create(FORM), TOKEN); delete_worker('local')
-        connector = Connector(f'http://127.0.0.1:{board.port}', 'pc-r', TOKEN, self.local.port)
+        install.register(record, TOKEN); delete_worker('local')
+        connector = Connector(f'http://127.0.0.1:{board.port}', record['code'], TOKEN, self.local.port)
         task = asyncio.create_task(connector.run()); self.addAsyncCleanup(self.stop, task)
-        await until(lambda: 'pc-r' in self.relay.app['relay'].peers and self.relay.app['relay'].peers['pc-r'].online(), message='connected through the board')
+        await until(lambda: record['code'] in self.relay.app['relay'].peers and self.relay.app['relay'].peers[record['code']].online(), message='connected through the board')
         output = await asyncio.wait_for(execute_step(parse(FLOW), 'go', {'input': {}, 'steps': {}}, 'board-run', self.receive, self.sink), 60)
         self.assertIn('ran through the relay', output['stdout'])
 
@@ -128,6 +135,6 @@ class RelayedPcTests(FleetFixture):
         await self.start_pc()
         self.assertNotIn(TOKEN, (self.root/'workers.yaml').read_text())
         async with aiohttp.ClientSession() as http:
-            async with http.get(f'http://127.0.0.1:{self.relay.port}/w/pc-r/health') as response: self.assertEqual(response.status, 401)
-            async with http.get(f'http://127.0.0.1:{self.relay.port}/w/pc-r/health', headers={'Authorization': f'Bearer {TOKEN}'}) as response:
+            async with http.get(f'http://127.0.0.1:{self.relay.port}/w/{self.uuid}/health') as response: self.assertEqual(response.status, 401)
+            async with http.get(f'http://127.0.0.1:{self.relay.port}/w/{self.uuid}/health', headers={'Authorization': f'Bearer {TOKEN}'}) as response:
                 self.assertEqual((await response.json())['id'], 'pc-r')

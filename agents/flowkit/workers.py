@@ -142,7 +142,7 @@ async def catalog(snapshot=None):
                         return {**public, 'online': False, 'status': 'unauthorized', **pending}
                     data = await response.json()
                     if response.status != 200: raise ValueError('Worker health failed')
-                    if data.get('id') != worker['id']: raise _Mismatch('Worker identity mismatch')
+                    if data.get('id') != worker['id'] or (worker.get('uuid') and data.get('uuid') != worker['uuid']): raise _Mismatch('Worker identity mismatch')
                     # Registry settings are authoritative; legacy worker-reported pool and tags are informational.
                     result = {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True, 'status': 'online',
                               **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {}),

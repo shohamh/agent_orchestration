@@ -446,14 +446,35 @@ def coordinator_states(host: "Host | None") -> dict[str, str]:
     return states
 
 
-def relay_online() -> dict[str, bool]:
-    """Which relayed PCs have a live connector (the relay service answers on loopback); {} when it is down."""
+def relay_state() -> dict[str, dict]:
+    """Per relayed PC (by uuid): online, version, os and update state, as the relay service reports (loopback); {} when it is down."""
     from flowkit.relay import relay_base
     try:
         with urllib.request.urlopen(relay_base().rstrip('/') + '/relay-state', timeout=2) as response:
-            return {k: bool(v.get('online')) for k, v in json.loads(response.read()).items()}
+            return json.loads(response.read())
     except (OSError, ValueError, AttributeError):
         return {}
+
+
+def relay_online() -> dict[str, bool]:
+    """Which relayed PCs have a live connector."""
+    return {k: bool(v.get('online')) for k, v in relay_state().items()}
+
+
+def update_link_for(body: dict) -> dict:
+    """A one-time update link for one PC (for a PC that was down while the fleet updated)."""
+    from flowkit import fleet_registry, install, update
+    name = body.get('worker')
+    worker = next((w for w in fleet_registry.load_fleet() if w['id'] == name), None)
+    if worker is None:
+        raise LookupError(f'Unknown worker {name}')
+    live = relay_state().get(worker.get('uuid') or worker['id'], {})
+    os_name = body.get('os') or live.get('os')
+    if os_name not in install.OSES:
+        raise ValueError("Say which operating system the PC runs (windows or linux): it has not reported one yet")
+    server = install.server_address(body.get('server'))
+    record = update.create_link(name, os_name)
+    return {'link': {'code': record['code'], 'id': name, 'os': os_name, 'expires_at': record['expires_at']}, 'commands': update.link_commands(record, server)}
 
 
 def install_listing() -> list[dict]:
@@ -465,7 +486,7 @@ def install_listing() -> list[dict]:
         if record['state'] == 'cancelled':
             continue
         view = install.view(record)
-        entry = {**view, 'connected': online.get(record['id'], False) if record['state'] == 'registered' else False}
+        entry = {**view, 'connected': online.get(record['code'], False) if record['state'] == 'registered' else False}
         if view['state'] == 'pending':
             entry['commands'] = install.commands(record)
         out.append(entry)
@@ -613,6 +634,19 @@ class Api(BaseHTTPRequestHandler):
                 return self._send(200, {'tags': fleet_registry.tag_catalog()}) or True
             if (method, path) == ('POST', '/fleet/tags'):
                 return self._send(200, {'tags': fleet_registry.add_tag(self._json_body().get('name'))}) or True
+            if (method, path) == ('GET', '/fleet/updates'):
+                from flowkit import update
+                return self._send(200, update.view(relay_state())) or True
+            if (method, path) == ('POST', '/fleet/updates'):
+                from flowkit import update
+                update.start_fleet_update()
+                return self._send(200, update.view(relay_state())) or True
+            if (method, path) == ('DELETE', '/fleet/updates'):
+                from flowkit import update
+                update.stop_fleet_update()
+                return self._send(200, update.view(relay_state())) or True
+            if (method, path) == ('POST', '/fleet/updates/link'):
+                return self._send(200, update_link_for(self._json_body())) or True
             if (method, path) == ('GET', '/fleet/installs'):
                 return self._send(200, {'installs': install_listing()}) or True
             if (method, path) == ('POST', '/fleet/installs'):

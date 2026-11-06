@@ -85,7 +85,7 @@ const result = (status, minutesAgo = 5) => ({ status, checked_at: iso(minutesAgo
 const ENGINES = ['hatchet', 'prefect', 'trigger'];
 let workers, tags, calls, fault, metrics;
 function reset() {
-  installs.clear(); installCount = 0;
+  installs.clear(); installCount = 0; updates.workers = []; updates.auto = false;
   calls = []; fault = { metrics: false };
   tags = ['cuda', 'linux', 'windows'];
   workers = new Map(Object.entries({
@@ -125,12 +125,14 @@ function save(body, existing) {
   return { worker: publicWorker(w), settings_sync: w.online ? { state: 'applied' } : { state: 'pending' } };
 }
 
+const updates = { latest: { windows: 'aaaa1111bbbb2222', linux: 'cccc3333dddd4444' }, auto: false, workers: [] };
 const installs = new Map();
 let installCount = 0;
 const installCommands = (record, origin) => {
-  const link = `${origin}/install/${record.code}`;
-  return { powershell: `irm '${link}/install.ps1' | iex`, cmd: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm '${link}/install.ps1' | iex"`,
-    bash: `curl -fsSL '${link}/install.sh' | bash`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
+  const link = `${origin}/install/${record.code}/agent-worker`;
+  return { powershell: `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing '${link}' -OutFile $f; & $f install ${record.code} --server '${origin}'`,
+    cmd: `curl.exe -fsSL "${link}" -o "%TEMP%\\agent-worker.exe" && "%TEMP%\\agent-worker.exe" install ${record.code} --server "${origin}"`,
+    bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
 const installView = (r) => { const { commands, ...rest } = r; return rest; };
 const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
@@ -181,6 +183,23 @@ const server = http.createServer(async (request, response) => {
       record.state = 'cancelled';
       return json(200, { install: installView(record) });
     }
+    if (url.pathname === '/api/fleet/updates' && request.method === 'GET') return json(200, updates);
+    if (url.pathname === '/api/fleet/updates' && request.method === 'POST') {
+      updates.auto = true;
+      updates.workers = updates.workers.map((w) => (w.status === 'outdated' ? { ...w, status: 'updating' } : w));
+      return json(200, updates);
+    }
+    if (url.pathname === '/api/fleet/updates' && request.method === 'DELETE') { updates.auto = false; return json(200, updates); }
+    if (url.pathname === '/api/fleet/updates/link' && request.method === 'POST') {
+      if (!['windows', 'linux'].includes(body.os)) return json(400, { error: 'Say which operating system the PC runs' });
+      const code = `link${String(updates.workers.length).padStart(40, 'u')}`;
+      const link = `${body.server}/update/${code}/agent-worker`;
+      return json(200, { link: { code, id: body.worker, os: body.os, expires_at: Date.now() / 1000 + 1800 }, commands: {
+        powershell: `$f = Join-Path $env:TEMP 'agent-worker-update.exe'; iwr -UseBasicParsing '${link}' -OutFile $f; & $f update --server '${body.server}' --code '${code}' --force`,
+        cmd: `curl.exe -fsSL "${link}" -o "%TEMP%\\agent-worker-update.exe" && "%TEMP%\\agent-worker-update.exe" update --server "${body.server}" --code "${code}" --force`,
+        bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" update --server '${body.server}' --code '${code}' --force`, local: 'agent-worker update' } });
+    }
+    if (url.pathname === '/__updates' && request.method === 'POST') { updates.workers = body.workers; return json(200, {}); }
     if (url.pathname === '/__install' && request.method === 'POST') {  // test hook: move an install along
       Object.assign(installs.get(body.code), body.set);
       return json(200, {});
@@ -568,7 +587,7 @@ test('install form validation mirrors the server and builds the request only whe
 });
 
 test('install commands: Windows gets PowerShell and cmd, others get bash, and nobody is told to elevate', () => {
-  const commands = { powershell: "irm 'http://s/install/c/install.ps1' | iex", cmd: 'powershell -NoProfile -Command "..."', bash: "curl -fsSL 'http://s/install/c/install.sh' | bash" };
+  const commands = { powershell: "$f = ...; & $f install c --server 'http://s'", cmd: 'curl.exe ... && install c --server "http://s"', bash: "f=$(mktemp) && ... install c --server 'http://s'" };
   assert.deepEqual(Fleet.installCommands('windows', commands).map((c) => c.id), ['powershell', 'cmd']);
   assert.deepEqual(Fleet.installCommands('linux', commands).map((c) => c.id), ['bash']);
   assert.match(Fleet.installCommands('macos', commands)[0].label, /macOS/);
@@ -641,11 +660,11 @@ test('a valid form creates the install link and shows the Windows commands with 
   const sent = lastCall('POST', '/api/fleet/installs').body;
   assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090' });
   const record = [...installs.values()][0];
-  assert.equal(await text('[data-command="powershell"]'), `irm 'http://192.168.1.10:8090/install/${record.code}/install.ps1' | iex`);
-  assert.match(await text('[data-command="cmd"]'), /^powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'http:\/\/192\.168\.1\.10:8090\/install\//);
+  assert.equal(await text('[data-command="powershell"]'), `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing 'http://192.168.1.10:8090/install/${record.code}/agent-worker' -OutFile $f; & $f install ${record.code} --server 'http://192.168.1.10:8090'`);
+  assert.match(await text('[data-command="cmd"]'), /^curl\.exe -fsSL "http:\/\/192\.168\.1\.10:8090\/install\/.+\/agent-worker" -o/);
   assert.equal(await evaluate('document.querySelectorAll(".fl-command").length'), 2);
   assert.match(await text('.fl-elevation'), /Run as a normal user\. Do not use Administrator or sudo/);
-  assert.match(await text('.fl-install-result'), /Python 3\.10\+ and Node\.js 18\+/);
+  assert.match(await text('.fl-install-result'), /downloads the worker from this server/);
   assert.match(await text('.fl-install-expiry'), /works once and expires in about (29|30) min/);
   assert.match(await text('.fl-install-status'), /Waiting for you to run the command/);
   assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
@@ -665,7 +684,7 @@ test('Linux and macOS get one bash command, no cmd variant', async () => {
     await submitInstall();
     await waitFor('document.querySelectorAll(".fl-command").length === 1', `${os} shows one command`);
     assert.match(await text('.fl-command-block h4'), label);
-    assert.match(await text('[data-command="bash"]'), /^curl -fsSL 'http:\/\/192\.168\.1\.10:8090\/install\/.+\/install\.sh' \| bash$/);
+    assert.match(await text('[data-command="bash"]'), /^f=\$\(mktemp\) && curl -fsSL 'http:\/\/192\.168\.1\.10:8090\/install\/.+\/agent-worker' -o "\$f" && chmod \+x "\$f" && "\$f" install .+ --server 'http:\/\/192\.168\.1\.10:8090'$/);
     assert.match(await text('.fl-command-block .fl-hint'), /no sudo/);
     await click('.fl-form-actions button', 'Cancel this install');
     await waitFor('document.querySelector(".fl-form").hidden', 'form closes after cancelling');
@@ -768,6 +787,80 @@ test('phone width: the install form and its command never scroll sideways', asyn
     const style = await evaluate('(() => { const c = getComputedStyle(document.querySelector(".fl-command")); return [c.whiteSpace, c.overflowX, c.overflowWrap]; })()');
     assert.ok(style[0] === 'pre-wrap' || ['auto', 'scroll'].includes(style[1]), `the long command wraps or scrolls inside its box: ${style}`);
     await shot('install-command-phone');
+  } finally {
+    await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  }
+});
+
+
+// ---------------------------------------------------------------- worker updates
+test('update words name each state and say when a command helps', () => {
+  assert.deepEqual(Fleet.updateStatusText({ status: 'up_to_date' }), { text: 'Up to date', level: 'ok', link: false });
+  assert.deepEqual(Fleet.updateStatusText({ status: 'updating' }), { text: 'Updating…', level: 'wait', link: false });
+  assert.deepEqual(Fleet.updateStatusText({ status: 'waiting' }).link, true);
+  assert.match(Fleet.updateStatusText({ status: 'waiting' }).text, /updates when it connects/);
+  assert.equal(Fleet.updateStatusText({ status: 'failed', error: 'disk full' }).text, 'Update failed: disk full');
+  assert.equal(Fleet.updateStatusText({ status: 'outdated' }).text, 'Update available');
+  assert.equal(Fleet.updateStatusText({ status: 'nonsense' }).text, 'Unknown');
+});
+
+test('the worker cards show the name, the generated uuid and the worker version', async () => {
+  reset();
+  workers.get('pc-a').uuid = '11111111-2222-4333-8444-555555555555';
+  updates.workers = [{ id: 'pc-a', version: 'aaaa1111bbbb2222', os: 'windows', online: true, status: 'up_to_date' }];
+  await openFleet();
+  await click('.fl-top button', 'Reload');  // the dialog may still show the previous test's data
+  await waitFor(`document.querySelector('${worker('pc-a')} .fl-uuid')`, 'uuid shown');
+  assert.equal(await text(`${worker('pc-a')} .fl-uuid`), '11111111-2222-4333-8444-555555555555');
+  await waitFor(`/Worker version aaaa1111 · Up to date/.test(document.querySelector('${worker('pc-a')}').textContent)`, 'version line');
+  assert.equal(await evaluate(`!!document.querySelector('${worker('pc-b')} .fl-uuid')`), false, 'a direct-URL PC has no generated uuid');
+  await noSecrets();
+});
+
+test('the update view lists every PC with its state, updates them all and hands out a command for a PC that was down', async () => {
+  reset();
+  updates.auto = false;
+  updates.workers = [
+    { id: 'pc-a', version: 'aaaa1111bbbb2222', os: 'windows', online: true, status: 'up_to_date' },
+    { id: 'pc-b', version: 'old00000old00000', os: 'linux', online: true, status: 'outdated' },
+    { id: 'pc-c', version: null, os: null, online: false, status: 'waiting' },
+    { id: 'pc-d', version: 'old11111old11111', os: 'windows', online: true, status: 'failed', error: 'the new worker did not start' },
+  ];
+  await openFleet();
+  await click('.fl-top button', 'Update workers');
+  await waitFor('document.querySelectorAll(".fl-update-row").length === 4', 'four rows');
+  assert.match(await text('.fl-update-summary'), /1 up to date · 0 updating · 1 waiting for the PC to connect · 1 outdated · 1 failed/);
+  assert.match(await text('[data-update="pc-c"]'), /Offline: updates when it connects/);
+  assert.match(await text('[data-update="pc-d"]'), /Update failed: the new worker did not start/);
+  assert.equal(await evaluate('!!document.querySelector(\'[data-update="pc-a"] button\')'), false, 'an up-to-date PC needs no command');
+  // pc-b reported Linux: the command is for bash
+  await type('.fl-updates input[name="server"]', 'http://192.168.1.10:8090');
+  await click('[data-update="pc-b"] [data-action="update-link"]');
+  await waitFor('document.querySelectorAll(".fl-update-link .fl-command").length === 1', 'bash command shown');
+  const bodies = calls.filter((c) => c.path === '/api/fleet/updates/link').map((c) => c.body);
+  assert.deepEqual(bodies.at(-1), { worker: 'pc-b', os: 'linux', server: 'http://192.168.1.10:8090' });
+  assert.match(await text('.fl-update-link [data-command="bash"]'), /^f=\$\(mktemp\) && curl -fsSL 'http:\/\/192\.168\.1\.10:8090\/update\/.+\/agent-worker'.* update --server 'http:\/\/192\.168\.1\.10:8090' --code '.+' --force$/);
+  assert.match(await text('.fl-update-link'), /agent-worker update/);
+  await click('[data-action="update-all"]');
+  await waitFor('/Updating…/.test(document.querySelector(\'[data-update="pc-b"]\').textContent)', 'pc-b is updating after Update all');
+  assert.equal(lastCall('POST', '/api/fleet/updates').method, 'POST');
+  assert.equal(await evaluate('!!document.querySelector(\'[data-update="pc-b"] button\')'), false, 'a PC that is updating needs no command');
+  await click('[data-action="update-stop"]');
+  assert.equal(lastCall('DELETE', '/api/fleet/updates').method, 'DELETE');
+  await shot('updates-view');
+});
+
+test('phone width: the update view never scrolls sideways', async () => {
+  reset();
+  updates.workers = [{ id: 'a-pc-with-a-rather-long-name-to-check-wrapping', version: 'old00000old00000', os: 'windows', online: false, status: 'waiting' }];
+  await call('Emulation.setDeviceMetricsOverride', { width: 360, height: 740, deviceScaleFactor: 2, mobile: true });
+  try {
+    await openFleet();
+    await click('.fl-top button', 'Update workers');
+    await waitFor('document.querySelectorAll(".fl-update-row").length === 1');
+    await click('[data-action="update-link"]');
+    await waitFor('document.querySelectorAll(".fl-update-link .fl-command").length >= 1');
+    assert.equal(await evaluate('document.documentElement.scrollWidth > innerWidth + 1 || document.querySelector(".fl-body").scrollWidth > document.querySelector(".fl-body").clientWidth + 1'), false);
   } finally {
     await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   }
