@@ -2,3 +2,5 @@
 * text=auto eol=lf
 *.tar binary
 *.whl binary
+# Vendored crates are verified byte for byte by cargo (.cargo-checksum.json).
+worker/vendor/** -text
