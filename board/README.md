@@ -93,6 +93,16 @@ Dragging a step's handle onto empty space offers to add the next step there. Hov
 it connects to. Undo and redo (Ctrl+Z, Ctrl+Y) cover the flow's content, not where steps sit on the canvas. Keyboard:
 the menu key or Shift+F10 opens the same menus.
 
+## Which PC work is on
+
+A card's status comes from its engine, which can't tell that the PC doing the work has gone away. So the board checks the fleet too.
+Work on an offline PC shows **Worker offline**, stops pulsing and leaves the **need you** count, and its session and steering controls
+are disabled until the PC reconnects. **Cancel now** still works, since the engine handles it. A PC the board can't check shows **Connection unknown**. Work on no
+worker runs on the coordinator and isn't affected. A worker that a finished step ran on doesn't count.
+
+Cards, the drawer and each step in a run's graph name their worker. Click a worker for its details, what it runs now and what it has
+run, from the records the flow host keeps (`GET /api/fleet/workers/{id}/jobs`). A run on a board nobody has open appears by run id and can't be opened from there.
+
 ## Finding flows and PCs
 
 The Flows sidebar and the Fleet tab filter with the same words as the board's cards: plain words, `field:value`, `"a phrase"` and

@@ -207,6 +207,9 @@ class FlowHost:
         body = {'step': step, 'worker': worker, **({'flow': self._definition(flow)} if flow is not None else {})}
         return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', body)
 
+    async def worker_jobs(self, worker_id: str) -> tuple[int, Any]:
+        return await self._call("GET", f"/fleet/workers/{quote(worker_id, safe='')}/jobs")
+
     async def mark_cancelled(self, run_id):
         return await self._request('POST', f'/execution/{quote(run_id, safe="")}/cancel', {}, timeout=3)
 

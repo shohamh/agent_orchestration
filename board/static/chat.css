@@ -13,10 +13,10 @@ aside.session-drawer { width: min(700px, 100vw); }
 .session-banner p { font-size: 12px; color: var(--muted); margin: 3px 0 0; }
 .state-dot { width: 8px; height: 8px; background: var(--accent); border-radius: 50%; margin-top: 6px; flex-shrink: 0; box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
 .state-working .state-dot, .state-starting .state-dot, .state-retrying .state-dot { animation: breathe 1.8s ease-in-out infinite; }
-.state-approval .state-dot, .state-question .state-dot, .state-stuck .state-dot, .state-awaiting_input .state-dot { background: var(--warn); }
+.state-approval .state-dot, .state-question .state-dot, .state-stuck .state-dot, .state-awaiting_input .state-dot, .state-offline .state-dot { background: var(--warn); }
 /* The agent is blocked on a person: the same amber as the card on the board. */
 .session-banner { background: transparent; }
-.session-banner.state-approval, .session-banner.state-question, .session-banner.state-stuck, .session-banner.state-awaiting_input { background: color-mix(in srgb, var(--warn) 11%, var(--panel)); border-bottom-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+.session-banner.state-offline, .session-banner.state-approval, .session-banner.state-question, .session-banner.state-stuck, .session-banner.state-awaiting_input { background: color-mix(in srgb, var(--warn) 11%, var(--panel)); border-bottom-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
 .state-done .state-dot { background: var(--ok); }
 .state-stopped .state-dot { background: var(--danger); }
 .simulation-badge { margin-left: auto; flex-shrink: 0; font-size: 9px; letter-spacing: .06em; font-weight: 700; background: var(--panel); border: 1px solid var(--chat-border); border-radius: 5px; padding: 3px 5px; color: var(--muted); }
@@ -178,7 +178,6 @@ aside { top: var(--vv-top, 0); height: var(--vv-height, 100dvh); }
 .chat-empty .spinner.large { display: block; margin: 0 auto 10px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .backend-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-size: 12px; margin-top: 4px; }
-.node-chat { height: min(620px, calc(var(--vv-height, 100dvh) - 140px)); min-height: 220px; overflow: hidden; }
+.node-chat { height: min(480px, calc(var(--vv-height, 100dvh) - 140px)); min-height: 220px; overflow: hidden; }
 .node-chat .chat-log { padding: 14px 8px; }
-.node-panel:has(.node-chat) { position: sticky; bottom: 0; background: var(--panel); }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }

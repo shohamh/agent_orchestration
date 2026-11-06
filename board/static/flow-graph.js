@@ -22,7 +22,10 @@
     agent: 'M26 21v-3M20 21h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H20a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2ZM22.500 26v1.500M29.500 26v1.500',
     program: 'm19 22 5 5.500-5 5.500M26 33h7',
     task: 'M19 20h14v16H19zM22 25h8M22 30h8',
+    flow: 'M20.500 18.500h4a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1ZM28.500 27.500h4a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1ZM22.500 22.500V26a3.500 3.500 0 0 0 3.500 3.500h1.500',
   };
+  // What a step or a card is, drawn the same everywhere. ICON_BOX frames one of them on its own.
+  const ICON_BOX = '18 17 16 16';
   const TOOL_ICONS = { fit: 'M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4' };
   const short = (text, max) => { const t = String(text ?? ''); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
 
@@ -369,7 +372,7 @@
       focus: () => svgEl.focus(), moved: () => touched };
   }
 
-  const api = { NODE_W, NODE_H, GAP_X, GAP_Y, PAD, layers, bounds, autoLayout, mount, short };
+  const api = { NODE_W, NODE_H, GAP_X, GAP_Y, PAD, ICONS, ICON_BOX, layers, bounds, autoLayout, mount, short };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FlowGraph = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -144,6 +144,10 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname.startsWith('/api/fleet')) calls.push({ method: request.method, path: url.pathname, body });
   try {
     if (url.pathname === '/api/fleet' && request.method === 'GET') return json(200, listing());
+    if (/^\/api\/fleet\/workers\/[^/]+\/jobs$/.test(url.pathname)) return json(200, { jobs: [
+      { run: 'run-live', step: 'card', state: 'running', at: Date.now() / 1000, title: 'Live job', system: 'hatchet', board: 'research', column: 'running' },
+      { run: 'run-old', step: 'build', state: 'done', at: Date.now() / 1000 - 90, title: 'Old job', system: 'hatchet', board: 'research', column: 'done' },
+      { run: 'run-gone', step: 'card', state: 'running', at: Date.now() / 1000 - 900 }] });
     if (url.pathname === '/api/fleet/metrics') {
       if (fault.metrics) return json(502, { error: 'The flow host is not reachable' });
       return json(200, { workers: listing().workers.map(({ inventory, ...w }) => w), engines: ENGINES });
@@ -547,6 +551,19 @@ test('the list filters by words and fields; clicking a pool or tag filters by it
     assert.match(await text('.fl-list'), /No PCs match/);
   } finally { await filter(''); }
   assert.deepEqual(await shown(), all);
+});
+
+test('a PC shows what it runs now and has run; a run the board can\'t place can\'t be opened', async () => {
+  await openFleet();
+  await click(`${worker('pc-a')} [data-action="jobs"]`);
+  await waitFor(`document.querySelector('[data-job="run-live"]')`, 'its jobs');
+  assert.match(await text('[data-jobs="current"]'), /Live job/);
+  assert.doesNotMatch(await text('[data-jobs="current"]'), /Old job/);
+  assert.match(await text('[data-jobs="past"]'), /Old job.*build.*done/);
+  assert.match(await text('[data-jobs="current"]'), /Run run-gone/);
+  assert.equal(await evaluate(`document.querySelector('[data-job="run-gone"]').disabled`), true);
+  await click('.fl-back');
+  await waitFor(`document.querySelector('.fl-list').children.length > 0 && !document.querySelector('.fl-worker-detail')`, 'back to the list');
 });
 
 test('manual capability refresh updates results and timestamps; offline PCs explain why they cannot', async () => {

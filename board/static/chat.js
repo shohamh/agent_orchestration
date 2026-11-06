@@ -234,6 +234,10 @@
     stopped: ['Session stopped', 'The run ended. Start a new session to continue.'],
   };
   function stateView(card) {
+    // Its worker can't be reached: nothing here would get through, so don't pretend the session is live.
+    if (card.offline_worker && !['done', 'stopped'].includes(card.column)) {
+      return { state: 'offline', title: `${card.offline_worker} is offline`, hint: "This session can't respond until that PC reconnects.", terminal: true, offline: true, queued: false, actions: [] };
+    }
     const state = card.column === 'stopped' ? 'stopped' : card.column === 'done' ? 'done' : card.session_state || 'starting';
     const [title, hint] = STATES[state] || [state.replaceAll('_', ' '), ''];
     const terminal = ['done', 'stopped'].includes(state);
@@ -562,7 +566,9 @@
         }
         if (event.type === 'error') return h('div', { class: 'transcript-error', role: 'note' }, h('strong', {}, event.will_retry ? 'Retrying after an error' : 'Agent error'), h('div', {}, event.message));
         return h('details', { class: 'tool-row' }, h('summary', {}, 'Agent plan'), codeView(event.entries || event.plan || event, h));
-      })].filter(Boolean) : !session.loaded ? [h('div', { class: 'chat-empty', role: 'status' }, h('span', { class: 'spinner large', 'aria-hidden': 'true' }), h('strong', {}, 'Loading conversation…'))]
+      })].filter(Boolean) : !session.loaded ? [h('div', { class: 'chat-empty', role: 'status' }, session.loadError ? null : h('span', { class: 'spinner large', 'aria-hidden': 'true' }),
+          h('strong', {}, session.loadError ? "Couldn't load this conversation" : 'Loading conversation…'),
+          session.loadError ? h('p', {}, session.loadError) : session.slow ? h('p', {}, 'Still waiting for the engine. It may be busy or unreachable.') : null)]
         : [h('div', { class: 'chat-empty' }, h('div', { class: 'empty-orbit', 'aria-hidden': 'true' }, '✦'), h('strong', {}, 'A new conversation is starting'), h('p', {}, 'Agent messages, tool activity, and requests will appear here.'))]));
       if (focus?.key) {
         const next = Array.from(log.querySelectorAll('[data-chat-focus]')).find(node => node.dataset.chatFocus === focus.key);
@@ -586,12 +592,16 @@
       renderCommands();
       renderSettings(session);
       renderAttachments();
-      text.placeholder = view.terminal ? 'This session has ended.' : view.queued ? 'Queued for the next turn. Ctrl+Enter to send' : 'Give the agent a direction. Ctrl+Enter to send';
+      text.placeholder = view.offline ? `Waiting for ${card.offline_worker} to reconnect` : view.terminal ? 'This session has ended.' : view.queued ? 'Queued for the next turn. Ctrl+Enter to send' : 'Give the agent a direction. Ctrl+Enter to send';
       actions.replaceChildren(...view.actions.map(action => {
         const name = action === 'done' ? 'Mark done' : action === 'continue' ? 'Continue' : 'Interrupt turn';
         const button = h('button', { type: 'button', class: `composer-icon${action === 'done' ? ' finish-session' : ''}`, 'aria-label': name, title: name, onclick: () => post(action === 'continue' ? { type: 'message', text: 'continue' } : { type: action }) }, icon(ICONS[action] || ICONS.interrupt));
         button.disabled = session.sending; return button;
       }));
+      // A conversation that doesn't arrive says so, rather than spinning forever.
+      if (!session.loaded && !session.slowTimer) {
+        session.slowTimer = setTimeout(() => { session.slow = true; if (sessions.get(currentKey) === session && !session.loaded) renderRows(); }, 6000);
+      }
       const nextSignature = `${session.version}|${session.loaded}|${view.state}`;
       if (changed || signature !== nextSignature) {
         signature = nextSignature;
@@ -617,7 +627,7 @@
         const first = message.rows[0]?.key, at = first ? session.rows.findIndex(row => row.key === first) : -1;
         session.rows = at > 0 ? [...session.rows.slice(0, at), ...message.rows] : message.rows;
         if (at <= 0) session.more = message.more;
-        session.truncated = !!message.truncated; session.loaded = true;
+        session.truncated = !!message.truncated; session.loaded = true; session.loadError = null;
       } else {
         const index = new Map(session.rows.map((row, i) => [row.key, i]));
         for (const row of message.rows) {
@@ -630,6 +640,12 @@
       }
       session.version++;
       if (key === currentKey && card) this.render(card, key);
+    },
+    // The engine couldn't give us this conversation.
+    fail(message) {
+      const session = currentKey && sessions.get(currentKey);
+      if (!session || session.loaded) return;
+      session.loadError = message; renderRows();
     },
     focus() { if (!text.disabled) text.focus(); } };
   }

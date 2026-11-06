@@ -32,12 +32,20 @@ const LONG = [...CARDS, ...Array.from({ length: 40 }, (_, i) => ({ id: `long${i}
 const MANY = Array.from({ length: 200 }, (_, i) => ({ id: `m${i}`, title: `Run ${i}`, column: COLUMNS[i % 6], status: 'RUNNING', created_at: ago(900 + i), started_at: ago(900), moves: MOVES }));
 const FLOW_RUN = [{ id: 'run1', title: 'Flow run', task: 'demo', flow: 'demo', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) }];
 const DAG = { model: 'declared', edges: [{ from: 'n-a', to: 'n-b', kind: 'depends' }], nodes: [
-  { id: 'n-a', step: 'a', label: 'a', ref: 'r-a', kind: 'program', column: 'done', status: 'COMPLETED', started_at: ago(800), finished_at: ago(760), restart_supported: true },
+  { id: 'n-a', step: 'a', label: 'a', ref: 'r-a', kind: 'program', column: 'done', status: 'COMPLETED', started_at: ago(800), finished_at: ago(760), restart_supported: true, execution: { state: 'done', worker: { id: 'pc-on', hostname: 'pc-on.lan', pool: 'build', tags: [] } } },
+  { id: 'n-c', step: 'c', label: 'c', kind: 'agent', agent: 'pi', column: 'pending', status: 'PENDING' },
   { id: 'n-b', step: 'b', label: 'b', ref: 'r-b', kind: 'agent', agent: 'codex', column: 'stopped', status: 'FAILED', error: 'Exit code 2', started_at: ago(760), finished_at: ago(700), restart_supported: false, restart_reason: 'No replay here', backend_url: 'http://localhost:1/x' }] };
-const SAVED = { a: { x: 400, y: 30 }, b: { x: 40, y: 200 } };
-const BOARDS = { research: LONG, empty: [], many: MANY, flowrun: FLOW_RUN };
+const SAVED = { a: { x: 400, y: 30 }, b: { x: 40, y: 200 }, c: { x: 400, y: 200 } };
+const KINDS = [{ id: 'k-flow', title: 'A flow', flow: 'mirror-refresh', task: 'mirror-refresh', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800) },
+  { id: 'k-prog', title: 'A program', task: 'research-report', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) }];
+const session = (id, worker) => ({ id, title: id, task: 'agent-session', agent: 'codex', session_state: 'approval', column: 'waiting', status: 'WAITING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'card', id: worker, state: 'running' }] });
+const LINKS = [session('on-live', 'pc-on'), session('on-dead', 'pc-off'), session('on-lost', 'pc-unregistered'),
+  { id: 'run-dead', title: 'run-dead', task: 'x', agent: 'pi', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'main', id: 'pc-off', state: 'running' }] },
+  { id: 'run-ok', title: 'run-ok', task: 'x', agent: 'pi', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'old', id: 'pc-off', state: 'done' }, { step: 'main', id: 'pc-on', state: 'running' }] }];
+const BOARDS = { research: LONG, empty: [], many: MANY, flowrun: FLOW_RUN, kinds: KINDS, links: LINKS };
 
-let holdSnapshot = false;
+let holdSnapshot = false, workersDown = false;
+const WORKERS = [{ id: 'pc-on', pools: ['build'], tags: [], online: true }, { id: 'pc-off', pools: ['build'], tags: [], online: false }];
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const json = (data) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data)); };
@@ -50,8 +58,9 @@ const server = http.createServer((request, response) => {
   }
   if (url.pathname === '/api/flows') return json({ flows: [], broken: {} });
   if (url.pathname.endsWith('/run1/dag')) return json(DAG);
+  if (url.pathname.endsWith('/dag')) return json({ model: 'declared', nodes: [], edges: [] });
   if (url.pathname === '/api/flow-documents/demo') return json({ name: 'demo', layout: { version: 1, positions: SAVED } });
-  if (url.pathname === '/api/workers') return json({ workers: [] });
+  if (url.pathname === '/api/workers') return workersDown ? (response.writeHead(502), response.end('{}')) : json({ workers: WORKERS });
   if (url.pathname.startsWith('/api/')) return json({});
   const file = url.pathname === '/' ? 'index.html' : path.basename(url.pathname);
   const full = path.join(__dirname, file);
@@ -78,7 +87,7 @@ async function waitFor(expression, label = expression) {
 async function openBoard(name) {
   await call('Page.navigate', { url: base });
   await waitFor('document.readyState === "complete"');
-  await evaluate(`localStorage.setItem('boards', '["research","empty","many","flowrun"]'); localStorage.setItem('board', '"${name}"'); localStorage.removeItem('hideFinished')`);
+  await evaluate(`localStorage.setItem('boards', '["research","empty","many","flowrun","kinds","links"]'); localStorage.setItem('board', '"${name}"'); localStorage.removeItem('hideFinished')`);
   await call('Page.navigate', { url: base });
   await waitFor('document.querySelectorAll("#columns .column").length === 6', 'the lanes');
 }
@@ -140,11 +149,29 @@ test('the meta line is short: who, where, position in the queue, and readable ti
   await openBoard('research');
   assert.equal(await cardText('q1', '.source'), 'codex · next up');
   assert.equal(await cardText('q2', '.source'), 'codex · 1 ahead');
-  assert.equal(await cardText('r1', '.source'), 'claude', 'workers are in the hover card');
+  assert.equal(await cardText('r1', '.source'), 'claude · pc-a +1');
   assert.equal(await evaluate(`/limit/.test(document.querySelector('[data-col="queued"]').textContent)`), false, 'queue totals stay in the drawer');
   assert.equal(await cardText('r1', '.when'), '2d 7h');
   assert.equal(await evaluate(`${onCard('r1', '.when')}.getAttribute('aria-label')`), 'Running for 2d 7h');
   assert.equal(await cardText('d1', '.when'), '2d 17h', 'not 3916m');
+});
+
+test('each card shows what it runs, with the same icons as the graph', async () => {
+  await openBoard('research');
+  await waitFor(`document.querySelector('.card[data-id="q1"]')`);
+  const kind = (id) => evaluate(`document.querySelector('.card[data-id="${id}"] .card-kind').getAttribute('aria-label')`);
+  const icon = (id) => evaluate(`document.querySelector('.card[data-id="${id}"] .card-kind path').getAttribute('d')`);
+  assert.equal(await kind('q1'), 'Agent');
+  assert.equal(await icon('q1'), await evaluate('FlowGraph.ICONS.agent'));
+  assert.equal(await kind('w1'), 'Agent', 'a coding session');
+  await openBoard('kinds');
+  await waitFor(`document.querySelector('.card[data-id="k-flow"]')`);
+  assert.equal(await kind('k-flow'), 'Flow');
+  assert.equal(await icon('k-flow'), await evaluate('FlowGraph.ICONS.flow'));
+  assert.equal(await cardText('k-flow', '.source'), 'mirror-refresh', 'the icon says it is a flow');
+  assert.equal(await kind('k-prog'), 'Program');
+  assert.equal(await icon('k-prog'), await evaluate('FlowGraph.ICONS.program'));
+  assert.equal(await evaluate(`document.querySelector('.card[data-id="k-flow"] .card-kind').classList.contains('live')`), true, 'running work pulses');
 });
 
 test('needs-you: the toolbar counts blocked sessions and walks through them, oldest first', async () => {
@@ -171,6 +198,7 @@ test('needs-you: the button is hidden when no one is waiting', async () => {
 test('lanes scroll on their own: the page stays put and each lane keeps its header', async () => {
   await openBoard('research');
   await waitFor(`document.querySelector('.card[data-id="long0"]')`);
+  await sleep(200);
   assert.equal(await evaluate(`document.documentElement.scrollHeight <= innerHeight`), true, 'the page has nothing to scroll');
   const result = await evaluate(`(async () => {
     const lane = document.querySelector('[data-col="done"]'), head = lane.querySelector('h2'), top = head.getBoundingClientRect().top;
@@ -181,6 +209,7 @@ test('lanes scroll on their own: the page stays put and each lane keeps its head
   assert.ok(result.scrolled > 0, 'the lane scrolls');
   assert.equal(result.moved, 0, 'its header stays');
   assert.equal(result.other, 0, 'other lanes do not move');
+  assert.equal(await evaluate(`(() => { renderBoard(); return document.querySelector('[data-col="done"]').scrollTop; })()`), result.scrolled, 'a live update leaves the lane where it was');
   const full = await evaluate(`(() => { const a = document.querySelector('[data-col="scheduled"]').getBoundingClientRect(), b = document.querySelector('[data-col="done"]').getBoundingClientRect(); return a.height === b.height && a.bottom <= innerHeight; })()`);
   assert.equal(full, true, 'an empty lane is as tall as a full one, so it is easy to drop on');
 });
@@ -188,7 +217,9 @@ test('lanes scroll on their own: the page stays put and each lane keeps its head
 test('holding a dragged card at the bottom of a lane scrolls the lane', async () => {
   await openBoard('research');
   await waitFor(`document.querySelector('.card[data-id="q1"]')`);
+  await sleep(200);
   const at = await evaluate(`(() => { const r = document.querySelector('.card[data-id="q1"]').getBoundingClientRect(), lane = document.querySelector('[data-col="queued"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + 10, bottom: lane.bottom - 10 }; })()`);
+  await sleep(200); // the first redraws are over
   // Queued is short, so give it something to scroll.
   await evaluate(`document.querySelector('[data-col="queued"]').append(Object.assign(document.createElement('div'), { id: 'tall', style: 'height:2000px' }))`);
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
@@ -204,6 +235,7 @@ test('holding a dragged card at the bottom of a lane scrolls the lane', async ()
 test('cards measure their real height on small boards, so live updates do not make them jump; big boards skip layout', async () => {
   await openBoard('research');
   await waitFor(`document.querySelector('.card[data-id="q1"]')`);
+  await sleep(200);
   const heights = await evaluate(`(async () => {
     const lane = document.querySelector('[data-col="queued"]'), fresh = lane.querySelector('.card').cloneNode(true);
     lane.append(fresh);
@@ -296,6 +328,7 @@ test('a run shows its flow in the same viewer as the editor, at the saved layout
   await waitFor(`document.querySelector('.card[data-id="run1"]')`);
   await evaluate(`document.querySelector('.card[data-id="run1"]').click()`);
   await waitFor(`document.querySelector('#d-dag .fg-canvas .fg-svg .fg-node[data-step="n-b"]')`, 'the shared viewer in the drawer');
+  await sleep(300); // the drawer has finished sliding in
   // Viewing is shared: the same tools and step faces as the editor.
   assert.equal(await evaluate(`document.querySelectorAll('#d-dag .fg-tools button[aria-label="Zoom in"]').length`), 1);
   assert.equal(await cardlessText('[data-step="n-b"] .label'), 'b');
@@ -319,6 +352,7 @@ test('a run shows its flow in the same viewer as the editor, at the saved layout
   await waitFor(`/Exit code 2/.test(document.getElementById('d-node').textContent)`, 'the step panel');
   assert.equal(await evaluate(`document.querySelector('[data-step="n-b"]').classList.contains('selected')`), true);
   // Hover details come from the run: what happened, not how it's configured.
+  assert.equal(await evaluate(`(() => { const r = document.querySelector('[data-step="n-b"] .box').getBoundingClientRect(); const top = document.elementFromPoint(r.x + 30, r.y + 20); return !!top.closest('[data-step="n-b"]'); })()`), true, 'the step panel never covers the graph');
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
   const a = await evaluate(`(() => { const r = document.querySelector('[data-step="n-b"] .box').getBoundingClientRect(); return { x: r.x + 30, y: r.y + 20 }; })()`);
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a.x, y: a.y });
@@ -331,6 +365,89 @@ test('a run shows its flow in the same viewer as the editor, at the saved layout
   await key('Escape');
   await waitFor(`!document.querySelector('.ctx-menu')`);
   await evaluate(`document.getElementById('d-close').click()`);
+});
+
+test('work on a worker that can\'t be reached is not shown as live', async () => {
+  await openBoard('links');
+  await waitFor(`document.querySelector('.card[data-id="on-dead"] .chip')?.textContent === 'Worker offline'`, 'the offline card');
+  assert.equal(await cardText('on-live', '.chip'), 'Needs approval');
+  assert.equal(await cardText('on-lost', '.chip'), 'Connection unknown', 'not registered: can\'t be checked');
+  assert.equal(await evaluate(`document.querySelector('.card[data-id="run-dead"] .card-kind').classList.contains('live')`), false, 'no pulse');
+  assert.equal(await evaluate(`document.querySelector('.card[data-id="run-ok"] .card-kind').classList.contains('live')`), true, 'an offline PC only matters for steps still on it');
+  assert.equal(await evaluate(`document.querySelector('.card[data-id="on-live"]').classList.contains('needs-you')`), true);
+  assert.equal(await evaluate(`document.querySelector('.card[data-id="on-dead"]').classList.contains('needs-you')`), false, 'nothing you could do would reach it');
+  assert.equal(await evaluate(`document.getElementById('needs-you').textContent`), '2 need you');
+  // Its drawer says so and takes no input; a chip shows the PC and leads to it.
+  await evaluate(`document.querySelector('.card[data-id="on-dead"]').click()`);
+  await waitFor(`/pc-off is offline/.test(document.querySelector('.session-banner')?.textContent || '')`, 'the banner');
+  assert.equal(await evaluate(`document.querySelector('.chat-composer textarea').disabled`), true);
+  assert.match(await evaluate(`document.querySelector('.chat-composer textarea').placeholder`), /Waiting for pc-off to reconnect/);
+  assert.equal(await evaluate(`document.querySelector('#d-state .worker-chip').textContent`), 'pc-off');
+  assert.equal(await evaluate(`document.querySelector('#d-state .worker-chip').classList.contains('offline')`), true);
+  await evaluate(`document.getElementById('d-close').click()`);
+  // An online worker's session stays usable.
+  await evaluate(`document.querySelector('.card[data-id="run-dead"]').click()`);
+  await waitFor(`document.getElementById('d-title').textContent === 'run-dead'`);
+  await evaluate(`document.getElementById('d-close').click()`);
+  await evaluate(`document.querySelector('.card[data-id="on-live"]').click()`);
+  await waitFor(`/Permission needed/.test(document.querySelector('.session-banner')?.textContent || '')`, 'a live session');
+  assert.equal(await evaluate(`document.querySelector('.chat-composer textarea').disabled`), false);
+  await evaluate(`document.getElementById('d-close').click()`);
+});
+
+test('a step shows its worker; a step that has not started says so rather than loading forever', async () => {
+  await openBoard('flowrun');
+  await waitFor(`document.querySelector('.card[data-id="run1"]')`);
+  await evaluate(`document.querySelector('.card[data-id="run1"]').click()`);
+  await waitFor(`document.querySelector('[data-step="n-c"]')`, 'the graph');
+  assert.match(await evaluate(`document.querySelector('[data-step="n-a"] .sub').textContent`), /^pc-on · /);
+  await evaluate(`selectNode('n-a')`);
+  await waitFor(`document.querySelector('#d-node .worker-chip')?.textContent === 'pc-on'`, 'the step panel names its worker');
+  await evaluate(`selectNode('n-c')`);
+  await waitFor(`/hasn't started yet/.test(document.getElementById('d-node').textContent)`, 'the pending step');
+  assert.equal(await evaluate(`document.querySelectorAll('#d-node .spinner').length`), 0);
+  await evaluate(`document.getElementById('d-close').click()`);
+});
+
+test('clicking outside the drawer closes it, but not when switching cards, selecting text or dismissing a menu', async () => {
+  await openBoard('research');
+  await waitFor(`document.querySelector('.card[data-id="q1"]')`);
+  const isOpen = () => evaluate(`document.getElementById('drawer').classList.contains('open')`);
+  const centreOf = (selector) => evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  const press = (type, at, buttons) => call('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', buttons, clickCount: 1 });
+  const leftClick = async (at) => { await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y }); await press('mousePressed', at, 1); await press('mouseReleased', at, 0); await sleep(30); };
+  const lane = await evaluate(`(() => { const r = document.querySelector('[data-col="scheduled"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.bottom - 40 }; })()`);
+  await leftClick(await centreOf('.card[data-id="q1"]'));
+  await waitFor(`document.getElementById('d-title').textContent === 'Queued first'`, 'the drawer opens');
+  // Another card switches to it, and the toolbar's "need you" walks to the next one.
+  await leftClick(await centreOf('.card[data-id="q2"]'));
+  await waitFor(`document.getElementById('d-title').textContent === 'Queued second'`, 'the drawer switches');
+  assert.equal(await isOpen(), true);
+  await leftClick(await centreOf('#needs-you'));
+  assert.equal(await isOpen(), true);
+  await leftClick(await centreOf('.card[data-id="q2"]'));
+  // Clicks inside it, and selecting from inside to outside, leave it open.
+  await leftClick(await centreOf('#d-title'));
+  assert.equal(await isOpen(), true);
+  const title = await centreOf('#d-title');
+  await press('mousePressed', title, 1);
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lane.x, y: lane.y, button: 'left', buttons: 1 });
+  await press('mouseReleased', lane, 0);
+  await sleep(30);
+  assert.equal(await isOpen(), true, 'selecting text and letting go outside');
+  // A right click opens a menu; clicking away closes the menu first, and the drawer only on the next click.
+  await rightClick('[data-col="scheduled"] .empty');
+  assert.equal(await isOpen(), true, 'right click');
+  await leftClick(lane);
+  await waitFor(`!document.querySelector('.ctx-menu')`, 'the menu closes');
+  assert.equal(await isOpen(), true, 'dismissing the menu');
+  // Anywhere else closes it.
+  await leftClick(lane);
+  await waitFor(`!document.getElementById('drawer').classList.contains('open')`, 'the drawer closes');
+  assert.equal(await evaluate(`document.querySelectorAll('.card.is-open').length`), 0);
+  // With nothing open, clicking around does nothing.
+  await leftClick(lane);
+  assert.equal(await isOpen(), false);
 });
 
 test('no uncaught page errors', () => {

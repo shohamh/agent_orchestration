@@ -688,6 +688,10 @@ class Api(BaseHTTPRequestHandler):
             if (method, path) == ('POST', '/fleet/workers'):
                 saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
                 return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
+            jobs = re.fullmatch(r'/fleet/workers/([^/]+)/jobs', path)
+            if jobs and method == 'GET':
+                from flowkit.distributed import worker_jobs
+                return self._send(200, {'jobs': worker_jobs(unquote(jobs[1], errors='strict'))}) or True
             match = re.fullmatch(r'/fleet/workers/([^/]+)(/capabilities/refresh)?', path)
             if match:
                 worker_id = unquote(match[1], errors='strict')

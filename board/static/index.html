@@ -111,6 +111,14 @@
   #board-empty h2 { margin: 0 0 6px; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
   #board-empty p { margin: 0 0 16px; font-size: 13px; color: var(--muted); }
   .show-more { width: 100%; font-size: 12px; }
+  /* A worker: its name and state, and a way to what it runs. */
+  .worker-chip { display: inline-flex; align-items: center; gap: 5px; padding: 0 7px 0 6px; font: inherit; font-size: 12px; line-height: 18px; color: var(--ink); background: var(--chip); border: 0; border-radius: 999px; cursor: pointer; }
+  .worker-chip:hover { color: var(--accent); }
+  .worker-chip::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+  .worker-chip.online::before { background: var(--ok); }
+  .worker-chip.offline::before { background: var(--warn); }
+  .worker-chip.offline { color: var(--warn); }
+  .step-worker { display: inline-flex; align-items: center; gap: 5px; }
   /* Floating layer: overlays.js */
   .tip, .hover-card, .ctx-menu { position: fixed; z-index: 30; margin: 0; }
   .tip { max-width: 300px; padding: 5px 9px; border-radius: var(--r-sm); background: var(--ink); color: var(--bg); font-size: 12px; line-height: 1.4; white-space: pre-line; pointer-events: none; box-shadow: var(--shadow-hover); opacity: 0; transition: opacity .1s ease; }
@@ -157,7 +165,7 @@
     .card:not(.needs-you) .last:not(.is-error) { -webkit-line-clamp: 1; }
     .column[data-col="done"] .card .last { display: none; }
   }
-  .card .meta { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.35; display: flex; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+  .card .meta { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.35; display: flex; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
   .card .meta .source { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   /* On a card the engine link is a corner icon on hover: the card itself already opens on click. */
   .card .backend-link { position: absolute; top: 6px; right: 6px; margin: 0; width: 24px; height: 24px; justify-content: center; gap: 0; font-size: 0; border-radius: var(--r-sm); background: var(--panel); border: 1px solid var(--line); opacity: 0; transition: opacity .12s ease; }
@@ -171,9 +179,13 @@
   .card.needs-you { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
   .card.needs-you:hover { border-color: var(--warn); }
   .card.needs-you::before { content: ""; position: absolute; left: -1px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--warn); }
-  .live-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: live-pulse 1.8s ease-in-out infinite; }
-  @keyframes live-pulse { 50% { opacity: .35; } }
-  @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+  /* What the card runs. Colour repeats the shape: blue for an agent, violet for a flow, gray for a program. */
+  .card-kind { flex: none; display: inline-flex; color: var(--muted); }
+  .card-kind.agent { color: var(--accent); }
+  .card-kind.flow { color: var(--violet); }
+  .card-kind.live { animation: live-pulse 1.8s ease-in-out infinite; }
+  @keyframes live-pulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .card-kind.live { animation: none; } }
   .chip { display: inline-block; font-size: 11px; font-weight: 550; line-height: 16px; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
   .chip.running { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
   .chip.waiting, .chip.attention { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
@@ -616,6 +628,8 @@ function renderBoard() {
   for (const c of cards) if (c.column in total) total[c.column]++;
   for (const c of hits) byColumn[c.column]?.push(c);
   renderedCount = 0;
+  // Lanes are rebuilt on every update; each keeps its place, or live updates would throw you back to the top.
+  const scrolled = new Map([...$("columns").children].map((lane) => [lane.dataset.col, lane.scrollTop]));
   $("columns").replaceChildren(...columns.map((col) => {
     const inCol = byColumn[col], hidden = hideFinished && FINISHED.has(col);
     const shown = hidden ? [] : inCol.sort(columnOrder).slice(0, shownLimit[col] || PAGE);
@@ -629,6 +643,7 @@ function renderBoard() {
     return el("section", { class: shown.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
       el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", { class: "col-count" }, count)), ...shown.map(cardNode), more, note);
   }));
+  for (const lane of $("columns").children) lane.scrollTop = scrolled.get(lane.dataset.col) || 0;
   $("columns").classList.toggle("many", renderedCount > FLIP_MAX);
   if (renderedCount <= FLIP_MAX) flip(before);
   moreObserver?.disconnect();
@@ -866,7 +881,7 @@ function flip(before, except = null) {
 const cardNodes = new WeakMap(); // card -> { face, node }
 function cardNode(card) {
   const when = card.column === "queued" || card.column === "scheduled" ? ago(card.created_at) : card.finished_at ? duration(card) : ago(card.started_at);
-  const face = `${when}|${movingIds.has(card.id)}`;
+  const face = `${when}|${movingIds.has(card.id)}|${connection(card).state}`;
   const known = cardNodes.get(card);
   if (known?.face === face) return known.node;
   const node = renderCard(card, when);
@@ -878,13 +893,16 @@ function cardNode(card) {
 const NEEDS_YOU = { approval: "Needs approval", question: "Has a question", awaiting_review: "Ready for review", awaiting_input: "Needs direction", stuck: "Stuck" };
 const SESSION_LABELS = { starting: "Starting", retrying: "Retrying" };
 const WHEN_LABELS = { scheduled: "Waiting for", queued: "Waiting for", running: "Running for", waiting: "Open for", done: "Took", stopped: "Took" };
-const needsYou = (card) => !FINISHED.has(card.column) && card.session_state in NEEDS_YOU;
+const needsYou = (card) => !FINISHED.has(card.column) && card.session_state in NEEDS_YOU && connection(card).state !== "offline";
 // Engine statuses that only repeat the column a card is already in, so the card doesn't show them.
 const PLAIN_STATUS = { scheduled: ["scheduled"], queued: ["queued", "pending"], running: ["running", "executing"], waiting: ["waiting", "paused"],
   done: ["completed", "completed_successfully", "succeeded", "success", "done"], stopped: [] };
 const statusWords = (status) => { const s = String(status || "").replaceAll("_", " ").toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); };
 
 function stateChip(card) {
+  const link = connection(card);
+  if (link.state === "offline") return el("span", { class: "chip attention", title: `${link.worker} is offline, so this can't be live` }, "Worker offline");
+  if (link.state === "unknown") return el("span", { class: "chip", title: `Can't check ${link.worker}, so this may not be live` }, "Connection unknown");
   if (needsYou(card)) return el("span", { class: "chip attention" }, NEEDS_YOU[card.session_state]);
   if (card.session_state in SESSION_LABELS) return el("span", { class: `chip ${card.column}` }, SESSION_LABELS[card.session_state]);
   if (card.session_state || !card.status || PLAIN_STATUS[card.column]?.includes(card.status.toLowerCase())) return null;
@@ -899,6 +917,17 @@ function queuePosition(card) {
   return [q.ahead == null ? "" : q.ahead === 0 ? "next up" : `${q.ahead} ahead`, q.paused ? "queue PAUSED" : ""].filter(Boolean).join(" · ");
 }
 
+// What a card runs, with the same icons as steps in the graph: a flow, an agent, or a program.
+const cardKind = (card) => (card.flow ? "flow" : card.agent || card.task === "agent-session" || card.task === "steerable-agent" ? "agent" : "program");
+const KIND_WORDS = { flow: "Flow", agent: "Agent", program: "Program" };
+function kindIcon(card) {
+  const kind = cardKind(card);
+  return el("span", { class: `card-kind ${kind}${card.column === "running" && connection(card).state === "live" ? " live" : ""}`, role: "img", "aria-label": KIND_WORDS[kind] },
+    svg("svg", { width: 14, height: 14, viewBox: FlowGraph.ICON_BOX, fill: "none", stroke: "currentColor", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" }, svg("path", { d: FlowGraph.ICONS[kind] })));
+}
+// The icon says it's a flow, so the name needn't.
+const sourceName = (card) => card.flow || (card.agent === "demo" ? "Demo · simulated" : card.agent || card.task);
+
 function renderCard(card, when) {
   const workers = [...new Set((card.workers || []).map((w) => w.id))];
   const whenLabel = WHEN_LABELS[card.column] || "For";
@@ -907,9 +936,10 @@ function renderCard(card, when) {
   const chip = stateChip(card), q = queuePosition(card);
   // What happened most recently; for a failed run, why it failed.
   const detail = (card.column === "stopped" && card.error) || card.last;
-  const name = card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task;
+  const name = sourceName(card);
   // One line: who is doing it and (right-aligned) for how long. Everything else is in the hover card.
-  const who = [name, q].filter(Boolean).join(" · ");
+  const where = workers.length ? `${workers[0]}${workers.length > 1 ? ` +${workers.length - 1}` : ""}` : "";
+  const who = [name, where, q].filter(Boolean).join(" · ");
   return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}${needsYou(card) ? " needs-you" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
       "aria-roledescription": movable ? "draggable card" : "card",
       onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
@@ -918,7 +948,7 @@ function renderCard(card, when) {
     chip ? el("div", { class: "states" }, chip) : null,
     detail ? el("div", { class: `last${detail === card.error ? " is-error" : ""}` }, detail) : null,
     el("div", { class: "meta" },
-      card.column === "running" ? el("span", { class: "live-dot", title: "Running" }) : null,
+      kindIcon(card),
       el("span", { class: "source" }, who),
       when ? el("span", { class: "when", "aria-label": `${whenLabel} ${when}` }, when) : null),
     backendLink(card.backend_url));
@@ -928,12 +958,12 @@ function renderCard(card, when) {
 const cardById = (id) => cards.find((c) => c.id === id);
 function cardDetails(card) {
   const row = (name, value) => (value ? [el("dt", {}, name), el("dd", {}, value)] : []);
-  const workers = (card.workers || []).map((w) => [w.id, w.pool && `pool ${w.pool}`].filter(Boolean).join(" · ")).join("\n");
+  const workers = uniqueWorkers(card).map((id) => `${id} · ${WORKER_WORDS[workerState(id)]}`).join("\n");
   const detail = card.error || card.last;
   const running = WHEN_LABELS[card.column] && (card.finished_at ? duration(card) : card.started_at ? ago(card.started_at) : ago(card.created_at));
   return el("div", {}, el("strong", {}, card.title),
     detail ? el("p", { class: card.error ? "hover-error" : "" }, detail) : null,
-    el("dl", {}, ...row(card.flow ? "Flow" : "Agent", card.flow || (card.agent === "demo" ? "Demo · simulated" : card.agent) || card.task),
+    el("dl", {}, ...row(KIND_WORDS[cardKind(card)], sourceName(card)),
       ...row("Workers", workers), ...row(WHEN_LABELS[card.column]?.replace(" for", "") || "Time", running),
       ...row("Queue", queueText(card)), ...row("Created", AgentChat.localTime(card.created_at))));
 }
@@ -1094,9 +1124,9 @@ new MutationObserver(() => { if (!$("drawer").classList.contains("open")) refres
 function drawerState(card) {
   const session = card.task === "agent-session";
   const chip = session ? null : stateChip(card) || el("span", { class: `chip ${card.column}` }, card.column === "stopped" ? statusWords(card.status) : COLUMN_LABELS[card.column] || statusWords(card.status));
-  const name = card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task;
+  const name = sourceName(card);
   const time = card.finished_at ? (duration(card) && `took ${duration(card)}`) : card.started_at ? `started ${ago(card.started_at)} ago` : card.created_at ? `created ${ago(card.created_at)} ago` : "";
-  return [chip, ...[name, time].filter(Boolean).map((text) => el("span", {}, text))].filter(Boolean);
+  return [chip, kindIcon({ ...card, column: "" }), ...[name, time].filter(Boolean).map((text) => el("span", {}, text)), ...uniqueWorkers(card).map(workerChip)].filter(Boolean);
 }
 
 function renderDrawer() {
@@ -1107,7 +1137,7 @@ function renderDrawer() {
   $("d-chat").hidden = !session;
   $("d-facts-section").hidden = session;
   $("d-progress-section").hidden = session;
-  if (session) chat.render(card, runKey());
+  if (session) chat.render({ ...card, offline_worker: connection(card).state === "offline" ? connection(card).worker : null }, runKey());
   $("d-title").textContent = card.title;
   $("d-state").replaceChildren(...drawerState(card));
   $("d-backend").replaceChildren(...[backendLink(card.backend_url)].filter(Boolean));
@@ -1115,6 +1145,13 @@ function renderDrawer() {
   const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Workers", workers.join("\n")], ["Created", AgentChat.localTime(card.created_at)], ["Started", AgentChat.localTime(card.started_at)], ["Finished", AgentChat.localTime(card.finished_at)]];
   $("d-facts").replaceChildren(...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
   $("d-steer-section").hidden = session || !card.steerable;
+  // Steering and a graceful stop go to the agent, which can't hear them while its PC is away. Cancelling goes to the engine.
+  const away = connection(card).state === "offline" ? connection(card).worker : null;
+  for (const [control, word] of [[$("d-instruction"), "Steer"], [document.querySelector("#d-steer button"), "Send"], [$("d-stop"), "Stop gracefully"]]) {
+    control.disabled = !!away;
+    if (away) control.title = `${word}: ${away} is offline, so the agent can't get this`; else if (control !== $("d-stop")) control.removeAttribute("title");
+  }
+  if (!away) $("d-stop").title = "Ask the agent to finish gracefully after its current step";
   $("d-queue").replaceChildren(queueText(card), ...[backendLink(card.queue?.backend_url)].filter(Boolean));
   const pause = $("d-pause");
   pause.hidden = system !== "trigger" || !card.queue?.id;
@@ -1289,11 +1326,14 @@ async function loadFlowLayout(name) {
   } catch { /* no saved layout: the automatic one is fine */ }
 }
 
+const stepWorkerOf = (n) => n.execution?.worker?.id || cards.find((c) => c.id === openCardId)?.workers?.find((w) => w.step === n.step)?.id || null;
 function runNodeStatus(n) {
+  const worker = stepWorkerOf(n);
+  if (worker && !["done", "stopped"].includes(n.column) && workerState(worker) === "offline") return { placing: false, status: "worker offline", state: "waiting", worker, offline: true };
   // The engine reports a placed step as running while it still waits for a fleet worker.
   const placing = !["done", "stopped"].includes(n.column) && ["queued", "waiting"].includes(n.execution?.state) && !n.execution.worker;
   const status = !placing ? n.status.toLowerCase() : n.execution.intervention_needed ? "intervention needed" : n.execution.state === "waiting" ? "waiting for a worker" : "queued for a worker";
-  return { placing, status, state: placing ? "waiting" : n.column };
+  return { placing, status, state: placing ? "waiting" : n.column, worker };
 }
 
 function renderDag() {
@@ -1317,9 +1357,10 @@ function renderDag() {
   $("d-dag").style.setProperty("--graph-height", `${Math.max(220, height + 72)}px`);
   graph.render({
     nodes: dag.nodes.map((n) => {
-      const { status, state } = runNodeStatus(n);
+      const { status, state, worker } = runNodeStatus(n);
       const took = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
-      return { id: n.id, label: n.label, sub: status + took, kind: n.kind, state, selected: n.id === selectedNode, problem: !!n.error, ariaLabel: `${n.label}: ${status}` };
+      // Which PC each step is on, where that matters more than how long it took.
+      return { id: n.id, label: n.label, sub: worker ? `${worker} · ${status}` : status + took, kind: n.kind, state, selected: n.id === selectedNode, problem: !!n.error, ariaLabel: `${n.label}: ${status}` };
     }),
     edges: edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
     positions, ariaLabel: `Run graph with ${dag.nodes.length} steps. Tab to a step; Enter shows its output and logs.`,
@@ -1346,13 +1387,12 @@ function runGraphCard(target) {
   }
   const n = dag?.nodes.find((x) => x.id === target.id);
   if (!n) return null;
-  const { placing, status } = runNodeStatus(n);
-  const worker = n.execution?.worker;
+  const { placing, status, worker } = runNodeStatus(n);
   const row = (name, value) => (value ? [el("dt", {}, name), el("dd", {}, value)] : []);
   return el("div", {}, el("strong", {}, n.label),
     placing ? el("p", {}, FlowBuilder.executionText(n.execution)) : null,
     n.error ? el("p", { class: "hover-error" }, n.error) : null,
-    el("dl", {}, ...row("Status", status), ...row("Agent", n.agent), ...row("Worker", worker && [worker.id, worker.pool && `pool ${worker.pool}`].filter(Boolean).join(" · ")),
+    el("dl", {}, ...row("Status", status), ...row("Agent", n.agent), ...row("Worker", worker && `${worker} · ${WORKER_WORDS[workerState(worker)]}`),
       ...row("Started", AgentChat.localTime(n.started_at)), ...row("Took", n.started_at && n.finished_at ? secs(n.started_at, n.finished_at) : null)));
 }
 
@@ -1388,6 +1428,7 @@ function secs(a, b) {
 function selectNode(id) {
   selectedNode = selectedNode === id ? null : id;
   renderDag();
+  if (selectedNode) $("d-node").scrollIntoView({ block: "nearest" });
   refreshNodeLogs();
   refresh();
 }
@@ -1456,16 +1497,20 @@ function renderFlowNode(panel, node) {
   restart.disabled = can.disabled;
   restart.title = can.title;
   const header = el("div", { class: "row" }, el("h5", {}, `${node.label} · ${node.kind}`), backendLink(node.backend_url), restart);
-  const actual = node.execution?.worker;
-  header.append(actual ? el('span', {class:'status'}, `Executed by ${actual.id} on ${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}`)
+  const actual = node.execution?.worker, worker = stepWorkerOf(node);
+  header.append(worker ? el('span', {class:'status step-worker', title: actual ? `${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}` : ''}, 'On ', workerChip(worker))
     : node.execution ? FlowBuilder.executionView(node.execution) : el('span', {class:'status'}, 'Execution worker not reported'));
   if (['done','stopped'].includes(card?.column)) header.append(workerPicker('Worker for step restart', restartWorkers.get(key), value => restartWorkers.set(key,value)));
   if (!node.restart_supported && node.restart_reason) header.append(el("p", { class: "status" }, node.restart_reason));
-  if (node.kind === "agent") {
+  if (node.kind === "agent" && !node.ref) {
+    // Nothing to load: the step has no run yet.
+    panel.replaceChildren(header, el("p", { class: "status" }, "This step hasn't started yet."));
+  } else if (node.kind === "agent") {
     // Keep the mounted chat and its focused composer in place across graph refreshes.
     if (panel.dataset.nodeKey !== key) panel.replaceChildren(header, nodeChatRoot);
     else panel.firstChild.replaceWith(header);
-    nodeChat.render({ ...node, agent: node.agent, session_state: nodeStates.get(key) || (node.column === "pending" ? "starting" : "working") }, key);
+    const stepOffline = runNodeStatus(node).offline ? stepWorkerOf(node) : null;
+    nodeChat.render({ ...node, agent: node.agent, offline_worker: stepOffline, session_state: nodeStates.get(key) || (node.column === "pending" ? "starting" : "working") }, key);
   } else {
     panel.replaceChildren(...[header, node.error ? el("pre", {}, node.error) : null,
       node.output != null ? AgentChat.jsonView(node.output, el) : null, nodeLogList].filter(Boolean));
@@ -1573,7 +1618,7 @@ function liveStatus() {
 
 function onLive(message) {
   if (message.type === "feed") { feedLive = message.live; if (columns.length) liveStatus(); return; }
-  if (message.type === "error") { setStatus(message.message, true); return; }
+  if (message.type === "error") { setStatus(message.message, true); chat.fail(message.message); nodeChat.fail(message.message); return; }
   if (message.type === "graph") { if (message.card === openCardId) { if (dag) dag.final = false; refreshDag(); } return; }
   if (message.type === "node-rows") {
     if (message.card !== openCardId || message.node !== selectedStep()?.ref) return;
@@ -1630,8 +1675,41 @@ function renderKindOptions() {
 async function loadFlows() {
   try { flows = (await api("GET", "/api/flows")).flows; } catch (e) { flows = []; setStatus(e.message, true); }
   renderKindOptions();
-  try { executionWorkers = (await api('GET', '/api/workers')).workers; } catch (_) { executionWorkers = []; }
+  await refreshWorkers();
 }
+
+// ---------------------------------------------------------------- Is the work really reachable?
+// A card's status comes from its engine, which can't tell that the PC doing the work has gone away.
+// So work placed on a worker counts as live only while the fleet can reach that worker.
+let workersKnown = false;
+async function refreshWorkers() {
+  const before = JSON.stringify([workersKnown, executionWorkers.map((w) => [w.id, w.online])]);
+  try { executionWorkers = (await api('GET', '/api/workers')).workers; workersKnown = true; }
+  catch (_) { executionWorkers = []; workersKnown = false; }
+  if (columns.length && before !== JSON.stringify([workersKnown, executionWorkers.map((w) => [w.id, w.online])])) {
+    renderSoon();
+    if (openCardId) { renderDrawer(); if (dag) renderDag(); }
+  }
+}
+setInterval(() => { if (!document.hidden) refreshWorkers(); }, 15000);
+const workerState = (id) => { const w = workersKnown ? executionWorkers.find((x) => x.id === id) : null; return !w ? "unknown" : w.online ? "online" : "offline"; };
+const WORKER_WORDS = { online: "online", offline: "offline", unknown: "can't check its state" };
+const UNDERWAY = new Set(["queued", "waiting", "running"]);
+// The worker that keeps a card from being live, if any. A card on no worker runs on the coordinator.
+function connection(card) {
+  if (!["running", "waiting"].includes(card.column)) return { state: "live" };
+  const ids = (card.workers || []).filter((w) => !w.state || UNDERWAY.has(w.state)).map((w) => w.id);
+  const offline = ids.find((id) => workerState(id) === "offline");
+  if (offline) return { state: "offline", worker: offline };
+  const unknown = ids.find((id) => workerState(id) === "unknown");
+  return unknown ? { state: "unknown", worker: unknown } : { state: "live" };
+}
+// A worker's name, its state as a dot, and a click through to what it runs.
+function workerChip(id) {
+  const state = workerState(id);
+  return el("button", { type: "button", class: `worker-chip ${state}`, title: `${id}: ${WORKER_WORDS[state]}\nClick for what it runs and has run`, onclick: (e) => { e.stopPropagation(); openFleet("", id); } }, id);
+}
+const uniqueWorkers = (card) => [...new Set((card.workers || []).map((w) => w.id))];
 
 // A standalone card may run on a fleet worker (Hatchet and Prefect). It then gets a new workspace
 // on that PC, so a host workspace or resumed session rules the selection out.
@@ -1816,15 +1894,38 @@ $("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOv
 flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
 // ---------------------------------------------------------------- Fleet
 const fleetDialog = $("fleet-dialog");
-const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet() });
+const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet(), onOpenJob: (job) => openJob(job) });
 async function closeFleet() { fleet.stop(); if (fleetDialog.open) { fleetDialog.close(); await dropOverlay("fleet"); } }
 // Opens over the flow editor when a step asks to see its workers; closing returns to the editor.
-function openFleet(filter = "") { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open({ filter }); }
+function openFleet(filter = "", worker = null) { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open({ filter, worker }); }
+// From a worker's history to the card: on another backend or board, go there and open it when it arrives.
+async function openJob(job) {
+  await closeFleet();
+  if (flowsDialog.open && !(await closeFlows())) return;
+  if (job.system && (job.system !== system || job.board !== board)) {
+    closeDrawer();
+    system = job.system; store.set("system", system);
+    board = job.board; store.set("board", board);
+    if (!boards.includes(board)) { boards.push(board); store.set("boards", boards); }
+    cards = []; shownLimit = {}; pendingOpen = job.run;
+    renderBoard(); renderHeader(); refresh();
+  } else if (cards.some((c) => c.id === job.run)) openCard(job.run);
+  else pendingOpen = job.run;
+}
 $("fleet-btn").addEventListener("click", () => openFleet());
 // Escape closes an open form first, then the fleet tab.
 fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
 
 $("d-close").addEventListener("click", closeDrawer);
+// A left click outside the drawer closes it. Cards stay out of this, so clicking another card switches
+// to it and dragging one works, and so does "need you", which walks through cards. Checking both press and
+// click means selecting text in the drawer and letting go outside it doesn't close it. The press is seen
+// before the menu closes itself (capture, registered first), so dismissing a menu closes only the menu.
+const outsideDrawer = (node) => openCardId != null && !document.querySelector("dialog[open]")
+  && !!node.closest && !node.closest("#drawer, .card[data-id], #needs-you, .ctx-menu, .tip, .hover-card");
+let pressedOutside = false;
+window.addEventListener("pointerdown", (e) => { pressedOutside = e.button === 0 && outsideDrawer(e.target) && !document.querySelector(".ctx-menu"); }, true);
+document.addEventListener("click", (e) => { if (pressedOutside && outsideDrawer(e.target)) closeDrawer(); pressedOutside = false; });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openCardId && !$("new-dialog").open && !flowsDialog.open && !fleetDialog.open) closeDrawer(); });
 $("d-steer").addEventListener("submit", (e) => { e.preventDefault(); const v = $("d-instruction").value.trim(); if (v) { $("d-instruction").value = ""; act("steer", { instruction: v }); } });
 $("d-stop").addEventListener("click", () => act("stop"));

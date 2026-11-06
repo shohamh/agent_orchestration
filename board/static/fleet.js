@@ -300,7 +300,7 @@
     const pending = h('section', { class: 'fl-installs', 'aria-label': 'PCs being installed', hidden: true });
     const formPanel = h('section', { class: 'fl-form', hidden: true, 'aria-labelledby': 'fl-form-title' });
     // Icons say more on hover; their words stay for screen readers. Field help sits behind an "i".
-    const FL_ICONS = { link: 'M6.500 9.500 9.500 6.500M7 4.500l1-1a3 3 0 0 1 4.500 4.500l-1 1M9 11.500l-1 1A3 3 0 0 1 3.500 8l1-1', update: 'M8 2v8M4.500 6.500 8 10l3.500-3.500M2.500 13.500h11', reload: 'M13 8a5 5 0 1 1-1.500-3.500M13 2v3h-3', edit: 'M10.500 3 13 5.500 6 12.500H3.500V10z', refresh: 'M3 8a5 5 0 0 1 8.500-3.500L13 6M13 2.500V6H9.500M13 8a5 5 0 0 1-8.500 3.500L3 10M3 13.500V10h3.500' };
+    const FL_ICONS = { history: 'M8 4.500V8l2.500 1.500M2.500 8a5.500 5.500 0 1 0 1.700-4M2.500 2.500V5H5', link: 'M6.500 9.500 9.500 6.500M7 4.500l1-1a3 3 0 0 1 4.500 4.500l-1 1M9 11.500l-1 1A3 3 0 0 1 3.500 8l1-1', update: 'M8 2v8M4.500 6.500 8 10l3.500-3.500M2.500 13.500h11', reload: 'M13 8a5 5 0 1 1-1.500-3.500M13 2v3h-3', edit: 'M10.500 3 13 5.500 6 12.500H3.500V10z', refresh: 'M3 8a5 5 0 0 1 8.500-3.500L13 6M13 2.500V6H9.500M13 8a5 5 0 0 1-8.500 3.500L3 10M3 13.500V10h3.500' };
     const flIcon = (name) => {
       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       for (const [k, v] of Object.entries({ width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
@@ -374,11 +374,41 @@
       return h('p', { class: `fl-version fl-${words.level}`, 'data-version': item.version || '' }, `Worker version ${shortVersion(item.version)} · ${words.text}`);
     }
 
+    // ---- one PC: what it is running now, and what it has run
+    const UNDERWAY = new Set(['queued', 'waiting', 'running']);
+    const isCurrent = (job) => UNDERWAY.has(job.state) && !['done', 'stopped'].includes(job.column);
+    function jobRow(job) {
+      const name = job.title || `Run ${job.run.slice(0, 12)}`, step = job.step === 'card' ? '' : job.step;
+      return h('li', {}, h('button', { type: 'button', class: `fl-job fl-job-${isCurrent(job) ? 'current' : job.state || 'unknown'}`, 'data-job': job.run, disabled: !job.system,
+        title: job.system ? `${job.system} / ${job.board}` : 'Not on a board anyone has open, so it can\'t be opened from here', onclick: () => options.onOpenJob?.(job) },
+      h('span', { class: 'fl-job-name' }, name), step ? h('span', { class: 'fl-job-step' }, step) : null,
+      h('span', { class: 'fl-job-state' }, String(job.state || 'unknown').replaceAll('_', ' ')), h('time', { class: 'fl-job-when' }, formatTime(new Date(job.at * 1000).toISOString()))));
+    }
+    async function openWorker(id) {
+      const worker = S.workers.find((w) => w.id === id);
+      S.form = { detail: id };
+      const current = h('ul', { class: 'fl-jobs', 'data-jobs': 'current' }), past = h('ul', { class: 'fl-jobs', 'data-jobs': 'past' });
+      const note = h('p', { class: 'fl-hint', role: 'status' }, 'Loading…');
+      formPanel.replaceChildren(h('div', { class: 'fl-worker-detail' },
+        h('button', { type: 'button', class: 'secondary fl-back', onclick: closeForm }, '← All PCs'),
+        worker ? workerNode(worker) : h('p', { class: 'fl-warning' }, `${id} isn't registered in the fleet any more.`),
+        h('section', {}, h('h3', {}, 'Running now'), current), h('section', {}, h('h3', {}, 'History'), note, past)));
+      formPanel.hidden = false; list.hidden = true; pending.hidden = true;
+      formPanel.parentElement.scrollTop = 0;
+      const r = await request('GET', `/api/fleet/workers/${enc(id)}/jobs`);
+      if (S.form?.detail !== id) return;
+      if (!r.ok) { note.textContent = `Couldn't load its jobs: ${errorText(r)}`; return; }
+      const jobs = r.data.jobs || [];
+      note.textContent = jobs.some((j) => !isCurrent(j)) ? '' : 'Nothing has finished on this PC yet.';
+      current.replaceChildren(...(jobs.some(isCurrent) ? jobs.filter(isCurrent).map(jobRow) : [h('li', { class: 'fl-hint' }, 'Nothing right now.')]));
+      past.replaceChildren(...jobs.filter((j) => !isCurrent(j)).map(jobRow));
+    }
+
     function workerMenu(e, worker) {
       if (!window.Overlays || e.pointerType === 'touch' || e.target.closest('a, input, textarea, select')) return;
       e.preventDefault();
       const act = (name) => () => list.querySelector(`.fl-worker[data-worker="${CSS.escape(worker.id)}"] [data-action="${name}"]`)?.click();
-      window.Overlays.menu(e, [{ label: 'Edit settings', onSelect: act('edit') },
+      window.Overlays.menu(e, [{ label: 'Jobs and history', onSelect: () => openWorker(worker.id) }, { label: 'Edit settings', onSelect: act('edit') },
         { label: 'Refresh capabilities', disabled: !worker.online, title: worker.online ? '' : 'The PC must be connected', onSelect: act('refresh') }, null,
         { label: 'Copy name', disabled: !navigator.clipboard, onSelect: () => navigator.clipboard.writeText(worker.id) }]);
     }
@@ -392,6 +422,7 @@
       return h('article', { class: 'fl-worker', role: 'listitem', 'data-worker': worker.id, 'aria-labelledby': `fl-w-${worker.id}`, oncontextmenu: (e) => workerMenu(e, worker) },
         h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id), worker.uuid ? h('small', { class: 'fl-uuid', 'data-uuid': worker.uuid, title: 'Unique id (generated for this PC)' }, worker.uuid) : null,
           h('div', { class: 'fl-worker-actions' },
+            iconButton('history', 'Jobs and history', { 'data-action': 'jobs', onclick: () => openWorker(worker.id) }),
             iconButton('edit', 'Edit settings', { 'data-action': 'edit', onclick: () => openForm(worker) }),
             h('button', { type: 'button', class: 'secondary fl-icon', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Refresh capabilities: check installed agents and commands now' : 'Refresh capabilities: the PC must be connected',
               onclick: (e) => refresh(worker.id, e.currentTarget) }, flIcon('refresh'), h('span', { class: 'fl-sr' }, 'Refresh capabilities')))),
@@ -957,12 +988,13 @@
 
     return {
       // filter: a query to start from, as when a flow step shows the PCs that can run it.
-      async open({ filter = '' } = {}) {
+      async open({ filter = '', worker = null } = {}) {
         S.open = true;
         closeForm();
         S.filter = filter; filterInput.value = filter;
         say('Loading the fleet…');
         if (await load()) say(`${plural(S.workers.length, 'PC')} registered.`);
+        if (worker) await openWorker(worker);
         schedule();
       },
       // Escape inside the form closes the form first; returns true when the tab may close.
