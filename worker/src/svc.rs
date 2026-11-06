@@ -65,6 +65,8 @@ pub fn run(program: &str, args: &[&str]) -> std::io::Result<(i32, String, String
 }
 
 pub struct Svc {
+    /// restart the worker when it crashes or is killed (the form's choice; on by default)
+    pub auto_restart: bool,
     /// start at boot, before anyone logs in (Windows: a boot trigger; Linux: lingering)
     pub boot: bool,
     pub home: Home,
@@ -75,7 +77,7 @@ pub struct Svc {
 impl Svc {
     pub fn from_config(home: Home, config: &Value) -> Svc {
         let name = crate::config::name_of(config);
-        Svc { boot: config["boot"] == true, kind: Kind::parse(config["service"].as_str().unwrap_or("process")), unit: config["unit"].as_str().map(String::from).unwrap_or_else(|| default_unit(&name)), home }
+        Svc { auto_restart: config["auto_restart"] != false, boot: config["boot"] == true, kind: Kind::parse(config["service"].as_str().unwrap_or("process")), unit: config["unit"].as_str().map(String::from).unwrap_or_else(|| default_unit(&name)), home }
     }
 
     /// Does the worker start when the PC starts, without anyone logging in?
@@ -151,9 +153,9 @@ impl Svc {
 
     pub fn describe(&self) -> String {
         match self.kind {
-            Kind::Task => format!("Windows scheduled task {} (starts {}; checked every minute and restarted if it is not running)", self.unit, if self.boot { "when the PC starts, even before anyone logs in" } else { "when you log in" }),
-            Kind::Systemd => format!("systemd user service {} (restarted if it fails)", self.unit),
-            Kind::Launchd => format!("launchd agent {} (restarted if it fails)", self.unit),
+            Kind::Task => format!("Windows scheduled task {} (starts {}; {})", self.unit, if self.boot { "when the PC starts, even before anyone logs in" } else { "when you log in" }, if self.auto_restart { "checked every minute and restarted if it is not running" } else { "not restarted if it stops" }),
+            Kind::Systemd => format!("systemd user service {} ({})", self.unit, if self.auto_restart { "restarted if it fails" } else { "not restarted if it stops" }),
+            Kind::Launchd => format!("launchd agent {} ({})", self.unit, if self.auto_restart { "restarted if it fails" } else { "not restarted if it stops" }),
             Kind::Process => "background process (no startup entry)".into(),
         }
     }
@@ -261,7 +263,7 @@ impl Svc {
         match self.kind {
             Kind::Task => {
                 let user = run("whoami", &[]).map_err(|e| e.to_string())?.1.trim().to_string();
-                let xml = task_xml(&user, &exe, &home, self.boot);
+                let xml = task_xml(&user, &exe, &home, self.boot, self.auto_restart);
                 let path = self.home.file("task.xml");
                 let mut bytes = vec![0xFF, 0xFE];
                 bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
@@ -274,8 +276,9 @@ impl Svc {
             }
             Kind::Systemd => {
                 let unit = format!(
-                    "[Unit]\nDescription=Agent orchestration execution worker ({})\nAfter=network-online.target\n\n[Service]\nExecStart=\"{exe}\" run --home \"{home}\"\nRestart=always\nRestartSec=5\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n",
-                    self.unit
+                    "[Unit]\nDescription=Agent orchestration execution worker ({})\nAfter=network-online.target\n\n[Service]\nExecStart=\"{exe}\" run --home \"{home}\"\nRestart={restart}\nRestartSec=5\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n",
+                    self.unit,
+                    restart = if self.auto_restart { "always" } else { "no" }
                 );
                 let path = self.unit_path();
                 std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -288,8 +291,9 @@ impl Svc {
             }
             Kind::Launchd => {
                 let plist = format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{exe}</string><string>run</string><string>--home</string><string>{home}</string></array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n</dict></plist>\n",
-                    self.unit
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{exe}</string><string>run</string><string>--home</string><string>{home}</string></array>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><{keep}/>\n</dict></plist>\n",
+                    self.unit,
+                    keep = if self.auto_restart { "true" } else { "false" }
                 );
                 let path = self.plist_path();
                 std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -320,7 +324,9 @@ fn unsafe_uid() -> u32 {
 
 /// The scheduled task: starts when this user logs in, restarts a minute after a failure (up to 999 times), has no time
 /// limit and keeps going on battery. Runs as the user with ordinary rights, so no administrator is needed.
-fn task_xml(user: &str, exe: &str, home: &str, boot: bool) -> String {
+fn task_xml(user: &str, exe: &str, home: &str, boot: bool, auto_restart: bool) -> String {
+    // auto_restart off: no one-minute check and no restart on failure; the logon and boot triggers still start it
+    let (check_trigger, restart_on_failure) = if auto_restart { ("<TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>", "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>") } else { ("", "") };
     // boot: also start when the PC starts, before anyone logs in. S4U runs the task as this user without a stored password
     // (and without network credentials, which the worker does not need: it only connects out to the server).
     let (boot_trigger, logon_type) = if boot { ("<BootTrigger><Enabled>true</Enabled></BootTrigger>", "S4U") } else { ("", "InteractiveToken") };
@@ -329,7 +335,7 @@ fn task_xml(user: &str, exe: &str, home: &str, boot: bool) -> String {
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Agent orchestration execution worker</Description></RegistrationInfo>
-  <Triggers>{boot_trigger}<LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Triggers>{boot_trigger}<LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger>{check_trigger}</Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>{logon_type}</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -338,7 +344,7 @@ fn task_xml(user: &str, exe: &str, home: &str, boot: bool) -> String {
     <StartWhenAvailable>true</StartWhenAvailable>
     <AllowHardTerminate>true</AllowHardTerminate>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+    {restart_on_failure}
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
   </Settings>
@@ -349,6 +355,8 @@ fn task_xml(user: &str, exe: &str, home: &str, boot: bool) -> String {
         exe = esc(exe),
         home = esc(home),
         boot_trigger = boot_trigger,
+        check_trigger = check_trigger,
+        restart_on_failure = restart_on_failure,
         logon_type = logon_type
     )
 }
@@ -359,16 +367,26 @@ mod tests {
 
     #[test]
     fn the_task_starts_at_logon_and_every_minute_and_only_with_boot_also_at_startup() {
-        let normal = task_xml("PC-me", "C:/w/x.exe", "C:/w", false);
+        let normal = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, true);
         assert!(normal.contains("<LogonTrigger>") && normal.contains("<TimeTrigger>") && normal.contains("InteractiveToken"));
         assert!(!normal.contains("BootTrigger") && !normal.contains("S4U"));
-        let boot = task_xml("PC-me", "C:/w/x.exe", "C:/w", true);
+        let boot = task_xml("PC-me", "C:/w/x.exe", "C:/w", true, true);
         assert!(boot.contains("<BootTrigger>") && boot.contains("<LogonType>S4U</LogonType>") && !boot.contains("InteractiveToken"));
         assert!(boot.contains("<LogonTrigger>"), "still starts at logon if the boot start was missed");
     }
 
     #[test]
+    fn without_auto_restart_the_task_has_no_minute_check_and_no_restart_on_failure() {
+        let off = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, false);
+        assert!(off.contains("<LogonTrigger>") && !off.contains("TimeTrigger") && !off.contains("RestartOnFailure"));
+        let on = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, true);
+        assert!(on.contains("TimeTrigger") && on.contains("RestartOnFailure"));
+        let boot_off = task_xml("PC-me", "C:/w/x.exe", "C:/w", true, false);
+        assert!(boot_off.contains("BootTrigger") && !boot_off.contains("TimeTrigger"));
+    }
+
+    #[test]
     fn names_with_markup_are_escaped() {
-        assert!(task_xml("a&b<c>", "x", "y", true).contains("a&amp;b&lt;c&gt;"));
+        assert!(task_xml("a&b<c>", "x", "y", true, true).contains("a&amp;b&lt;c&gt;"));
     }
 }

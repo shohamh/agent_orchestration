@@ -572,7 +572,7 @@ test('install form validation mirrors the server and builds the request only whe
   const valid = { id: 'build-pc', os: 'linux', engines: ['prefect', 'hatchet'], pool: 'build', tags: ['gpu', 'gpu', ' cuda '], slots: '2', cpu_limit: '80', ram_limit: '85.5', server: 'http://192.168.1.10:8090/' };
   const ok = Fleet.validateInstall(valid, { taken: ['pc-a'] });
   assert.deepEqual(ok.errors, {});
-  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090', autostart: 'logon' });
+  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true });
   const bad = (change, field) => { const r = Fleet.validateInstall({ ...valid, ...change }, { taken: ['pc-a'] }); assert.equal(r.body, null, field); assert.ok(r.errors[field], `${field} has a message`); };
   for (const id of ['', ' ', 'a b', '-x', 'x'.repeat(65), 'a/b', 'pc-a']) bad({ id }, 'id');
   bad({ os: '' }, 'os'); bad({ os: 'beos' }, 'os');
@@ -583,6 +583,8 @@ test('install form validation mirrors the server and builds the request only whe
   for (const cpu_limit of ['0', '101', '', 'x', '-5']) bad({ cpu_limit }, 'cpu_limit');
   bad({ ram_limit: '0' }, 'ram_limit');
   for (const autostart of ['startup', 'BOOT', 7]) bad({ autostart }, 'autostart');
+  for (const auto_restart of ['yes', 0, null]) bad({ auto_restart }, 'auto_restart');
+  assert.equal(Fleet.validateInstall({ ...valid, auto_restart: false }).body.auto_restart, false);
   assert.equal(Fleet.validateInstall({ ...valid, autostart: 'boot' }).body.autostart, 'boot');
   assert.equal(Fleet.validateInstall({ ...valid, autostart: 'none' }).body.autostart, 'none');
   for (const server of ['', 'localhost:8090', 'http://localhost:8090', 'http://127.0.0.1:8090', 'http://[::1]:8090', 'http://0.0.0.0:8090', 'ftp://h:1', 'http://u:p@h:1', 'http://h:1/path', 'http://h:1?x=1', 'nope']) bad({ server }, 'server');
@@ -601,6 +603,15 @@ test('the start-up choices explain their consequences for the chosen operating s
   assert.match(by(linux, 'boot'), /lingering/);
   assert.doesNotMatch(by(linux, 'boot'), /UAC/);
   assert.match(by(windows, 'none'), /agent-worker start/);
+});
+
+test('the auto restart text names the cost and the way back for each system and start-up choice', () => {
+  assert.match(Fleet.autoRestartText('windows', 'logon'), /checks every minute/);
+  assert.match(Fleet.autoRestartText('windows', 'logon'), /next logon or with agent-worker start/);
+  assert.match(Fleet.autoRestartText('linux', 'boot'), /systemd starts it again/);
+  assert.match(Fleet.autoRestartText('linux', 'boot'), /next PC start-up/);
+  assert.match(Fleet.autoRestartText('windows', 'logon'), /agent-worker autorestart on\|off/);
+  assert.match(Fleet.autoRestartText('windows', 'none'), /Not used here/);
 });
 
 test('install commands: Windows gets PowerShell and cmd, others get bash, and nobody is told to elevate', () => {
@@ -675,13 +686,14 @@ test('a valid form creates the install link and shows the Windows commands with 
   await submitInstall();
   await waitFor('document.querySelectorAll(".fl-command").length === 2', 'both Windows commands shown');
   const sent = lastCall('POST', '/api/fleet/installs').body;
-  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090', autostart: 'logon' });
+  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true });
   const record = [...installs.values()][0];
   assert.equal(await text('[data-command="powershell"]'), `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing 'http://192.168.1.10:8090/install/${record.code}/agent-worker' -OutFile $f; & $f install ${record.code} --server 'http://192.168.1.10:8090'`);
   assert.match(await text('[data-command="cmd"]'), /^curl\.exe -fsSL "http:\/\/192\.168\.1\.10:8090\/install\/.+\/agent-worker" -o/);
   assert.equal(await evaluate('document.querySelectorAll(".fl-command").length'), 2);
   assert.match(await text('.fl-elevation'), /Run as a normal user\. Do not use Administrator or sudo/);
   assert.match(await text('.fl-install-result'), /downloads the worker from this server/);
+  await waitFor('/works once/.test(document.querySelector(".fl-install-expiry").textContent)', 'expiry note drawn by the first status check');
   assert.match(await text('.fl-install-expiry'), /works once and expires in about (29|30) min/);
   assert.match(await text('.fl-install-status'), /Waiting for you to run the command/);
   assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
@@ -737,6 +749,35 @@ test('the form offers logon, boot and no autostart with their consequences, defa
   await waitFor('document.querySelectorAll(".fl-command").length === 1', 'bash command shown');
   assert.equal(lastCall('POST', '/api/fleet/installs').body.autostart, 'none');
   assert.equal(await evaluate('!!document.querySelector(".fl-boot-note")'), false);
+  await click('[data-action="cancel-install"]');
+});
+
+test('the form lets auto restart be turned off, explains it and ignores it when nothing starts the worker', async () => {
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  assert.equal(await evaluate('document.querySelector(".fl-form input[name=auto_restart]").checked'), true);
+  assert.match(await text('.fl-auto-restart'), /Restart automatically if the worker crashes or is killed/);
+  assert.match(await text('.fl-auto-restart'), /checks every minute/);
+  await click('.fl-form input[name="os"][value="linux"]');
+  assert.match(await text('.fl-auto-restart'), /systemd starts it again/);
+  await click('.fl-form input[name="os"][value="windows"]');
+  await fillInstall({ id: 'norestart-pc', os: 'windows' });
+  await click('.fl-form input[name="auto_restart"]');
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'commands shown');
+  assert.equal(lastCall('POST', '/api/fleet/installs').body.auto_restart, false);
+  await click('[data-action="cancel-install"]');
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'plain-pc', os: 'windows' });
+  await click('.fl-form input[name="autostart"][value="none"]');
+  assert.equal(await evaluate('document.querySelector(".fl-form input[name=auto_restart]").disabled'), true);
+  assert.match(await text('.fl-auto-restart'), /Not used here/);
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'commands shown');
+  assert.equal(lastCall('POST', '/api/fleet/installs').body.auto_restart, true, 'no startup entry: the setting stays at its default');
   await click('[data-action="cancel-install"]');
 });
 

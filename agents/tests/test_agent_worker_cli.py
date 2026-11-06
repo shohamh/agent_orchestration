@@ -60,8 +60,8 @@ class Harness(FleetFixture):
     def new_home(self):
         home = Path(tempfile.mkdtemp(prefix='aw-home-', dir=self.root)); self.homes.append(home); return home
 
-    def record(self, name='pc-x', os_name=TARGET, autostart='logon'):
-        return install.create({'id': name, 'os': os_name, 'autostart': autostart, 'engines': ['hatchet'], 'pool': 'build', 'tags': ['t1'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 70, 'server': 'http://192.168.1.10:8090'})
+    def record(self, name='pc-x', os_name=TARGET, autostart='logon', auto_restart=True):
+        return install.create({'id': name, 'os': os_name, 'autostart': autostart, 'auto_restart': auto_restart, 'engines': ['hatchet'], 'pool': 'build', 'tags': ['t1'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 70, 'server': 'http://192.168.1.10:8090'})
 
     async def run_cli(self, home, *args, timeout=90):
         """Run the worker program; returns (exit code, output)."""
@@ -219,6 +219,17 @@ class AgentWorkerCliTests(Harness):
         self.assertEqual((await self.run_cli(home, 'start'))[0], 0)
         self.assertFalse((Path(home)/'stopped').exists())
 
+    async def test_auto_restart_has_nothing_to_turn_off_without_a_startup_entry(self):
+        record = self.record(autostart='none')
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        self.assertEqual((await self.status(home))[1]['auto_restart'], False)
+        self.assertIn('plain background process', (await self.run_cli(home, 'autorestart', 'status'))[1])
+        refused = await self.run_cli(home, 'autorestart', 'off')
+        self.assertNotEqual(refused[0], 0); self.assertIn('no startup entry', refused[1])
+        self.assertNotEqual((await self.run_cli(home, 'autorestart', 'sometimes'))[0], 0)
+
     async def test_uninstall_removes_the_worker_and_deregisters_it(self):
         record = self.record()
         home, code, out = await self.install_pc(record)
@@ -331,6 +342,45 @@ class ServiceManagerTests(Harness):
             self.assertIn('starts when you log in instead', out)
             self.assertEqual((await self.status(home))[1]['autostart'], 'logon')
         self.assertTrue((await self.status(home))[1]['running'])
+
+    async def kill_worker(self, home):
+        pid = (await self.status(home))[1]['pid']
+        self.assertGreater(pid, 0)
+        if os.name == 'nt': subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
+        else: os.kill(pid, 9)
+        return pid
+
+    async def alive_again(self, home, old_pid, seconds):
+        deadline = asyncio.get_event_loop().time() + seconds
+        while asyncio.get_event_loop().time() < deadline:
+            code, now = await self.status(home)
+            if code == 0 and isinstance(now, dict) and now['running'] and now['pid'] not in (0, old_pid): return True
+            await asyncio.sleep(3)
+        return False
+
+    async def test_auto_restart_off_leaves_a_killed_worker_down_until_started_and_can_be_turned_back_on(self):
+        record = self.record(auto_restart=False)
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'uninstall', '--yes')
+        self.assertEqual(code, 0, out + self.diag(home))
+        self.assertIn('not restarted', out)
+        await until(lambda: self.is_connected(home), timeout=30, message='status shows connected')
+        self.assertIs((await self.status(home))[1]['auto_restart'], False)
+        self.assertIn('Not restarted', (await self.run_cli(home, 'autorestart', 'status'))[1])
+        pid = await self.kill_worker(home)
+        self.assertFalse(await self.alive_again(home, pid, 90), 'a killed worker stays down when auto restart is off (past the Windows one-minute check)')
+        self.assertEqual((await self.run_cli(home, 'start'))[0], 0)
+        await self.connected(record['code'])
+        # turning it on rebuilds the task or unit; the running worker keeps running
+        self.assertEqual((await self.run_cli(home, 'autorestart', 'on'))[0], 0)
+        self.assertIs((await self.status(home))[1]['auto_restart'], True)
+        await until(lambda: self.is_connected(home), timeout=60, message='connected after the change')
+        pid = await self.kill_worker(home)
+        self.assertTrue(await self.alive_again(home, pid, 200), 'with auto restart on a killed worker comes back')
+        # and off again
+        self.assertEqual((await self.run_cli(home, 'autorestart', 'off'))[0], 0)
+        self.assertIs((await self.status(home))[1]['auto_restart'], False)
+        self.assertIn('already off', (await self.run_cli(home, 'autorestart', 'off'))[1])
 
     async def test_a_fleet_update_works_under_the_service_manager(self):
         # the updater must survive stopping the service it was started by (systemd kills the whole control group)

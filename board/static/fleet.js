@@ -161,6 +161,16 @@
 
   const AUTOSTARTS = ['logon', 'boot', 'none'];
 
+  /* The auto restart choice and what it means. It only applies when the worker starts by itself (logon or boot). */
+  function autoRestartText(os, autostart) {
+    const windows = os === 'windows';
+    if (autostart === 'none') return 'Not used here: without a startup entry nothing restarts the worker.';
+    return 'Restart the worker automatically if it crashes or is killed. '
+      + (windows ? 'A Scheduled Task checks every minute and starts it again, so a crash costs up to a minute. ' : 'systemd starts it again after a few seconds. ')
+      + 'Turn it off to leave a stopped worker down (for example while you debug it): it then starts again only at the next '
+      + (autostart === 'boot' ? 'PC start-up' : 'logon') + ' or with agent-worker start. You can change this later with agent-worker autorestart on|off.';
+  }
+
   /* What each way of starting the worker means, with its consequences, for the operating system chosen in the form. */
   function autostartChoices(os) {
     const windows = os === 'windows';
@@ -199,10 +209,12 @@
     const server = serverAddress(v.server);
     if (server.error) errors.server = server.error;
     const autostart = v.autostart || 'logon';
+    const autoRestart = v.auto_restart === undefined ? true : v.auto_restart;
+    if (typeof autoRestart !== 'boolean') errors.auto_restart = 'Auto restart is on or off';
     if (!AUTOSTARTS.includes(autostart)) errors.autostart = 'Choose when the worker starts';
     if (Object.keys(errors).length) return { errors, body: null };
     return { errors, body: { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
-      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart } };
+      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart, auto_restart: autoRestart } };
   }
 
   /* The commands to show for the chosen operating system, with the elevation note. */
@@ -538,20 +550,24 @@
       S.form = { install: true, engines: preset.engines || ['hatchet'] };
       const f = S.form;
       const taken = () => S.workers.map((w) => w.id);
-      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon' };
+      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon', autoRestart: preset.auto_restart !== false };
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
       const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
       const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
-        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart') };
+        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart'), auto_restart: fieldError('auto_restart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
       const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
-        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); } }), ` ${label}`)), errors.os);
+        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); drawRestart(); } }), ` ${label}`)), errors.os);
       const autostartBox = h('fieldset', { class: 'fl-autostart-choice' }, h('legend', {}, 'When should the worker start on the PC?'));
       const drawAutostart = () => autostartBox.replaceChildren(h('legend', {}, 'When should the worker start on the PC?'),
         ...autostartChoices(state.os).map((c) => h('label', { class: 'fl-check fl-autostart', 'data-autostart': c.value },
-          h('input', { type: 'radio', name: 'autostart', value: c.value, checked: c.value === state.autostart, onchange: () => { state.autostart = c.value; } }),
+          h('input', { type: 'radio', name: 'autostart', value: c.value, checked: c.value === state.autostart, onchange: () => { state.autostart = c.value; drawRestart(); } }),
           h('span', {}, ` ${c.label}`, h('small', { class: 'fl-hint' }, c.text)))), errors.autostart);
+      const restartHelp = h('small', { class: 'fl-hint' });
+      const restartBox = h('input', { type: 'checkbox', name: 'auto_restart', checked: state.autoRestart, onchange: (ev) => { state.autoRestart = ev.target.checked; } });
+      const restartLabel = h('label', { class: 'fl-check fl-auto-restart' }, restartBox, h('span', {}, ' Restart automatically if the worker crashes or is killed', restartHelp), errors.auto_restart);
+      const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartBox.disabled = state.autostart === 'none'; };
       const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
         ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
           onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`)), errors.engines);
@@ -601,7 +617,7 @@
         h('h3', { id: 'fl-form-title' }, 'Register a PC'),
         h('p', { class: 'fl-hint' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
-        osBoxes, autostartBox, engineBoxes,
+        osBoxes, autostartBox, restartLabel, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags (optional)'), chosen, tagInput, tagList, errors.tags),
         h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
@@ -619,7 +635,7 @@
         for (const node of Object.values(errors)) node.textContent = '';
         for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
         const pool = state.newPool ? newPoolInput.value : poolSelect.value;
-        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart }, { taken: taken() });
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
@@ -636,7 +652,7 @@
         showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
       });
 
-      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart();
+      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart();
       formPanel.replaceChildren(form);
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
       formPanel.parentElement.scrollTop = 0;
@@ -912,7 +928,7 @@
     };
   }
 
-  const api = { autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { autoRestartText, autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

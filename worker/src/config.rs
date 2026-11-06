@@ -84,3 +84,8 @@ pub fn name_of(config: &Value) -> String {
 pub fn relay_id(config: &Value) -> String {
     config["uuid"].as_str().map(String::from).unwrap_or_else(|| name_of(config))
 }
+
+/// Restart the worker (and its components) when they crash? The form's choice, on unless worker.json says otherwise.
+pub fn auto_restart(home: &Home) -> bool {
+    home.config().map(|c| c["auto_restart"] != false).unwrap_or(true)
+}

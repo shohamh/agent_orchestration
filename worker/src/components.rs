@@ -104,6 +104,10 @@ pub fn control(home: &Home, name: &str, action: &str) -> Result<(), String> {
         "stop" => fs::write(stop, "1").map_err(|e| e.to_string()),
         "start" => {
             let _ = fs::remove_file(stop);
+            // a component that exited with auto restart off is only started again by an explicit command
+            if read_status(home)[name]["state"] == "exited" {
+                fs::write(restart, "1").map_err(|e| e.to_string())?;
+            }
             Ok(())
         }
         "restart" => {
@@ -129,11 +133,13 @@ pub struct Supervisor {
     running: HashMap<String, Running>,
     state: Map<String, Value>,
     backoff: HashMap<String, (u32, f64)>,
+    /// exited while auto restart is off: stays down until `agent-worker restart NAME`
+    halted: std::collections::HashSet<String>,
 }
 
 impl Supervisor {
     pub fn new(home: Home) -> Supervisor {
-        Supervisor { home, running: HashMap::new(), state: Map::new(), backoff: HashMap::new() }
+        Supervisor { home, running: HashMap::new(), state: Map::new(), backoff: HashMap::new(), halted: std::collections::HashSet::new() }
     }
 
     fn write_status(&self) {
@@ -218,6 +224,7 @@ impl Supervisor {
                 let _ = fs::remove_file(&restart);
                 self.stop_one(name, "restart requested").await;
                 self.backoff.remove(name);
+                self.halted.remove(name);
             }
             if self.running.get(name).map(|r| &r.entry != entry).unwrap_or(false) {
                 self.stop_one(name, "configuration changed").await; // edited while running
@@ -226,6 +233,14 @@ impl Supervisor {
                 Some(r) => r.child.try_wait().ok().flatten().map(|status| (status.code().unwrap_or(-1), r.since)),
                 None => None,
             };
+            if let Some((code, _)) = exited.filter(|_| !crate::config::auto_restart(&self.home)) {
+                self.running.remove(name);
+                self.halted.insert(name.clone());
+                let old = self.state.get(name).and_then(|s| s.as_object().cloned()).unwrap_or_default();
+                self.state.insert(name.clone(), json!({"state": "exited", "pid": null, "restarts": old.get("restarts").cloned().unwrap_or(json!(0)), "last_exit": code}));
+                crate::log!("components", "component {name} exited with {code}; auto restart is off, so it stays down until: agent-worker restart {name}");
+                continue;
+            }
             if let Some((code, since)) = exited {
                 self.running.remove(name);
                 let (failures, _) = self.backoff.get(name).copied().unwrap_or((0, 0.0));
@@ -238,6 +253,9 @@ impl Supervisor {
                 crate::log!("components", "component {name} exited with {code}; restarting in {delay} s");
             }
             if !self.running.contains_key(name) {
+                if self.halted.contains(name) {
+                    continue;
+                }
                 if mono() < self.backoff.get(name).map(|b| b.1).unwrap_or(0.0) {
                     continue;
                 }

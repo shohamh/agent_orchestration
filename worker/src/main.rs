@@ -81,6 +81,13 @@ enum Cmd {
         #[arg(long, hide = true)]
         as_user: Option<String>,
     },
+    /// Restart the worker when it crashes or is killed: on, off or status
+    Autorestart {
+        #[arg(default_value = "status")]
+        action: String,
+        #[arg(long, hide = true)]
+        as_user: Option<String>,
+    },
     /// The end of the worker's log
     Logs {
         #[arg(short = 'n', long, default_value_t = 50)]
@@ -174,6 +181,7 @@ async fn main() {
         Cmd::Update { force, drain_timeout, background: _, from_file, server, code } => finish(ctl::update(&home, force, drain_timeout, from_file, server.zip(code)).await),
         Cmd::Uninstall { yes, keep_registration } => finish(ctl::uninstall(&home, yes, keep_registration).await),
         Cmd::Boot { action, as_user } => finish(ctl::boot(&home, &action, as_user)),
+        Cmd::Autorestart { action, as_user } => finish(ctl::autorestart(&home, &action, as_user)),
         Cmd::Logs { lines } => finish(ctl::logs(&home, lines)),
         Cmd::Version => {
             println!("{}", config::self_version());

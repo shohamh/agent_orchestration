@@ -24,7 +24,7 @@ from flowkit.relay import make_app
 
 ROOT = Path(__file__).resolve().parents[2]
 FORM = {'id': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu'], 'slots': 2,
-        'cpu_limit': 80, 'ram_limit': 85, 'server': 'http://192.168.1.10:8090', 'autostart': 'boot'}
+        'cpu_limit': 80, 'ram_limit': 85, 'server': 'http://192.168.1.10:8090', 'autostart': 'boot', 'auto_restart': False}
 GOOD_TOKEN = 'abcdefghijklmnopqrstuvwxyzABCDEF0123456789_-'
 
 
@@ -59,10 +59,16 @@ class FormTests(Isolated):
             self.assertEqual(install.validate_form({**base, 'autostart': choice})['autostart'], choice)
         self.assertEqual(install.view(install.create({**base, 'id': 'viewed', 'autostart': 'none'}))['autostart'], 'none')
 
+    def test_auto_restart_defaults_to_on_and_takes_a_boolean(self):
+        base = {k: v for k, v in FORM.items() if k != 'auto_restart'}
+        self.assertIs(install.validate_form(base)['auto_restart'], True)
+        self.assertIs(install.validate_form({**base, 'auto_restart': False})['auto_restart'], False)
+        self.assertIs(install.view(install.create({**base, 'id': 'norestart', 'auto_restart': False}))['auto_restart'], False)
+
     def test_every_field_is_checked(self):
         bad = {'id': ['', 'a b', '-x', 'x' * 65, 7, 'a/b', '../x', 'a\nb', "a'b"], 'os': ['', 'beos', None], 'engines': [[], ['docker'], 'hatchet', None],
                'pool': ['', ' x', 'a,b', None, 'x' * 101], 'slots': [0, 101, 1.5, True, '2'], 'cpu_limit': [0, 101, -1, True, 'x'], 'ram_limit': [0, 101],
-               'tags': ['gpu', ['a,b'], [''], ['x'] * 51], 'autostart': ['', 'startup', None, True, 'Boot']}
+               'tags': ['gpu', ['a,b'], [''], ['x'] * 51], 'autostart': ['', 'startup', None, True, 'Boot'], 'auto_restart': ['yes', 0, None, 'false']}
         for field, values in bad.items():
             for value in values:
                 with self.subTest(field=field, value=value), self.assertRaises(install.InstallError):
@@ -246,8 +252,8 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         record = self.make(tags=['gpu', 'cuda'])
         status, body = await self.claim(record)
         self.assertEqual(status, 200)
-        self.assertEqual({k: body[k] for k in ('ok', 'uuid', 'name', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'autostart')},
-                         {'ok': True, 'uuid': record['code'], 'name': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu', 'cuda'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85, 'autostart': 'boot'})
+        self.assertEqual({k: body[k] for k in ('ok', 'uuid', 'name', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'autostart', 'auto_restart')},
+                         {'ok': True, 'uuid': record['code'], 'name': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu', 'cuda'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85, 'autostart': 'boot', 'auto_restart': False})
         shown = install.view(install.read_record(record['code']))
         self.assertEqual((shown['uuid'], shown['claimed_host']), (record['code'], 'PC-1'))
         self.assertNotIn(SECRET, json.dumps(install.read_record(record['code'])), 'only a hash of the secret is stored')

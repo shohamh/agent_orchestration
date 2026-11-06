@@ -28,6 +28,8 @@ pub struct Settings {
     pub slots: u64,
     /// "logon", "boot" or "none": when the worker starts by itself
     pub autostart: String,
+    /// restart the worker if it crashes or is killed
+    pub auto_restart: bool,
 }
 
 fn origin(options: &Options) -> String {
@@ -251,7 +253,8 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     let secret = claim_secret(home)?;
     let given = claim(options, &secret).await?;
     let settings = Settings { name: given["name"].as_str().ok_or("The server did not name this PC")?.to_string(), slots: given["slots"].as_u64().unwrap_or(1),
-        autostart: given["autostart"].as_str().filter(|a| ["logon", "boot", "none"].contains(a)).unwrap_or("logon").to_string() };
+        autostart: given["autostart"].as_str().filter(|a| ["logon", "boot", "none"].contains(a)).unwrap_or("logon").to_string(),
+        auto_restart: given["auto_restart"] != false };
     println!("    this PC will be {} ({})", settings.name, options.uuid);
     report(options, "check", "running", "").await;
     let download = install_self(home)?;
@@ -272,6 +275,7 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     let mut worker = default_config(&settings.name, &uuid, settings.slots, &options.server, options.port);
     worker["service"] = json!(kind.name());
     worker["unit"] = json!(svc::default_unit(&settings.name));
+    worker["auto_restart"] = json!(settings.auto_restart);
     capture_profile(&mut worker);
     install_cli(home, &mut worker);
     home.save_config(&worker).map_err(|e| e.to_string())?;
@@ -332,6 +336,9 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
         "none" => "does not start by itself: after the PC restarts, run agent-worker start".to_string(),
         _ => "starts again when you log in (after a restart it stays offline until then)".to_string(),
     };
+    if kind != Kind::Process && !settings.auto_restart {
+        starts += "; it is not restarted if it crashes or is killed (agent-worker autorestart on changes this)";
+    }
     if settings.autostart == "boot" && kind != Kind::Process {
         at("boot", "Setting up start at boot");
         report(options, "boot", "running", "approve the administrator prompt on this PC").await;

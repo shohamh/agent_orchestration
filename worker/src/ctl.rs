@@ -38,7 +38,7 @@ pub async fn status(home: &Home, json_output: bool) -> Result<i32, String> {
     let draining = health.as_ref().map(|h| h["draining"] == true).unwrap_or(false);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&json!({"name": config::name_of(&config), "uuid": config::relay_id(&config), "version": installed_version(home), "home": home.0, "server": config["server"], "service": svc.describe(),
-            "service_exists": svc.exists(), "starts_at_boot": svc.starts_at_boot(), "autostart": svc.autostart(), "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
+            "service_exists": svc.exists(), "starts_at_boot": svc.starts_at_boot(), "autostart": svc.autostart(), "auto_restart": svc.kind != crate::svc::Kind::Process && svc.auto_restart, "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
             "components": components, "update": update})).unwrap());
     } else {
         println!("Worker      {}  ({})  version {}", config::name_of(&config), config::relay_id(&config), installed_version(home));
@@ -415,5 +415,70 @@ pub fn boot(home: &Home, action: &str, as_user: Option<String>) -> Result<(), St
             Ok(())
         }
         other => Err(format!("Unknown boot action {other:?}; use enable, disable or status")),
+    }
+}
+
+/// `agent-worker autorestart [on|off|status]`: restart the worker when it crashes or is killed, or leave it down.
+pub fn autorestart(home: &Home, action: &str, as_user: Option<String>) -> Result<(), String> {
+    let mut config = home.config()?;
+    let svc = Svc::from_config(Home(home.0.clone()), &config);
+    match action {
+        "status" => {
+            println!("{}", match (svc.kind, svc.auto_restart) {
+                (crate::svc::Kind::Process, _) => "Not restarted if it stops: it runs as a plain background process (no startup entry)",
+                (_, true) => "Restarted automatically if it crashes or is killed (run `agent-worker autorestart off` to turn this off)",
+                (_, false) => "Not restarted if it crashes or is killed; it starts again at the next start-up or with `agent-worker start`",
+            });
+            Ok(())
+        }
+        "on" | "off" => {
+            let on = action == "on";
+            if svc.kind == crate::svc::Kind::Process {
+                return Err("This worker has no startup entry (it runs as a plain background process), so nothing restarts it. Reinstall with a start-up choice to use this".into());
+            }
+            if let Some(expected) = &as_user {
+                if !expected.eq_ignore_ascii_case(&crate::svc::whoami()) {
+                    return Err(format!("The administrator prompt was approved as {}, but this worker belongs to {expected}. Approve it as {expected}.", crate::svc::whoami()));
+                }
+                // the elevated copy: the user's command already saved the setting; only the machine-level task is rebuilt here
+                return svc.install();
+            }
+            if svc.auto_restart == on {
+                println!("Auto restart is already {action}");
+                return Ok(());
+            }
+            let was_running = svc.running();
+            let previous = config.clone();
+            config["auto_restart"] = serde_json::json!(on);
+            home.save_config(&config).map_err(|e| e.to_string())?;
+            let svc = Svc::from_config(Home(home.0.clone()), &config);
+            let applied = if svc.kind == crate::svc::Kind::Task && svc.boot && !crate::procutil::is_elevated() {
+                // the boot task was made by an administrator and is rebuilt by one
+                if std::env::var_os("AGENT_WORKER_NO_ELEVATE").is_some() {
+                    Err("Changing a task that starts at boot needs Administrator rights. Run this in an Administrator PowerShell: agent-worker autorestart".to_string() + " " + action)
+                } else {
+                    println!("Windows will ask for administrator approval (UAC)...");
+                    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                    let args = vec!["--home".into(), home.0.to_string_lossy().to_string(), "autorestart".into(), action.to_string(), "--as-user".into(), crate::svc::whoami()];
+                    match crate::procutil::run_elevated(&exe, &args) {
+                        Ok(0) => Ok(()),
+                        Ok(code) => Err(format!("The administrator step did not finish (exit code {code})")),
+                        Err(e) => Err(e),
+                    }
+                }
+            } else {
+                svc.install()
+            };
+            if let Err(why) = applied {
+                let _ = home.save_config(&previous); // nothing changed on the PC, so the setting must not say it did
+                return Err(why);
+            }
+            if was_running && !svc.running() {
+                svc.start()?; // rebuilding a Windows task ends its running instance
+            }
+            println!("{}", if on { "The worker is now restarted automatically if it crashes or is killed" } else { "The worker is no longer restarted automatically: if it stops it stays down until the next start-up or `agent-worker start`" });
+            Ok(())
+        }
+        other => Err(format!("Unknown autorestart action {other:?}; use on, off or status")),
     }
 }

@@ -20,7 +20,7 @@ One registration is one PC, however many engines and pools it serves. In the boa
 1. **Fill in the form.** Name, the PC's operating system, the engines it serves, a pool (or a new
    one), optional tags, the slots and the CPU and RAM limits (defaults 1, 90% and 90%), and the
    address the PC uses to reach this server (pre-filled from the page; it cannot be `localhost`), and
-   **when the worker starts** (see below).
+   **when the worker starts** and whether it **restarts automatically** (see below).
    Nothing is created until every field is valid: the page checks them first and the server checks
    them again.
 2. **Copy the command.** The server generates a **uuid** for this install and the board shows one
@@ -86,12 +86,27 @@ different administrator account, the worker starts at logon instead and says why
 tries again later. On Linux the step runs `loginctl enable-linger` and prints the exact `sudo` command if it is not allowed.
 Lingering is a setting of the user, not of one worker.
 
+### Restarting after a crash: on or off
+
+The form has a checkbox, on by default: **restart automatically if the worker crashes or is killed**. Turn it off to
+leave a stopped worker down, for example while you debug it. It only applies when the worker starts by itself (logon or boot);
+without a startup entry nothing restarts it anyway.
+
+| | On | Off |
+|---|---|---|
+| Windows | the task re-runs every minute and starts the worker if it is not running (a crash costs up to a minute), and Task Scheduler restarts it on failure | the task only has its logon (and boot) trigger: a killed worker stays down until the next logon or start-up, or `agent-worker start` |
+| Linux | `Restart=always`, 5 seconds | `Restart=no` |
+| Components | restarted with a growing delay | a component that exits stays down (state `exited`) until `agent-worker restart NAME` |
+
+Change it later on the PC with `agent-worker autorestart on|off|status`. On Windows a task that starts at boot is rebuilt through the
+UAC prompt like `boot enable`; if the prompt is declined nothing changes and the setting is put back.
+
 ### How it starts, restarts and stops
 
 | | Windows | Linux |
 |---|---|---|
 | Service | Scheduled Task `AgentWorker-<name>` | `systemd --user` unit `agent-worker-<name>.service` |
-| After a crash or kill | the task re-runs every minute and starts the worker if it is not running (at most a minute), plus Task Scheduler's own restart on failure | `Restart=always`, 5 seconds |
+| After a crash or kill (auto restart on) | the task re-runs every minute and starts the worker if it is not running (at most a minute), plus Task Scheduler's own restart on failure | `Restart=always`, 5 seconds |
 | `agent-worker stop` | disables the task and leaves a marker so a check that still runs does nothing; `start` undoes both | stops it until the next login or `start` |
 | Limits | no time limit, runs on battery | none |
 | macOS | LaunchAgent (`KeepAlive`) | |
@@ -117,6 +132,7 @@ reboot to the logon screen. Run the tests with
 | `agent-worker status [--json]` | Service, local health, connection to the server, version, components |
 | `agent-worker start`, `stop`, `restart [NAME]` | The worker and its components, or one component |
 | `agent-worker boot [enable\|disable\|status]` | Choose when the worker starts after the form's choice: with the PC (even at the Windows logon screen), at logon, or see which. On Windows `enable` and `disable` ask for administrator approval through the UAC prompt |
+| `agent-worker autorestart [on\|off\|status]` | Restart the worker when it crashes or is killed, or leave it down. Windows boot tasks ask for UAC approval to change |
 | `agent-worker logs` | The worker log |
 | `agent-worker update` | Fetches the version the server serves, waits for running jobs (drain), swaps the program, restarts, and goes back to the previous one if the new one does not come up |
 | `agent-worker uninstall [--yes] [--keep-registration]` | Stops and removes the service, deregisters from the server and deletes the install folder |
