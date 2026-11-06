@@ -41,12 +41,12 @@ class FlowHost:
             async with self._session.request(method, self.url + path, data=None if body is None else json.dumps(body),
                                              headers=headers, timeout=aiohttp.ClientTimeout(total=timeout, connect=2)) as response:
                 data = await response.json(content_type=None)
+        except aiohttp.ClientError as exc:  # first: a connection timeout is also a TimeoutError, but nothing answered
+            raise RuntimeError(f"The flow host at {self.url} is not reachable ({exc.__class__.__name__}). "
+                               "Start it on the worker PC: agents/.venv/Scripts/python.exe -u agents/flow_host.py") from None
         except asyncio.TimeoutError:
             raise RuntimeError(f"The flow host at {self.url} is busy: no answer within {timeout:g} s (an activation may be "
                                "restarting workers). Reload to see whether the change was applied.") from None
-        except aiohttp.ClientError as exc:
-            raise RuntimeError(f"The flow host at {self.url} is not reachable ({exc.__class__.__name__}). "
-                               "Start it on the worker PC: agents/.venv/Scripts/python.exe -u agents/flow_host.py") from None
         return response.status, data
 
     async def catalog(self, fresh: bool = False) -> dict[str, Any]:

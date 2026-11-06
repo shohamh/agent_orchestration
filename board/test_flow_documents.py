@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 import server
 
@@ -223,6 +224,12 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "busy"):
             await self.host._call("GET", "/slow", timeout=0.3)
         self.assertEqual(await self.host.flows(), {})  # a 500 from the flow host
+
+    async def test_a_connection_timeout_says_not_reachable_not_busy(self):
+        # Docker Desktop leaves connections to a closed host port hanging, so a stopped flow host looks like this.
+        with patch.object(aiohttp.ClientSession, "request", side_effect=aiohttp.ConnectionTimeoutError("no connection")):
+            with self.assertRaisesRegex(RuntimeError, "not reachable.*Start it"):
+                await self.host._call("GET", "/flows")
 
     async def test_writes_are_json_and_legacy_save_passes_conflicts_through(self):
         self.assertEqual((await self.host.save("a-b", "x", "sha256:old"))[0], 409)
