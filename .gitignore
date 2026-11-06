@@ -8,6 +8,7 @@ trigger.dev/certs/*
 !trigger.dev/certs/README.txt
 *.pem
 *.key
+!worker/vendor/**/*.key
 
 # Offline bundle output (offline/bundle.sh) and vendored wheels
 dist/
