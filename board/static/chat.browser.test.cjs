@@ -104,7 +104,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       if (url.pathname === '/api/flows') { response.end(JSON.stringify({ flows: [{name:'worker-flow',input:{topic:'test'},steps:{build:{kind:'program',needs:[]},review:{kind:'agent',needs:['build']}}}], broken: {} })); return; }
       if (url.pathname === '/api/workers') { response.end(JSON.stringify({workers:[{id:'pc-a',pool:'builds',tags:['linux'],online:true},{id:'pc-b',pool:'review',tags:[],online:true}]})); return; }
       const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
-      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'].includes(file)) { response.writeHead(404).end(); return; }
+      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'].includes(file)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
       response.end(fs.readFileSync(path.join(__dirname, file)));
     } catch (error) { response.writeHead(500).end(JSON.stringify({ error: error.message })); }
@@ -141,6 +141,9 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     await evaluate('document.querySelector(".card").click()');
     await waitFor('document.querySelector(".question-card")');
     assert.equal(await evaluate('document.querySelector(".context-usage").textContent'), 'Context 40%');
+    assert.equal(await evaluate('[...document.querySelectorAll(".tool-row")].some(row => /null/.test(row.textContent))'), false, 'a tool with nothing to show prints nothing');
+    assert.match(await evaluate('document.querySelector(".chat-composer textarea").placeholder'), /Ctrl\+Enter to send/);
+    assert.equal(await evaluate('document.querySelector(".composer-send").getAttribute("aria-label")'), 'Send message');
     await evaluate(`document.querySelector('[aria-label="Permission mode"]').value = 'auto'; document.querySelector('[aria-label="Permission mode"]').dispatchEvent(new Event('change'))`);
     for (let i = 0; i < 50 && !posts.some(p => p.body.type === 'config'); i++) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(posts.some(p => p.body.type === 'config' && p.body.id === 'permissions' && p.body.value === 'auto'));
@@ -258,7 +261,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     await evaluate(`closeDrawer(); boards.push('flow'); board = 'flow'; renderHeader(); cards = []; refresh()`);
     await waitFor('document.querySelector(".card .title")?.textContent === "Flow with steps"');
     await evaluate('document.querySelector(".card").click()');
-    await waitFor('document.querySelectorAll(".dag-node").length === 2');
+    await waitFor('document.querySelectorAll(".fg-node").length === 2');
     await evaluate('selectNode("agent-node")');
     await waitFor('document.querySelector("#d-node .question-card")');
     let release; nodeApproval = { promise: new Promise(resolve => { release = resolve; }) };

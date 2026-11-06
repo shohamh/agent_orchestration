@@ -20,7 +20,8 @@
     PUT    /flows/<name> {yaml}  -> save a draft (the YAML's name must match); nothing is activated
     DELETE /flows/<name>         -> delete a draft; the active version stays until a removal is activated
     GET    /documents[/<name>], POST /documents/parse|serialize, PUT /documents/<name>[/layout],
-    DELETE /documents/<name>?revision=, GET /documents/<name>/activation, POST /documents/<name>/activate
+    DELETE /documents/<name>?revision=, GET /documents/<name>/activation[?disable=1], POST /documents/<name>/activate
+    POST /documents/<name>/deactivate {revision} -> stop serving the active version; the draft stays, so it can be enabled again
                                  -> the workflow builder contract, docs/superpowers/specs/2026-11-03-workflow-builder-api.md
   With FLOW_HOST_TOKEN set, requests need `Authorization: Bearer <token>`. Writes (POST/PUT/DELETE)
   need `Content-Type: application/json`.
@@ -304,16 +305,16 @@ class Host:
                 flows[name] = loaded.get(name) or parse_text(text)
         return dict(sorted(flows.items()))
 
-    def preview(self, name: str) -> dict:
-        """Which engines an activation of the current draft (or of its removal) would change."""
+    def preview(self, name: str, disable: bool = False) -> dict:
+        """Which engines an activation of the current draft (or of its removal, or of disabling it) would change."""
         manifest = self.store.manifest()
         entry, draft = manifest["flows"].get(name), self.store.draft(name)
         if draft is None and not entry:
             raise missing()
-        target = draft.revision if draft else None
-        errors = self.analyze(name, draft)[1] if draft else []
+        target = draft.revision if draft and not disable else None
+        errors = self.analyze(name, draft)[1] if draft and not disable else []
         active = (entry or {}).get("revision")
-        if draft and not errors:
+        if draft and not errors and not disable:
             try:
                 _, asset_digest = self.store.current_assets()
                 ref_path = self.store.asset_manifest_path(name, target).with_suffix('.assetref')
@@ -321,16 +322,19 @@ class Host:
                     raise FlowError('Flow assets have changed for this revision; change the flow YAML before activating')
             except (FlowError, OSError, ValueError) as exc:
                 errors.append({'message': str(exc), 'step': None, 'field': 'assets'})
-        change = "remove" if draft is None else "add" if not active else "update" if target != active else "none"
+        if disable:
+            change = "remove" if active else "none"
+        else:
+            change = "remove" if draft is None else "add" if not active else "update" if target != active else "none"
         assets_missing = bool(target and not self.store.asset_manifest_path(name, target).with_suffix('.assetref').is_file())
         engines = []
         for engine in ENGINES:
             state = ((entry or {}).get("engines") or {}).get(engine) or {}
             action = "none"
-            if self.enabled[engine] and not errors:
+            if self.enabled[engine] and not errors and not (disable and change == "none"):
                 if engine == "trigger":
                     try:
-                        code = trigger_codegen.render(self._trigger_flows(name, target, manifest, draft.text if draft else None))
+                        code = trigger_codegen.render(self._trigger_flows(name, target, manifest, draft.text if draft and not disable else None))
                     except FlowError:
                         code = None
                     action = "regenerate tasks" if code != trigger_codegen.current(self.trigger_target) else "none"
@@ -369,6 +373,25 @@ class Host:
                 self.store.write_manifest(manifest)
             log(f"activated {name} {target or '(removal)'}: " + ", ".join(f"{r['engine']} {r['state']}" for r in results))
             return {"name": name, "activeRevision": target, "engines": results}
+
+    def deactivate(self, name: str, rev: str | None) -> dict:
+        """Stop serving the active version. The draft stays and the flow can be activated again."""
+        with activation_lock:
+            with lock:
+                manifest = self.store.manifest()
+                entry = manifest["flows"].get(name)
+                if self.store.draft(name) is None and not entry:
+                    raise missing()
+                if not entry or not entry.get("revision") or rev != entry["revision"]:
+                    raise HostError(409, {"error": "conflict", "preview": self.preview(name, disable=True)})
+                entry["revision"] = None
+                self.store.write_manifest(manifest)
+            results = self._apply(name, None, manifest)
+            if not any((e or {}).get("revision") for e in entry["engines"].values()):
+                del manifest["flows"][name]
+                self.store.write_manifest(manifest)
+            log(f"disabled {name}: " + ", ".join(f"{r['engine']} {r['state']}" for r in results))
+            return {"name": name, "activeRevision": None, "engines": results}
 
     def _apply(self, name: str, target: str | None, manifest: dict, force_reload: bool = False) -> list[dict]:
         """Trigger.dev first (a file write), then every worker restart at once, then wait for them."""
@@ -569,7 +592,7 @@ class Api(BaseHTTPRequestHandler):
     def _documents(self, method: str) -> bool:
         """The workflow builder routes (/documents...); False when the path is not one of them."""
         url = urlsplit(self.path)
-        match = re.fullmatch(r"/documents(?:/([^/]+)(?:/(layout|activation|activate))?)?", url.path)
+        match = re.fullmatch(r"/documents(?:/([^/]+)(?:/(layout|activation|activate|deactivate))?)?", url.path)
         if not match:
             return False
         name, action = match.groups()
@@ -602,12 +625,17 @@ class Api(BaseHTTPRequestHandler):
             elif route == ("DELETE", None):
                 result = self.host.delete(name, (parse_qs(url.query).get("revision") or [None])[0])
             elif route == ("GET", "activation"):
-                result = self.host.preview(name)
+                result = self.host.preview(name, disable=(parse_qs(url.query).get("disable") or [""])[0] == "1")
             elif route == ("POST", "activate"):
                 body = self._json_body()
                 if "revision" not in body or not (body["revision"] is None or isinstance(body["revision"], str)):
                     raise ValueError("revision is required (null to activate a removal)")
                 result = self.host.activate(name, body["revision"])
+            elif route == ("POST", "deactivate"):
+                body = self._json_body()
+                if not isinstance(body.get("revision"), str):
+                    raise ValueError("revision is required: the active revision to disable")
+                result = self.host.deactivate(name, body["revision"])
             else:
                 raise HostError(405, {"error": "method not allowed"})
             self._send(200, result)
@@ -660,6 +688,10 @@ class Api(BaseHTTPRequestHandler):
             if (method, path) == ('POST', '/fleet/workers'):
                 saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
                 return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
+            jobs = re.fullmatch(r'/fleet/workers/([^/]+)/jobs', path)
+            if jobs and method == 'GET':
+                from flowkit.distributed import worker_jobs
+                return self._send(200, {'jobs': worker_jobs(unquote(jobs[1], errors='strict'))}) or True
             match = re.fullmatch(r'/fleet/workers/([^/]+)(/capabilities/refresh)?', path)
             if match:
                 worker_id = unquote(match[1], errors='strict')

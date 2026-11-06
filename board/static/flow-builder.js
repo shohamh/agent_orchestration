@@ -8,7 +8,9 @@
   const INPUT_NAME = STEP_ID;
   const FLOW_NAME = /^[a-z][a-z0-9-]{0,47}$/;
   const TEMPLATED = ['run', 'prompt'];
-  const NODE_W = 184, NODE_H = 56, GAP_X = 36, GAP_Y = 64, PAD = 24;
+  // The graph itself is shared with a run's view of a flow (flow-graph.js). This file is its editing context.
+  const Graph = typeof module !== 'undefined' && module.exports ? require('./flow-graph.js') : root.FlowGraph;
+  const { NODE_W, NODE_H, GAP_X, GAP_Y, PAD, bounds } = Graph;
   // Keys the forms edit. Anything else (environment, setup, keys added later) stays in the
   // document untouched and is shown as "edit in YAML".
   const FORM_STEP_KEYS = new Set(['kind', 'description', 'needs', 'agent', 'review', 'worker', 'retries', 'timeout_minutes', 'run', 'requires_command', 'prompt']);
@@ -57,6 +59,16 @@
     const needs = (options.needs || []).filter((n) => next.steps[n]);
     next.steps[id] = { kind: step.kind, needs, ...step };
     return ok(next, { id });
+  }
+
+  // A copy of a step that waits for the same steps; nothing waits for the copy yet.
+  function duplicateStep(doc, id) {
+    if (!doc?.steps?.[id]) return fail(doc, `There is no step named ${id}.`);
+    const base = `${id.slice(0, 40)}_copy`;
+    const copyId = checkStepId(doc, base) ? uniqueStepId(doc, base) : base;
+    const next = clone(doc);
+    next.steps[copyId] = clone(doc.steps[id]);
+    return ok(next, { id: copyId });
   }
 
   // Steps whose command or prompt refers to `{{ steps.<id>.… }}`.
@@ -150,44 +162,11 @@
   }
 
   // Layer of each step: 1 + the deepest prerequisite (cycles and unknown needs are tolerated).
-  function layers(doc) {
-    const ids = stepIds(doc), depth = {}, visiting = new Set();
-    const preds = Object.fromEntries(ids.map((id) => [id, needsOf(doc.steps[id]).filter((n) => n !== id && doc.steps[n])]));
-    const rowOf = (id) => {
-      if (id in depth) return depth[id];
-      if (visiting.has(id)) return 0;
-      visiting.add(id);
-      const d = preds[id].length ? Math.max(...preds[id].map(rowOf)) + 1 : 0;
-      visiting.delete(id);
-      return (depth[id] = d);
-    };
-    ids.forEach(rowOf);
-    const rows = [];
-    for (const id of ids) (rows[depth[id]] ??= []).push(id);
-    return { row: depth, rows: rows.filter(Boolean), preds };
+  function predecessors(doc) {
+    return Object.fromEntries(stepIds(doc).map((id) => [id, needsOf(doc.steps[id]).filter((n) => n !== id && doc.steps[n])]));
   }
-
-  // Deterministic layered layout, top to bottom, like the run view's layoutDag: each step wants to
-  // sit under the average of its prerequisites; a row is pushed apart just enough not to overlap.
-  function autoLayout(doc) {
-    const { row, rows, preds } = layers(doc);
-    const step = NODE_W + GAP_X, x = {};
-    rows.forEach((ids) => {
-      ids = [...ids];
-      const want = Object.fromEntries(ids.map((id, i) => {
-        const above = preds[id].filter((p) => row[p] < row[id] && p in x);
-        return [id, above.length ? above.reduce((s, p) => s + x[p], 0) / above.length : i * step];
-      }));
-      ids.sort((a, b) => want[a] - want[b]);
-      ids.forEach((id, i) => { x[id] = i === 0 ? want[id] : Math.max(want[id], x[ids[i - 1]] + step); });
-      const drift = ids.reduce((s, id) => s + x[id] - want[id], 0) / ids.length;
-      ids.forEach((id) => { x[id] -= drift; });
-    });
-    const xs = Object.values(x), minX = xs.length ? Math.min(...xs) : 0;
-    const positions = {};
-    for (const id of stepIds(doc)) positions[id] = { x: Math.round(x[id] - minX + PAD), y: PAD + row[id] * (NODE_H + GAP_Y) };
-    return { positions, ...bounds(positions) };
-  }
+  function layers(doc) { return Graph.layers(stepIds(doc), predecessors(doc)); }
+  function autoLayout(doc) { return Graph.autoLayout(stepIds(doc), predecessors(doc)); }
 
   // Saved positions where present, auto-layout for the rest; stale IDs are ignored.
   function layout(doc, saved = {}) {
@@ -197,14 +176,6 @@
       positions[id] = p && Number.isFinite(p.x) && Number.isFinite(p.y) ? { x: p.x, y: p.y } : auto[id];
     }
     return { positions, ...bounds(positions) };
-  }
-
-  function bounds(positions) {
-    const all = Object.values(positions);
-    if (!all.length) return { minX: 0, minY: 0, width: 0, height: 0 };
-    const minX = Math.min(...all.map((p) => p.x)), minY = Math.min(...all.map((p) => p.y));
-    const maxX = Math.max(...all.map((p) => p.x)) + NODE_W, maxY = Math.max(...all.map((p) => p.y)) + NODE_H;
-    return { minX, minY, width: maxX - minX, height: maxY - minY };
   }
 
   // What a step's prompt or command may reference: flow inputs and its direct prerequisites'
@@ -367,12 +338,21 @@
       state === 'waiting' && record.resolution ? h('p', { class: 'fb-placement-fix' }, `How to fix: ${record.resolution}`) : null);
   }
 
+  // What the list of flows can be filtered by. Same query language as the board's cards.
+  const Search = () => (typeof module !== 'undefined' && module.exports ? require('./card-search.js') : root.CardSearch);
+  function flowMatches(entry, query) {
+    if (!query?.trim()) return true;
+    const steps = Object.entries(entry.document?.steps || {});
+    return Search().matchFields(query, { name: [entry.name], description: [entry.document?.description], state: [entry.state, STATES[entry.state]?.[0]],
+      step: steps.map(([id]) => id), agent: steps.map(([, step]) => step.agent) });
+  }
+
   // ------------------------------------------------------------------ Editor
   function mount(container, options = {}) {
     const win = container.ownerDocument.defaultView;
     const request = options.request || fetchJson;
     const narrow = () => !!win.matchMedia?.('(max-width: 700px)').matches;
-    const S = { docs: [], cur: null, sel: null, view: narrow() ? 'steps' : 'graph', vp: { x: 0, y: 0, k: 1 }, inspecting: false,
+    const S = { docs: [], cur: null, sel: null, view: narrow() ? 'steps' : 'graph', inspecting: false,
       drafts: {}, picker: null, caret: {}, lastName: null, visible: false, losslessAsk: null,
       placement: { key: null, serial: 0, result: null, error: null } };
 
@@ -389,28 +369,67 @@
 
     const flowList = h('ul', { class: 'fb-flow-list' });
     const nav = h('nav', { class: 'fb-flows', 'aria-label': 'Flow list' },
-      h('button', { type: 'button', class: 'secondary fb-new', onclick: () => newFlow() }, '+ New flow'), flowList);
+      h('button', { type: 'button', class: 'secondary fb-new', onclick: () => newFlow() }, '+ New flow'),
+      h('input', { type: 'search', class: 'fb-filter', placeholder: 'Filter flows', 'aria-label': 'Filter flows', autocomplete: 'off', spellcheck: 'false',
+        title: 'Words match a flow\'s name, description, steps and agents.\nname: state: step: agent: narrow to one, for example state:active or agent:codex.\n-word excludes.',
+        oninput: (e) => { S.flowFilter = e.target.value; renderList(); } }), flowList);
 
     const tabs = ['graph', 'steps', 'yaml'].map((v) => h('button', { type: 'button', role: 'tab', class: 'fb-tab', id: `fb-tab-${v}`, 'aria-controls': `fb-view-${v}`, 'data-view': v,
       onclick: () => setView(v), onkeydown: tabKey }, { graph: 'Graph', steps: 'Steps', yaml: 'YAML' }[v]));
     const tabList = h('div', { class: 'fb-tabs', role: 'tablist', 'aria-label': 'Editor view' }, ...tabs);
     const banner = h('div', { class: 'fb-banner', hidden: true });
 
-    const svgEl = s('svg', { class: 'fb-svg', tabindex: '0', role: 'group', 'aria-label': 'Flow graph. Tab to a step; Enter selects it, Delete removes it and arrow keys move it.' });
-    const graphEmpty = h('p', { class: 'fb-empty', hidden: true });
-    const zoomLabel = h('span', { class: 'fb-zoom', 'aria-live': 'polite' }, '100%');
     const tool = (label, onclick, attrs = {}) => h('button', { type: 'button', class: 'secondary', onclick, ...attrs }, label);
-    const toolbar = h('div', { class: 'fb-toolbar', role: 'toolbar', 'aria-label': 'Graph tools' },
-      tool('+ Program step', () => addNewStep('program')), tool('+ Agent step', () => addNewStep('agent')),
-      tool('Flow settings', () => select({ type: 'flow' }, { inspect: true })),
-      h('span', { class: 'fb-spacer' }),
-      tool('−', () => zoomBy(1 / 1.25), { 'aria-label': 'Zoom out', title: 'Zoom out' }), zoomLabel,
-      tool('+', () => zoomBy(1.25), { 'aria-label': 'Zoom in', title: 'Zoom in' }),
-      tool('Fit', () => fit(), { title: 'Fit the whole flow on screen' }),
-      tool('Auto-layout', () => autoArrange(), { title: 'Arrange steps by dependency depth' }));
-    const canvas = h('div', { class: 'fb-canvas' }, svgEl, graphEmpty);
-    const graphView = h('div', { class: 'fb-view fb-graph-view', id: 'fb-view-graph', role: 'tabpanel', 'aria-labelledby': 'fb-tab-graph' }, toolbar, canvas,
-      h('p', { class: 'fb-hint fb-graph-hint' }, 'Drag a step to move it. Drag from the round handle under a step onto another step to make that step wait for it. Drag the background to pan; pinch or Ctrl+scroll to zoom.'));
+    // An icon button: the words are for screen readers and the tooltip.
+    const ICONS = {
+      undo: 'M6 5 2.500 8.500 6 12M3 8.500h7a3.500 3.500 0 0 1 0 7H8', redo: 'M10 5l3.500 3.500L10 12M13 8.500H6a3.500 3.500 0 0 0 0 7h2',
+      arrange: 'M6 1.500h4v3H6zM1.500 11.500h4v3h-4zM10.500 11.500h4v3h-4zM8 4.500V8M3.500 11.500V8h9v3.500',
+      settings: 'M2 4h7M12.500 4H14M2 12h1.500M7 12h7M9 2.500h3.500v3H9zM3.500 10.500H7v3H3.500z',
+    };
+    const glyph = (name) => s('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d: ICONS[name] }));
+    const iconButton = (name, label, title, onclick) => h('button', { type: 'button', class: 'secondary fg-icon', title, onclick }, h('span', { class: 'fg-sr' }, label), glyph(name));
+    const undoBtn = iconButton('undo', 'Undo', 'Undo (Ctrl+Z)', () => undo());
+    const redoBtn = iconButton('redo', 'Redo', 'Redo (Ctrl+Y)', () => redo());
+    // What only editing can do: everything in on.* that changes the flow. Viewing is the shared graph's.
+    const graph = Graph.mount({
+      label: 'Flow graph. Tab to a step; Enter selects it, Delete removes it and arrow keys move it.',
+      insetTop: 56,
+      help: 'Drag a step to move it.\nDrag from the round handle under a step onto another step to make that step wait for it, or onto empty space to add a step.\nRight-click anything for its actions.\nDrag the background to pan; pinch or Ctrl+scroll to zoom.',
+      viewTools: [iconButton('arrange', 'Auto-layout', 'Arrange steps by dependency depth', () => autoArrange())],
+      on: {
+        select(target) {
+          if (!S.cur?.doc) return;
+          if (target.type === 'node') select({ type: 'step', id: target.id }, { inspect: true });
+          else if (target.type === 'edge') select({ type: 'edge', from: target.from, to: target.to }, { inspect: true });
+          else select({ type: 'flow' });
+        },
+        move(id, at) { freeze(); S.cur.positions[id] = at; renderGraph(); },
+        moveEnd() { scheduleLayoutSave(); },
+        canConnect: (from, id) => addDependency(S.cur.doc, from, id).ok,
+        connect: (from, to) => connect(from, to),
+        connectSelf: (from) => notify(`${from} cannot depend on itself.`, true),
+        // Dropped on empty space: make the next step right there.
+        connectEmpty: (e, from, at) => root.Overlays?.menu(e, [{ label: 'Add agent step here', onSelect: () => addNewStep('agent', from, at) }, { label: 'Add program step here', onSelect: () => addNewStep('program', from, at) }]),
+        nodeKey: (e, id) => nodeKey(e, id),
+        edgeKey: (e, from, to) => edgeKey(e, from, to),
+        canvasKey(e) {
+          if (e.key === 'a' || e.key === 'A') { e.preventDefault(); addNewStep('agent'); }
+          else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); addNewStep('program'); }
+        },
+        menu(e, target, at) {
+          if (!S.cur?.doc) return;
+          if (target.type === 'node') stepMenu(e, target.id);
+          else if (target.type === 'edge') edgeMenu(e, target.from, target.to);
+          else canvasMenu(e, at);
+        },
+        double(e, target, at) { if (target.type === 'canvas' && S.cur?.doc && root.Overlays) canvasMenu(e, at); },
+        card: (target) => (target.type === 'node' ? stepCard(target.id) : target.type === 'edge' ? edgeCard(target) : null),
+      },
+    });
+    graph.element.append(h('div', { class: 'fg-tools fb-tools-top', role: 'toolbar', 'aria-label': 'Graph tools' },
+      tool('+ Agent step', () => addNewStep('agent'), { title: 'A coding agent you can talk to. Shortcut: A' }), tool('+ Program step', () => addNewStep('program'), { title: 'Runs a command. Shortcut: P' }),
+      iconButton('settings', 'Flow settings', 'Flow settings: name, inputs and default worker', () => select({ type: 'flow' }, { inspect: true })), undoBtn, redoBtn));
+    const graphView = h('div', { class: 'fb-view fb-graph-view', id: 'fb-view-graph', role: 'tabpanel', 'aria-labelledby': 'fb-tab-graph' }, graph.element);
     const stepsView = h('div', { class: 'fb-view fb-steps-view', id: 'fb-view-steps', role: 'tabpanel', 'aria-labelledby': 'fb-tab-steps' });
     const yamlArea = h('textarea', { class: 'fb-yaml fb-code', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', 'aria-label': 'Flow YAML', oninput: onYamlInput });
     const yamlView = h('div', { class: 'fb-view fb-yaml-view', id: 'fb-view-yaml', role: 'tabpanel', 'aria-labelledby': 'fb-tab-yaml' }, yamlArea,
@@ -483,6 +502,7 @@
       if (next?.yamlInvalid && !next.doc) S.view = 'yaml';
       yamlArea.value = next?.yaml ?? '';
       renderAll();
+      refreshHistory();
       schedulePlacement();
     }
     async function openDoc(name) {
@@ -523,7 +543,12 @@
       if (!result) return null;
       if (!result.ok) { notify(result.error, true); if (rebuild) renderInspector(); return result; }
       if (result.unchanged) return result;
+      const now = Date.now();
+      if (now - (c.lastEditAt || 0) > 600) (c.undo ||= []).push(c.doc);
+      if (c.undo?.length > 100) c.undo.shift();
+      c.lastEditAt = now; c.redo = [];
       c.doc = result.doc; c.pendingEdit = true;
+      refreshHistory();
       notify('');
       scheduleSerialize(); schedulePlacement();
       renderList(); renderTop(); renderBanner(); renderGraph(); renderSteps();
@@ -568,6 +593,7 @@
       if (r.data.document) {
         if (!r.data.lossless && c.lossless) c.losslessAck = false;
         c.doc = r.data.document; c.yamlInvalid = false; c.lossless = r.data.lossless !== false; c.goodYaml = text;
+        c.undo = []; c.redo = []; refreshHistory();
         if (S.sel?.type === 'step' && !c.doc.steps?.[S.sel.id]) S.sel = null;
         if (S.sel?.type === 'edge' && !needsOf(c.doc.steps?.[S.sel.to]).includes(S.sel.from)) S.sel = null;
         S.drafts = {};
@@ -617,20 +643,53 @@
       const blocked = decisionFor(id)?.status === 'blocked' ? ' You can save this draft; launch is blocked until this is resolved.' : '';
       return h('p', { class: 'fb-hint fb-placement-source' }, source, blocked);
     }
+    // How many workers can take a step now, and the fleet filter that shows them.
+    const availableFor = (id) => (decisionFor(id)?.workers || []).filter((m) => m.status === 'compatible').length;
+    function fleetQuery(id) {
+      const doc = S.cur.doc, step = doc.steps[id], own = step?.worker || {}, selected = own.id ? own : { ...(doc.worker || {}), ...own };
+      const { term } = Search();
+      const software = decisionFor(id)?.workers?.flatMap((m) => m.detected || [])[0];
+      return [selected.id && term('id', selected.id), selected.pool && term('pool', selected.pool), ...(selected.tags || []).map((t) => term('tag', t)),
+        step?.kind === 'agent' && step.agent ? term('agent', step.agent) : software?.kind === 'command' ? term('command', software.name) : null,
+        availableFor(id) > 0 ? 'status:online' : null].filter(Boolean).join(' ');
+    }
+    function whereCount(id) {
+      const d = decisionFor(id);
+      return d && d.workers ? h('span', { class: 'fb-where-count', 'data-status': placementStatus(d), title: `${availableFor(id)} of ${d.workers.length} workers can run it now` }, String(availableFor(id))) : null;
+    }
+    function openFleetFor(id) { options.onShowFleet?.(fleetQuery(id)); }
+    function whereRow(sid) {
+      const d = decisionFor(sid), count = availableFor(sid), status = d ? placementStatus(d) : 'unknown', total = d?.workers?.length ?? 0;
+      const words = d ? placementHeadline(d) : 'Not checked.';
+      return h('button', { type: 'button', class: 'fb-where', 'data-where': sid, 'data-status': status, title: `${count} of ${total} workers can run ${sid} now.\n${words}\nClick to see them in the fleet.`, onclick: () => openFleetFor(sid) },
+        h('span', { class: 'fb-where-name' }, sid), h('span', { class: 'fb-sr' }, ` ${words} `), h('span', { class: 'fb-where-count', 'aria-label': `${count} workers available` }, String(count)));
+    }
+    function showInFleet(id) {
+      const count = availableFor(id);
+      return h('button', { type: 'button', class: 'secondary fb-show-fleet', onclick: () => openFleetFor(id), title: 'Open the fleet, filtered to what this step needs' }, `Show ${count} in fleet`);
+    }
     function placementBox(id) {
       const result = placementFor();
       if (S.placement.error) return [h('p', { class: 'fb-hint' }, `Couldn't check the fleet: ${S.placement.error}. Saving still works.`)];
       if (!result) return [h('p', { class: 'fb-hint', role: 'status' }, 'Checking the fleet…')];
       if (result.fleet === false) return [placementView(result)];
-      if (id === null) return [h('ul', { class: 'fb-placement-summary' }, ...stepIds(S.cur.doc).map((sid) => h('li', {}, h('strong', {}, sid), ' ', placementChip(sid), ' ',
-        decisionFor(sid) ? placementHeadline(decisionFor(sid)) : '')))];
+      if (id === null) return [h('ul', { class: 'fb-placement-summary' }, ...stepIds(S.cur.doc).map((sid) => h('li', {}, whereRow(sid))))];
       const d = decisionFor(id);
-      return d ? [placementView(d), placementSource(id)] : [h('p', { class: 'fb-hint' }, 'Not checked.')];
+      return d ? [placementView(d), placementSource(id), showInFleet(id)] : [h('p', { class: 'fb-hint' }, 'Not checked.')];
     }
     // Updates the open form in place, so typing is never interrupted by a check coming back.
     function renderPlacement() {
       const slot = inspector.querySelector('.fb-placement-slot');
-      if (slot) slot.replaceChildren(h('h4', {}, slot.dataset.title), ...placementBox(slot.dataset.step || null));
+      if (slot) {
+        slot.replaceChildren(h('h4', {}, slot.dataset.title), ...placementBox(slot.dataset.step || null));
+        const stepId = slot.dataset.step, box = slot.closest('details');
+        if (box && stepId) {
+          box.querySelector(':scope > summary .fb-where-count')?.remove();
+          const chip = whereCount(stepId);
+          if (chip) box.querySelector(':scope > summary').append(chip);
+          if (placementStatus(decisionFor(stepId)) === 'blocked') box.open = true;
+        }
+      }
       const wrap = inspector.querySelector('.fb-field[data-field="requires_command"]');
       if (wrap) {
         const needed = ambiguous(wrap.dataset.step), input = wrap.querySelector('input');
@@ -771,6 +830,16 @@
       notify('');
       await preview(r.data);
     }
+    async function disable() {
+      const c = S.cur;
+      if (!c?.name || c.isNew) return;
+      notify('Checking what disabling affects…');
+      const r = await request('GET', `/api/flow-documents/${encodeURIComponent(c.name)}/activation?disable=1`);
+      if (S.cur !== c) return;
+      if (!r.ok) { notify(`Couldn't prepare to disable it: ${errorText(r)}`, true); return; }
+      notify('');
+      await preview(r.data, undefined, { disabling: true });
+    }
     function engineItems(engines) {
       return (engines || []).map((e) => {
         const label = ENGINE_LABELS[e.engine] || e.engine;
@@ -783,29 +852,31 @@
         return h('li', { class: 'fb-engine' }, h('strong', {}, label), ` ${what}${e.available === false ? ' · engine unavailable' : ''}`, runs);
       });
     }
-    async function preview(pv, note) {
+    async function preview(pv, note, { disabling = false } = {}) {
+      const verb = disabling ? 'Disable' : 'Activate';
       const c = S.cur, affected = (pv.engines || []).filter((e) => e.action !== 'none');
       const known = affected.reduce((n, e) => n + (e.activeRuns?.length || 0), 0), unknown = affected.some((e) => e.activeRuns == null);
       const change = { add: 'adds this flow', update: 'replaces the active version', remove: 'removes the active version', none: 'changes nothing' }[pv.change] || pv.change;
       const body = [note ? h('p', { class: 'fb-note' }, note) : null,
-        p(`Activating ${pv.name} ${change}${pv.change === 'update' ? ` (${shortRev(pv.activeRevision)} → ${shortRev(pv.revision)})` : ''}. New runs use the activated version; runs keep the version they started with.`),
+        disabling ? p(`Disabling ${pv.name} means new runs can't start it. The saved draft stays, so you can enable it again.`)
+          : p(`Activating ${pv.name} ${change}${pv.change === 'update' ? ` (${shortRev(pv.activeRevision)} → ${shortRev(pv.revision)})` : ''}. New runs use the activated version; runs keep the version they started with.`),
         h('ul', { class: 'fb-engines' }, ...engineItems(pv.engines)),
-        pv.disruptive ? h('p', { class: 'fb-warning' }, 'Reloading these workers interrupts the work they are running. Nothing is cancelled for you; choose Not now to activate later.') : null];
-      const label = !pv.disruptive ? 'Activate' : `Activate and interrupt ${plural(known, 'run')}${unknown ? ' (and any unknown)' : ''}`;
+        pv.disruptive ? h('p', { class: 'fb-warning' }, 'Reloading these workers interrupts the work they are running. Nothing is cancelled for you; choose Not now to do this later.') : null];
+      const label = !pv.disruptive ? verb : `${verb} and interrupt ${plural(known, 'run')}${unknown ? ' (and any unknown)' : ''}`;
       if (pv.errors?.length) body.push(h('p', { class: 'fb-warning' }, `The draft has ${plural(pv.errors.length, 'problem')}, so it cannot be activated. Fix and save it first.`));
-      const choice = await ask({ title: `Activate ${pv.name}?`, body, buttons: pv.change === 'none' || pv.errors?.length ? [{ label: 'Close', value: false }]
+      const choice = await ask({ title: `${verb} ${pv.name}?`, body, buttons: pv.change === 'none' || pv.errors?.length ? [{ label: 'Close', value: false }]
         : [{ label: 'Not now', value: false }, { label, value: true, kind: pv.disruptive ? 'danger' : 'primary' }] });
       if (!choice || S.cur !== c) return;
-      notify('Activating…');
-      const r = await request('POST', `/api/flow-documents/${encodeURIComponent(pv.name)}/activate`, { revision: pv.revision, impact: pv.impact, confirm: !!pv.disruptive });
+      notify(disabling ? 'Disabling…' : 'Activating…');
+      const r = await request('POST', `/api/flow-documents/${encodeURIComponent(pv.name)}/${disabling ? 'deactivate' : 'activate'}`, { revision: disabling ? pv.activeRevision : pv.revision, impact: pv.impact, confirm: !!pv.disruptive });
       if (S.cur !== c) return;
       if (r.status === 409 && r.data?.preview) {
         notify('');
         const why = { 'impact changed': 'What activation affects changed since you looked. Review it again.', 'confirmation required': 'This activation interrupts work and needs your confirmation.',
           conflict: 'The draft changed since the preview. Review the current version.' }[r.data.error] || r.data.error;
-        await preview(r.data.preview, why); return;
+        await preview(r.data.preview, why, { disabling }); return;
       }
-      if (!r.ok) { notify(`Activation failed: ${errorText(r)}`, true); return; }
+      if (!r.ok) { notify(`${disabling ? 'Disabling' : 'Activation'} failed: ${errorText(r)}`, true); return; }
       notify('');
       await results(r.data);
       await refreshList();
@@ -863,17 +934,19 @@
       while (taken.some((q) => Math.abs(q.x - spot.x) < NODE_W + 8 && Math.abs(q.y - spot.y) < NODE_H + 8)) spot.x += NODE_W + GAP_X;
       return spot;
     }
-    async function addNewStep(kind, after) {
+    async function addNewStep(kind, after, at) {
       const c = S.cur;
       if (!c?.doc) return;
+      if (at) freeze();
       const frozen = Object.keys(c.positions).length > 0;
       let spot = null;
-      if (frozen) {
+      if (at) spot = freeSpot({ x: at.x - NODE_W / 2, y: at.y - NODE_H / 2 });
+      else if (frozen) {
         const pos = positionsNow();
         if (after && pos[after]) spot = freeSpot({ x: pos[after].x, y: pos[after].y + NODE_H + GAP_Y });
         else {
-          const rect = svgEl.getBoundingClientRect();
-          spot = rect.width ? freeSpot({ x: (rect.width / 2 - S.vp.x) / S.vp.k - NODE_W / 2, y: (rect.height / 2 - S.vp.y) / S.vp.k - NODE_H / 2 })
+          const middle = graph.center();
+          spot = middle ? freeSpot({ x: middle.x - NODE_W / 2, y: middle.y - NODE_H / 2 })
             : freeSpot({ x: PAD, y: bounds(pos).minY + bounds(pos).height + GAP_Y });
         }
       }
@@ -885,6 +958,39 @@
       if (S.view === 'graph') reveal(result.id);
       if (!narrow()) inspector.querySelector('[data-focus="step:id"]')?.focus();
     }
+    async function duplicate(id) {
+      const c = S.cur;
+      if (!c?.doc?.steps?.[id]) return;
+      const from = positionsNow()[id];
+      freeze();
+      const result = await edit((doc) => duplicateStep(doc, id));
+      if (!result?.ok) return;
+      c.positions[result.id] = freeSpot({ x: from.x + 24, y: from.y + NODE_H + 24 });
+      scheduleLayoutSave();
+      notify(`Added ${result.id}, a copy of ${id}.`);
+      select({ type: 'step', id: result.id }, { inspect: true });
+      if (S.view === 'graph') reveal(result.id);
+    }
+    // Undo and redo cover the document, not where steps sit. Typing in a field counts as one edit.
+    function refreshHistory() {
+      undoBtn.disabled = !S.cur?.undo?.length;
+      redoBtn.disabled = !S.cur?.redo?.length;
+    }
+    function restore(from, to, word) {
+      const c = S.cur;
+      if (!c?.doc || c.yamlInvalid || !c[from]?.length) return;
+      (c[to] ||= []).push(c.doc);
+      c.doc = c[from].pop(); c.pendingEdit = true; c.lastEditAt = 0;
+      const sel = S.sel;
+      if ((sel?.type === 'step' && !c.doc.steps?.[sel.id]) || (sel?.type === 'edge' && !needsOf(c.doc.steps?.[sel.to]).includes(sel.from))) S.sel = null;
+      S.drafts = {};
+      notify(word);
+      scheduleSerialize(); schedulePlacement();
+      renderList(); renderTop(); renderBanner(); renderGraph(); renderSteps(); renderInspector();
+      refreshHistory();
+    }
+    const undo = () => restore('undo', 'redo', 'Undone.');
+    const redo = () => restore('redo', 'undo', 'Redone.');
     async function connect(from, to) {
       const result = await edit((doc) => addDependency(doc, from, to), { inspector: true });
       if (result?.ok && !result.unchanged) notify(`${to} now waits for ${from}.`);
@@ -919,7 +1025,7 @@
       S.sel = null;
       notify(`Deleted ${id}.`);
       renderAll({ keepYaml: true });
-      if (S.view === 'graph') svgEl.focus();
+      if (S.view === 'graph') graph.focus();
     }
     function nudge(id, key, by) {
       freeze();
@@ -935,135 +1041,74 @@
       notify('Arranged by dependency depth.');
     }
 
-    // ---- viewport
-    function applyViewport() {
-      svgEl.querySelector('.fb-viewport')?.setAttribute('transform', `translate(${S.vp.x},${S.vp.y}) scale(${S.vp.k})`);
-      zoomLabel.textContent = `${Math.round(S.vp.k * 100)}%`;
+    // ---- the shared graph, from the editor's side
+    function fit() { if (S.cur?.doc && graph.fit()) S.cur.fitPending = false; }
+    function reveal(id) { graph.reveal(id); }
+    function focusGraphItem(key) { if (S.view === 'graph') graph.focusItem(key); }
+    // ---- right click: each thing on the canvas offers its own edits
+    function canvasMenu(e, at) {
+      const hasSteps = stepIds(S.cur.doc).length > 0;
+      root.Overlays.menu(e, [
+        { label: 'Add agent step here', shortcut: 'A', onSelect: () => addNewStep('agent', undefined, at) },
+        { label: 'Add program step here', shortcut: 'P', onSelect: () => addNewStep('program', undefined, at) }, null,
+        { label: 'Undo', shortcut: 'Ctrl+Z', disabled: !S.cur.undo?.length, onSelect: undo },
+        { label: 'Redo', shortcut: 'Ctrl+Y', disabled: !S.cur.redo?.length, onSelect: redo }, null,
+        { label: 'Fit on screen', disabled: !hasSteps, onSelect: fit },
+        { label: 'Auto-layout', disabled: !hasSteps, onSelect: autoArrange }, null,
+        { label: 'Flow settings', onSelect: () => select({ type: 'flow' }, { inspect: true }) }]);
     }
-    function zoomAt(k, cx, cy) {
-      const next = Math.min(2.5, Math.max(0.25, k));
-      S.vp.x = cx - ((cx - S.vp.x) / S.vp.k) * next; S.vp.y = cy - ((cy - S.vp.y) / S.vp.k) * next; S.vp.k = next;
+    function stepMenu(e, id) {
+      const nav = win.navigator;
+      root.Overlays.menu(e, [
+        { label: 'Edit step', onSelect: () => inspector.querySelector('[data-focus="step:id"]')?.focus() },
+        { label: 'Add agent step after', onSelect: () => addNewStep('agent', id) },
+        { label: 'Add program step after', onSelect: () => addNewStep('program', id) },
+        { label: 'Duplicate', onSelect: () => duplicate(id) }, null,
+        { label: 'Copy step ID', disabled: !nav.clipboard, onSelect: () => nav.clipboard.writeText(id).then(() => notify(`Copied ${id}.`), () => notify('Copy failed.', true)) }, null,
+        { label: 'Delete step', shortcut: 'Del', danger: true, onSelect: () => confirmRemoveStep(id) }]);
+      // After opening: selecting redraws the graph, and the menu is placed from the element under the pointer.
+      select({ type: 'step', id });
     }
-    function zoomBy(f) { const r = svgEl.getBoundingClientRect(); zoomAt(S.vp.k * f, r.width / 2, r.height / 2); renderGraph(); }
-    // Pan just enough to show a step whole. The zoom stays unless the step can't fit at it.
-    function reveal(id) {
-      const at = positionsNow()[id], rect = svgEl.getBoundingClientRect();
-      if (!at || !rect.width || !rect.height) return;
-      const margin = 16, fits = Math.min((rect.width - 2 * margin) / NODE_W, (rect.height - 2 * margin) / NODE_H);
-      if (S.vp.k > fits) zoomAt(fits, rect.width / 2, rect.height / 2);
-      const w = NODE_W * S.vp.k, h = NODE_H * S.vp.k;
-      const left = at.x * S.vp.k + S.vp.x, top = at.y * S.vp.k + S.vp.y;
-      const shift = (start, size, room) => size + 2 * margin > room ? (room - size) / 2 - start
-        : start < margin ? margin - start : start + size > room - margin ? room - margin - (start + size) : 0;
-      S.vp.x += shift(left, w, rect.width); S.vp.y += shift(top, h, rect.height);
-      applyViewport();
+    function edgeMenu(e, from, to) {
+      root.Overlays.menu(e, [
+        { label: `Edit ${from}`, onSelect: () => select({ type: 'step', id: from }, { inspect: true }) },
+        { label: `Edit ${to}`, onSelect: () => select({ type: 'step', id: to }, { inspect: true }) }, null,
+        { label: 'Remove dependency', shortcut: 'Del', danger: true, onSelect: () => disconnect(from, to, { confirm: true }) }]);
+      select({ type: 'edge', from, to });
     }
-    function fit() {
-      const c = S.cur, rect = svgEl.getBoundingClientRect();
-      if (!c?.doc || !rect.width || !rect.height) return;
-      c.fitPending = false;
-      const b = bounds(positionsNow());
-      if (!b.width) { S.vp = { x: 0, y: 0, k: 1 }; renderGraph(); return; }
-      const k = Math.min(1, Math.max(0.25, Math.min((rect.width - 32) / b.width, (rect.height - 32) / b.height)));
-      S.vp = { k, x: (rect.width - b.width * k) / 2 - b.minX * k, y: Math.max(16, (rect.height - b.height * k) / 2) - b.minY * k };
-      renderGraph();
+    // ---- hover: what a step is configured to do
+    function stepCard(id) {
+      const step = S.cur?.doc?.steps?.[id];
+      if (!step) return null;
+      const needs = needsOf(step), errs = errorsFor(id), then = stepIds(S.cur.doc).filter((other) => needsOf(S.cur.doc.steps[other]).includes(id));
+      const text = step.kind === 'agent' ? step.prompt : step.run, w = step.worker;
+      const where = w ? [w.id, w.pool && `pool ${w.pool}`, w.tags?.length && w.tags.join(', ')].filter(Boolean).join(' · ') : '';
+      const row = (name, value) => (value ? [h('dt', {}, name), h('dd', {}, value)] : []);
+      return h('div', {}, h('strong', {}, id),
+        step.description ? h('p', {}, step.description) : null,
+        text ? h('pre', {}, String(text).trim().slice(0, 240)) : null,
+        h('dl', {}, ...row('Waits for', needs.join(', ')), ...row('Then', then.join(', ')), ...row('Runs on', where),
+          ...row('Retries', step.retries), ...row('Timeout', step.timeout_minutes && `${step.timeout_minutes} min`)),
+        errs.length ? h('p', { class: 'hover-error' }, errs.map((x) => x.message).join('\n')) : null);
     }
-
-    // ---- pointer gestures on the canvas: move, connect, pan, pinch; taps select.
-    const pointers = new Map();
-    let gesture = null;
-    const local = (e) => { const r = svgEl.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-    const toGraph = (pt) => ({ x: (pt.x - S.vp.x) / S.vp.k, y: (pt.y - S.vp.y) / S.vp.k });
-    svgEl.addEventListener('pointerdown', (e) => {
-      if (e.pointerType === 'mouse' && e.button !== 0) return;
-      if (!S.cur?.doc) return;
-      try { svgEl.setPointerCapture(e.pointerId); } catch {}
-      pointers.set(e.pointerId, local(e));
-      if (pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        gesture = { mode: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, vp: { ...S.vp } };
-        clearPreview(); return;
-      }
-      if (pointers.size > 2) return;
-      const handle = e.target.closest?.('[data-handle]'), node = e.target.closest?.('[data-step]'), edge = e.target.closest?.('[data-edge]');
-      const start = local(e);
-      if (handle) { e.preventDefault(); gesture = { mode: 'connect', from: handle.dataset.handle, start, moved: false }; }
-      else if (node) gesture = { mode: 'move', id: node.dataset.step, start, origin: { ...positionsNow()[node.dataset.step] }, moved: false };
-      else if (edge) gesture = { mode: 'edge', from: edge.dataset.from, to: edge.dataset.to, start, moved: false };
-      else { gesture = { mode: 'pan', start, vp: { ...S.vp }, moved: false }; e.preventDefault(); svgEl.focus({ preventScroll: true }); }
+    function edgeCard({ from, to }) {
+      return h('div', {}, h('p', {}, h('strong', {}, to), ' waits for ', h('strong', {}, from)), h('p', { class: 'hover-note' }, h('code', {}, `{{ steps.${from}.output }}`)));
+    }
+    // The list of flows
+    function flowMenu(e, name, state, active) {
+      const open = async (then) => { await openDoc(name); if (S.cur?.name === name && !S.cur.isNew) then?.(); };
+      root.Overlays.menu(e, [{ label: 'Open', onSelect: () => open() },
+        { label: 'Activate…', disabled: state === 'active' || state === 'broken', onSelect: () => open(() => { if (!activateBtn.disabled) activate(); }) },
+        { label: 'Disable…', disabled: !active, onSelect: () => open(() => disable()) },
+        { label: 'Run…', disabled: !active, onSelect: () => open(() => { if (!runBtn.disabled) run(); }) }, null,
+        { label: 'Delete…', danger: true, onSelect: () => open(() => { if (!deleteBtn.hidden) removeDraft(); }) }]);
+    }
+    container.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.target.closest?.('input, textarea, select')) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (key === 'y' || (key === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
     });
-    svgEl.addEventListener('pointermove', (e) => {
-      if (!pointers.has(e.pointerId) || !gesture) return;
-      const pt = local(e);
-      pointers.set(e.pointerId, pt);
-      if (gesture.mode === 'pinch') {
-        if (pointers.size < 2) return;
-        const [a, b] = [...pointers.values()], mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        S.vp = { ...gesture.vp, x: gesture.vp.x + mid.x - gesture.mid.x, y: gesture.vp.y + mid.y - gesture.mid.y };
-        zoomAt(gesture.vp.k * (Math.hypot(a.x - b.x, a.y - b.y) / gesture.dist), mid.x, mid.y);
-        applyViewport(); return;
-      }
-      const dx = pt.x - gesture.start.x, dy = pt.y - gesture.start.y;
-      if (!gesture.moved && Math.hypot(dx, dy) < 5) return;
-      gesture.moved = true;
-      if (gesture.mode === 'pan') { S.vp = { ...gesture.vp, x: gesture.vp.x + dx, y: gesture.vp.y + dy }; applyViewport(); }
-      else if (gesture.mode === 'move') {
-        freeze();
-        S.cur.positions[gesture.id] = { x: Math.round(gesture.origin.x + dx / S.vp.k), y: Math.round(gesture.origin.y + dy / S.vp.k) };
-        renderGraph();
-      } else if (gesture.mode === 'connect') {
-        const from = positionsNow()[gesture.from], end = toGraph(pt);
-        const x1 = from.x + NODE_W / 2, y1 = from.y + NODE_H;
-        svgEl.querySelector('.fb-preview')?.setAttribute('d', `M${x1},${y1} C${x1},${y1 + 40} ${end.x},${end.y - 40} ${end.x},${end.y}`);
-        const over = dropTarget(e);
-        svgEl.querySelectorAll('.fb-node.drop').forEach((n) => n.classList.remove('drop'));
-        if (over && over !== gesture.from) svgEl.querySelector(`[data-step="${CSS.escape(over)}"]`)?.classList.add('drop');
-      }
-    });
-    const dropTarget = (e) => container.ownerDocument.elementFromPoint(e.clientX, e.clientY)?.closest?.('[data-step]')?.dataset.step;
-    function clearPreview() { svgEl.querySelector('.fb-preview')?.setAttribute('d', ''); svgEl.querySelectorAll('.fb-node.drop').forEach((n) => n.classList.remove('drop')); }
-    function endGesture(e) {
-      if (!pointers.has(e.pointerId)) return;
-      pointers.delete(e.pointerId);
-      const g = gesture;
-      if (!g) return;
-      if (g.mode === 'pinch') { if (!pointers.size) { gesture = null; renderGraph(); } return; }
-      gesture = null;
-      if (e.type === 'pointercancel') { clearPreview(); return; }
-      if (g.mode === 'connect') {
-        clearPreview();
-        const to = g.moved && dropTarget(e);
-        if (to && to !== g.from) connect(g.from, to);
-        else if (g.moved && to === g.from) notify(`${g.from} cannot depend on itself.`, true);
-        else if (!g.moved) select({ type: 'step', id: g.from }, { inspect: true });
-      } else if (g.mode === 'move') { if (g.moved) scheduleLayoutSave(); else select({ type: 'step', id: g.id }, { inspect: true }); }
-      else if (g.mode === 'edge') { if (!g.moved) select({ type: 'edge', from: g.from, to: g.to }, { inspect: true }); }
-      else if (g.mode === 'pan' && !g.moved) select({ type: 'flow' });
-    }
-    svgEl.addEventListener('pointerup', endGesture);
-    svgEl.addEventListener('pointercancel', endGesture);
-    svgEl.addEventListener('wheel', (e) => {
-      if (!S.cur?.doc) return;
-      e.preventDefault();
-      if (e.ctrlKey || e.metaKey) { const pt = local(e); zoomAt(S.vp.k * Math.exp(-e.deltaY / 300), pt.x, pt.y); renderGraph(); }
-      else { S.vp.x -= e.deltaX; S.vp.y -= e.deltaY; applyViewport(); }
-    }, { passive: false });
-    svgEl.addEventListener('keydown', (e) => {
-      if (e.target !== svgEl) return;
-      const step = 40;
-      const moves = { ArrowLeft: [step, 0], ArrowRight: [-step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] };
-      if (moves[e.key]) { e.preventDefault(); S.vp.x += moves[e.key][0]; S.vp.y += moves[e.key][1]; applyViewport(); }
-      else if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1.25); }
-      else if (e.key === '-') { e.preventDefault(); zoomBy(1 / 1.25); }
-    });
-
-    function focusGraphItem(key) {
-      const [type, rest] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
-      let node = null;
-      if (type === 'step') node = svgEl.querySelector(`[data-step="${CSS.escape(rest)}"]`);
-      else if (type === 'edge') { const [from, to] = rest.split('>'); node = svgEl.querySelector(`[data-edge][data-from="${CSS.escape(from)}"][data-to="${CSS.escape(to)}"]`); }
-      if (S.view === 'graph' && node) node.focus({ preventScroll: true });
-    }
 
     // ---- rendering
     function renderAll({ keepYaml = false } = {}) {
@@ -1078,12 +1123,29 @@
     }
     function renderList() {
       const c = S.cur;
-      const item = (name, state, current) => h('li', {}, h('button', { type: 'button', class: 'fb-flow-item', 'aria-current': current ? 'true' : null,
-        title: STATES[state]?.[1] || '', onclick: () => (name ? openDoc(name) : null) },
+      const item = (name, state, current) => h('li', { class: 'fb-flow-row' }, h('button', { type: 'button', class: 'fb-flow-item', 'data-state': state || null, 'aria-current': current ? 'true' : null,
+        title: STATES[state]?.[1] || '', onclick: () => (name ? openDoc(name) : null),
+        oncontextmenu: (e) => { if (!name || !root.Overlays || e.pointerType === 'touch') return; e.preventDefault(); flowMenu(e, name, state, S.docs.find((d) => d.name === name)?.activeRevision); } },
       h('span', { class: 'fb-flow-name' }, name || c.doc?.name || 'new flow'),
       current && isDirty() ? h('span', { class: 'fb-dirty', title: 'Unsaved changes' }, h('span', { 'aria-hidden': 'true' }, '●'), h('span', { class: 'fb-sr' }, ' unsaved changes')) : null,
-      state ? h('span', { class: `fb-chip fb-state-${state}` }, (STATES[state] || [state])[0]) : h('span', { class: 'fb-chip' }, 'Unsaved')));
-      flowList.replaceChildren(...(c?.isNew ? [item(null, null, true)] : []), ...S.docs.map((d) => item(d.name, d.state, !!c && !c.isNew && c.name === d.name)));
+      state ? h('span', { class: `fb-chip fb-state-${state}` }, (STATES[state] || [state])[0]) : h('span', { class: 'fb-chip' }, 'Unsaved')), name ? flowSwitch(S.docs.find((d) => d.name === name)) : null);
+      // The open flow stays listed, so a filter never hides what you are editing.
+      const shown = S.docs.filter((d) => (c && !c.isNew && c.name === d.name) || flowMatches(d, S.flowFilter));
+      flowList.replaceChildren(...(c?.isNew ? [item(null, null, true)] : []), ...shown.map((d) => item(d.name, d.state, !!c && !c.isNew && c.name === d.name)),
+        ...(S.flowFilter?.trim() && !shown.length ? [h('li', { class: 'fb-hint fb-no-match' }, 'No flows match.')] : []));
+    }
+    // On: new runs can use this flow. Turning it on or off shows what it affects first, as Activate does.
+    function flowSwitch(entry) {
+      const on = !!entry?.activeRevision;
+      const blocked = !on && entry?.state === 'broken';
+      return h('button', { type: 'button', role: 'switch', class: 'fb-switch', 'aria-checked': String(on), 'aria-label': `${entry.name} enabled`, disabled: blocked,
+        title: blocked ? 'Fix the errors before enabling this flow' : on ? 'Enabled: new runs can use this flow. Click to disable.' : 'Disabled: this flow can\'t be started. Click to enable.',
+        onclick: () => setEnabled(entry.name, !on) });
+    }
+    async function setEnabled(name, on) {
+      await openDoc(name);
+      if (S.cur?.name !== name || S.cur.isNew) return;
+      if (on) await activate(); else await disable();
     }
     function renderTop() {
       const c = S.cur, dirty = isDirty();
@@ -1121,73 +1183,31 @@
       else if (!e.step && e.field && c?.doc) select({ type: 'flow' }, { inspect: true });
       else { setView('yaml'); yamlArea.focus(); return; }
       const field = e.field && inspector.querySelector(`[data-field="${CSS.escape(e.field)}"] :is(input, textarea, select, button)`);
+      const folded = field?.closest('details');
+      if (folded) folded.open = true;
       (field || inspector.querySelector('h3'))?.focus();
     }
 
+    // The flow, as the shared graph draws it.
     function renderGraph() {
       const c = S.cur;
       if (!c?.doc || !stepIds(c.doc).length) {
-        svgEl.replaceChildren();
-        graphEmpty.hidden = false;
-        graphEmpty.textContent = !c ? 'Pick a flow or create one.' : !c.doc ? 'The YAML cannot be read, so there is no graph to show. Fix it in the YAML tab.' : 'No steps yet. Add a program or agent step.';
+        graph.render({ empty: !c ? 'Pick a flow or create one.' : !c.doc ? 'The YAML cannot be read, so there is no graph to show. Fix it in the YAML tab.' : 'No steps yet. Add a program or agent step.' });
         return;
       }
-      graphEmpty.hidden = true;
-      const doc = c.doc, pos = positionsNow(), ids = stepIds(doc), k = S.vp.k;
-      const active = container.ownerDocument.activeElement;
-      const focusKey = active?.dataset?.step ? `step:${active.dataset.step}` : active?.dataset?.edge ? `edge:${active.dataset.from}>${active.dataset.to}` : null;
+      const doc = c.doc, positions = positionsNow(), ids = stepIds(doc);
       const edges = [];
-      for (const to of ids) for (const from of needsOf(doc.steps[to])) if (pos[from] && from !== to) edges.push({ from, to });
-      const anchor = (end, other) => {
-        const groups = {}, at = new Map();
-        for (const e of edges) (groups[e[end]] ??= []).push(e);
-        for (const list of Object.values(groups)) {
-          list.sort((a, b) => pos[a[other]].x - pos[b[other]].x);
-          list.forEach((e, i) => at.set(e, (NODE_W * (i + 1)) / (list.length + 1)));
-        }
-        return at;
-      };
-      const outX = anchor('from', 'to'), inX = anchor('to', 'from');
-      const edgeEls = edges.map((e) => {
-        const a = pos[e.from], b = pos[e.to];
-        const x1 = a.x + outX.get(e), y1 = a.y + NODE_H, x2 = b.x + inX.get(e), y2 = b.y;
-        const bend = Math.max(30, Math.abs(y2 - y1) / 2);
-        // A dependency that points upwards (a cycle from YAML, or a manual layout) goes round the side.
-        const side = Math.max(a.x, b.x) + NODE_W + 28;
-        const d = y2 >= y1 + 12 ? `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2 - 3}`
-          : `M${x1},${y1} C${x1},${y1 + 50} ${side},${y1 + 50} ${side},${(y1 + y2) / 2} S${x2},${y2 - 50} ${x2},${y2 - 3}`;
-        const selected = S.sel?.type === 'edge' && S.sel.from === e.from && S.sel.to === e.to;
-        // Not in the tab order (Tab walks the steps); keyboard users edit dependencies in the step form.
-        return s('g', { class: `fb-edge${selected ? ' selected' : ''}`, 'data-edge': '1', 'data-from': e.from, 'data-to': e.to, tabindex: '-1', role: 'button',
-          'aria-pressed': String(selected), 'aria-label': `Dependency: ${e.to} waits for ${e.from}. Delete removes it.`,
-          onkeydown: (ev) => edgeKey(ev, e.from, e.to) },
-        s('title', {}, `${e.to} waits for ${e.from}`),
-        s('path', { class: 'hit', d, 'stroke-width': Math.max(16, 24 / k) }), s('path', { class: 'line', d, 'marker-end': 'url(#fb-arrow)' }));
-      });
-      const nodeEls = ids.map((id) => {
-        const step = doc.steps[id], p0 = pos[id], errs = errorsFor(id), selected = S.sel?.type === 'step' && S.sel.id === id;
+      for (const to of ids) for (const from of needsOf(doc.steps[to])) {
+        edges.push({ from, to, selected: S.sel?.type === 'edge' && S.sel.from === from && S.sel.to === to, ariaLabel: `Dependency: ${to} waits for ${from}. Delete removes it.` });
+      }
+      const nodes = ids.map((id) => {
+        const step = doc.steps[id], errs = errorsFor(id), needs = needsOf(step);
         const kind = step?.kind === 'agent' ? 'agent' : step?.kind === 'program' ? 'program' : 'unknown';
-        const sub = kind === 'agent' ? `agent · ${step.agent || 'demo'}${step.review ? ' · review' : ''}` : kind === 'program' ? 'program' : String(step?.kind ?? 'unknown kind');
-        const needs = needsOf(step);
-        const hit = Math.max(23, 23 / k); // at least a 44px touch target at any zoom
-        return s('g', { class: `fb-node ${kind}${selected ? ' selected' : ''}${errs.length ? ' has-error' : ''}`, 'data-step': id, transform: `translate(${p0.x},${p0.y})`,
-          tabindex: '0', role: 'button', 'aria-pressed': String(selected),
-          'aria-label': `${id}, ${kind} step${needs.length ? `, waits for ${needs.join(', ')}` : ', starts first'}${errs.length ? `, ${plural(errs.length, 'problem')}` : ''}`,
-          onkeydown: (ev) => nodeKey(ev, id) },
-        s('title', {}, `${id}${step?.description ? ` — ${step.description}` : ''}${errs.length ? `\n${errs.map((x) => x.message).join('\n')}` : ''}`),
-        s('rect', { class: 'box', width: NODE_W, height: NODE_H, rx: 10 }),
-        s('rect', { class: 'stripe', x: 5, y: 6, width: 5, height: NODE_H - 12, rx: 2 }),
-        s('text', { class: 'label', x: 18, y: 24 }, short(id, 20)),
-        s('text', { class: 'sub', x: 18, y: 42 }, short(sub, 26)),
-        errs.length ? s('g', { class: 'badge', 'aria-hidden': 'true' }, s('circle', { cx: NODE_W - 14, cy: 14, r: 9 }), s('text', { x: NODE_W - 14, y: 18, 'text-anchor': 'middle' }, '!')) : null,
-        s('circle', { class: 'in', cx: NODE_W / 2, cy: 0, r: 4 }),
-        s('g', { class: 'handle', 'data-handle': id, 'aria-hidden': 'true' }, s('circle', { class: 'hit', cx: NODE_W / 2, cy: NODE_H, r: hit }), s('circle', { class: 'dot', cx: NODE_W / 2, cy: NODE_H, r: 7 })));
+        const sub = kind === 'agent' ? `${AGENT_LABELS[step.agent]?.split(' · ')[0] || step.agent || 'Demo'}${step.review ? ' · review' : ''}` : kind === 'program' ? String(step.run ?? '').trim().split('\n')[0] || 'command' : String(step?.kind ?? 'unknown kind');
+        return { id, label: id, sub, code: kind === 'program', kind, selected: S.sel?.type === 'step' && S.sel.id === id, problem: errs.length > 0,
+          ariaLabel: `${id}, ${kind} step${needs.length ? `, waits for ${needs.join(', ')}` : ', starts first'}${errs.length ? `, ${plural(errs.length, 'problem')}` : ''}` };
       });
-      const marker = s('marker', { id: 'fb-arrow', viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L10,5 L0,10 z', class: 'fb-arrowhead' }));
-      svgEl.replaceChildren(s('defs', {}, marker), s('g', { class: 'fb-viewport' }, ...edgeEls, ...nodeEls, s('path', { class: 'fb-preview', d: '' })));
-      svgEl.setAttribute('aria-label', `Flow graph with ${plural(ids.length, 'step')}. Tab to a step; Enter selects it, Delete removes it and arrow keys move it.`);
-      applyViewport();
-      if (focusKey) focusGraphItem(focusKey);
+      graph.render({ nodes, edges, positions, ariaLabel: `Flow graph with ${plural(ids.length, 'step')}. Tab to a step; Enter selects it, Delete removes it and arrow keys move it.` });
     }
     function nodeKey(e, id) {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select({ type: 'step', id }, { inspect: true }); }
@@ -1242,11 +1262,21 @@
 
     // ---- inspector
     let fieldSerial = 0;
+    // An explanation behind a small "i". Phones have no hover, so they show it inline instead (see the CSS).
+    const info = (text) => h('span', { class: 'fb-info', tabindex: '0', role: 'img', 'aria-label': text, title: text }, 'i');
+    // A folded group that stays as the user left it when the inspector redraws.
+    S.folds = new Set();
+    function fold(key, summary, children, { open = false } = {}) {
+      const box = h('details', { class: 'fb-fold', 'data-fold': key }, h('summary', {}, summary), h('div', { class: 'fb-fold-body' }, ...children));
+      box.open = open || narrow() || S.folds.has(key);
+      box.addEventListener('toggle', () => { if (box.open) S.folds.add(key); else S.folds.delete(key); });
+      return box;
+    }
     function field(label, control, { key, step = null, errors, hint, extraError } = {}) {
       const id = control.id || `fb-field-${++fieldSerial}`;
       control.id = id;
       const wrap = h('div', { class: 'fb-field', 'data-field': key, 'data-step': step ?? '' },
-        h('label', { for: id }, label), control, hint ? h('small', { class: 'fb-hint' }, hint) : null,
+        h('div', { class: 'fb-label-row' }, h('label', { for: id }, label), hint ? info(hint) : null), control, hint ? h('small', { class: 'fb-hint fb-inline-hint' }, hint) : null,
         h('p', { class: 'fb-field-error', id: `${id}-error`, hidden: true }));
       wrap.dataset.extra = extraError || '';
       setFieldErrors(wrap, errors);
@@ -1434,9 +1464,12 @@
         field('Kind', kindSelect, { key: 'kind', step: id }),
         field('Description', description, { key: 'description', step: id }),
         needsField, ...agentFields, ...programFields,
-        h('div', { class: 'fb-pair' }, numberField(id, 'retries', 'Retries', 0, 10, '0', '0–10'), numberField(id, 'timeout_minutes', 'Timeout (minutes)', 1, 1440, '60', '1–1440')),
-        workerFields(`step:${id}`, step.worker, (value) => edit(mutate((d) => setKey(d.steps[id], 'worker', value)))),
-        h('section', { class: 'fb-placement-slot', 'data-step': id, 'data-title': 'Where this step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where this step can run'), ...placementBox(id)),
+        fold('step-run', 'Retries, timeout and worker', [
+          h('div', { class: 'fb-pair' }, numberField(id, 'retries', 'Retries', 0, 10, '0', '0–10'), numberField(id, 'timeout_minutes', 'Timeout (minutes)', 1, 1440, '60', '1–1440')),
+          workerFields(`step:${id}`, step.worker, (value) => edit(mutate((d) => setKey(d.steps[id], 'worker', value))))],
+        { open: ['retries', 'timeout_minutes', 'worker'].some((key) => errorsFor(id, key).length) }),
+        fold('step-where', ['Where it can run', ' ', whereCount(id)], [h('section', { class: 'fb-placement-slot', 'data-step': id, 'data-title': 'Where this step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where this step can run'), ...placementBox(id))],
+          { open: placementStatus(decisionFor(id)) === 'blocked' }),
         extras(step, FORM_STEP_KEYS),
         h('div', { class: 'fb-row' }, h('button', { type: 'button', class: 'secondary', 'data-focus': 'step:after', onclick: () => addNewStep('program', id) }, '+ Program step after this'),
           h('button', { type: 'button', class: 'secondary', 'data-focus': 'step:after-agent', onclick: () => addNewStep('agent', id) }, '+ Agent step after this')),
@@ -1491,12 +1524,12 @@
         field('Name', name, { key: 'name', hint: S.cur.isNew ? 'Lowercase letters, digits and -.' : 'Saving under a new name creates a new flow; the old one stays until you delete it.', extraError: nameError }),
         field('Description', description, { key: 'description' }),
         h('div', { class: 'fb-field', 'data-field': 'input', 'data-step': '' }, h('span', { class: 'fb-label' }, 'Inputs'),
-          h('small', { class: 'fb-hint' }, 'Values chosen when a run starts. Use them in prompts and commands as {{ input.name }}.'),
+          h('small', { class: 'fb-hint fb-inline-hint' }, 'Values chosen when a run starts. Use them in prompts and commands as {{ input.name }}.'),
           inputs.length ? h('ul', { class: 'fb-inputs' }, ...inputs.map(([k, v], i) => inputRow(k, v, i))) : h('p', { class: 'fb-hint' }, 'No inputs.'),
           h('button', { type: 'button', class: 'secondary', 'data-focus': 'flow:add-input', onclick: () => edit(mutate((d) => { d.input = d.input || {}; let i = 1; while (`input_${i}` in d.input) i++; d.input[`input_${i}`] = ''; }), { inspector: true }) }, '+ Add input'),
           h('p', { class: 'fb-field-error', id: 'fb-input-error', hidden: true })),
-        workerFields('flow', doc.worker, (value) => edit(mutate((d) => setKey(d, 'worker', value)))),
-        h('section', { class: 'fb-placement-slot', 'data-title': 'Where each step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where each step can run'), ...placementBox(null)),
+        fold('flow-worker', 'Default worker', [workerFields('flow', doc.worker, (value) => edit(mutate((d) => setKey(d, 'worker', value))))], { open: errorsFor(null, 'worker').length > 0 }),
+        fold('flow-where', 'Where each step can run', [h('section', { class: 'fb-placement-slot', 'data-title': 'Where each step can run', 'aria-live': 'polite' }, h('h4', {}, 'Where each step can run'), ...placementBox(null))]),
         'environment' in doc ? h('div', { class: 'fb-extra' }, h('h4', {}, 'Environment setup'),
           p('This flow prepares an environment (a setup_environment step runs first). Edit it in the YAML tab; graph edits keep it.'),
           h('details', {}, h('summary', {}, 'environment'), h('pre', {}, JSON.stringify(doc.environment, null, 2)))) : null,
@@ -1524,11 +1557,13 @@
         return true;
       },
       hide() { S.visible = false; },
+      // Open one flow, as a run's "Edit this flow" does.
+      show: (name) => openDoc(name),
       isDirty,
     };
   }
 
-  const api = { AGENTS, NODE_W, NODE_H, checkStepId, uniqueStepId, addStep, removeStep, renameStep, renameInput, referencesTo, addDependency, removeDependency,
+  const api = { flowMatches, AGENTS, NODE_W, NODE_H, checkStepId, uniqueStepId, addStep, removeStep, duplicateStep, renameStep, renameInput, referencesTo, addDependency, removeDependency,
     dependsOn, dependencyOptions, layers, autoLayout, layout, bounds, referenceCandidates, insertText, compareDocuments, TEMPLATES, mount,
     waitingWords, placementHeadline, executionText, placementView, executionView };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

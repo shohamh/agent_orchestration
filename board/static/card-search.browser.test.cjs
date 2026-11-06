@@ -40,7 +40,7 @@ test('the filter box, hide finished and column paging work on a live board', { t
     if (url.pathname === '/api/workers') return response.end(JSON.stringify({ workers: [] }));
     if (url.pathname.endsWith('/dag')) return response.end(JSON.stringify({ model: 'declared', nodes: [], edges: [] }));
     const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
-    if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'].includes(file)) return response.writeHead(404).end();
+    if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'].includes(file)) return response.writeHead(404).end();
     response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
     response.end(fs.readFileSync(path.join(__dirname, file)));
   });

@@ -234,6 +234,10 @@
     stopped: ['Session stopped', 'The run ended. Start a new session to continue.'],
   };
   function stateView(card) {
+    // Its worker can't be reached: nothing here would get through, so don't pretend the session is live.
+    if (card.offline_worker && !['done', 'stopped'].includes(card.column)) {
+      return { state: 'offline', title: `${card.offline_worker} is offline`, hint: "This session can't respond until that PC reconnects.", terminal: true, offline: true, queued: false, actions: [] };
+    }
     const state = card.column === 'stopped' ? 'stopped' : card.column === 'done' ? 'done' : card.session_state || 'starting';
     const [title, hint] = STATES[state] || [state.replaceAll('_', ' '), ''];
     const terminal = ['done', 'stopped'].includes(state);
@@ -252,12 +256,21 @@
     const error = h('div', { class: 'chat-error', role: 'alert', hidden: '' });
     const menuId = `slash-commands-${++commandMenuId}`;
     const text = h('textarea', { rows: '1', placeholder: 'Give the agent a direction…', 'aria-label': 'Message to agent', 'data-chat-focus': 'composer', role: 'combobox', 'aria-autocomplete': 'list', 'aria-controls': menuId, 'aria-expanded': 'false' });
-    const send = h('button', { type: 'submit', class: 'primary' }, 'Send message');
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const icon = (d) => {
+      const svg = document.createElementNS(SVG_NS, 'svg'), path = document.createElementNS(SVG_NS, 'path');
+      for (const [k, v] of Object.entries({ width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
+      path.setAttribute('d', d); svg.append(path);
+      return svg;
+    };
+    const ICONS = { attach: 'M8 3v10M3 8h10', send: 'M8 13V3M3.500 7.500 8 3l4.500 4.500', interrupt: 'M4.500 4.500h7v7h-7z', continue: 'M5 3.500v9l7-4.500z', done: 'M3 8.500 6.500 12 13 4.500', info: 'M8 7.500V11M8 5v.01M14 8A6 6 0 1 1 2 8a6 6 0 0 1 12 0Z' };
+    const send = h('button', { type: 'submit', class: 'primary composer-send', 'aria-label': 'Send message', title: 'Send · Ctrl+Enter' }, icon(ICONS.send));
     const actions = h('div', { class: 'session-actions' });
     const settings = h('div', { class: 'agent-settings', 'aria-label': 'Agent settings' });
     const attachmentInput = h('input', { type: 'file', multiple: '', 'aria-label': 'Attach images or files' });
     const attachments = h('div', { class: 'chat-attachments' });
-    const hint = h('span', { class: 'composer-hint' });
+    const attachLabel = h('label', { class: 'composer-icon composer-attach', title: 'Attach images or files · up to 5, 96 KiB total' }, icon(ICONS.attach), attachmentInput);
+    const meta = h('div', { class: 'composer-meta' });
     const suggestions = h('div', { id: menuId, class: 'command-suggestions', role: 'listbox', 'aria-label': 'Slash commands', hidden: '' });
     let selected = 0, matches = [], dismissed = false;
     const form = h('form', { class: 'chat-composer', onsubmit: async event => {
@@ -274,7 +287,7 @@
         const message = encoded.length ? { type: 'message', text: value, attachments: encoded } : { type: 'message', text: value };
         if (await post(message) && key === currentKey && text.value.trim() === value) { text.value = ''; session.draft = ''; session.files = []; attachmentInput.value = ''; renderAttachments(); renderCommands(); fit(); }
       } catch (failure) { error.textContent = failure.message; error.hidden = false; }
-    } }, settings, suggestions, text, attachments, error, h('div', { class: 'composer-bottom' }, hint, send), actions);
+    } }, suggestions, error, h('div', { class: 'composer-box' }, attachments, text, h('div', { class: 'composer-bar' }, settings, h('span', { class: 'composer-gap' }), meta, actions, send)));
     // Grow with the text (up to the CSS max-height) instead of reserving rows on small screens.
     const fit = () => { text.style.height = 'auto'; text.style.height = `${text.scrollHeight + 2}px`; };
     function chooseCommand(command) {
@@ -367,7 +380,7 @@
     }
 
     function renderSettings(session) {
-      const state = session.acpState || {}, controls = [];
+      const state = session.acpState || {}, controls = [], marks = [];
       const options = state.configOptions || [];
       for (const option of options) {
         if (!option.id || !['select', 'boolean'].includes(option.type)) continue;
@@ -377,28 +390,43 @@
         for (const item of values) select.append(h('option', { value: String(item.value) }, item.name || String(item.value)));
         select.value = String(option.currentValue); select.disabled = view.terminal || session.sending;
         select.addEventListener('change', () => post({ type: 'config', id: option.id, value: option.type === 'boolean' ? select.value === 'true' : select.value }));
-        controls.push(h('label', {}, h('span', {}, option.name || option.id), select));
+        select.title = option.name || option.id;
+        controls.push(select);
       }
       if (!options.some(option => option.category === 'mode') && state.modes?.availableModes?.length) {
         const select = h('select', { 'aria-label': 'Agent mode' });
         for (const mode of state.modes.availableModes) select.append(h('option', { value: mode.id }, mode.name || mode.id));
         select.value = state.modes.currentModeId; select.disabled = view.terminal || session.sending;
         select.addEventListener('change', () => post({ type: 'mode', id: select.value }));
-        controls.push(h('label', {}, h('span', {}, 'Agent mode'), select));
+        select.title = 'Agent mode';
+        controls.push(select);
       }
       if (state.usage && state.usage.size > 0) {
         const usage = state.usage, percentage = Math.min(100, Math.round(100 * usage.used / usage.size));
-        controls.push(h('span', { class: 'context-usage', title: `${usage.used} of ${usage.size} tokens` },
-          `Context ${percentage}%`, usage.cost ? ` · ${usage.cost.amount} ${usage.cost.currency}` : ''));
+        // A small ring that fills as the context does; the numbers are on hover.
+        const ring = document.createElementNS(SVG_NS, 'svg');
+        ring.setAttribute('viewBox', '0 0 16 16'); ring.setAttribute('width', 16); ring.setAttribute('height', 16); ring.setAttribute('aria-hidden', 'true');
+        for (const [cls, dash] of [['ring-track', '100 100'], ['ring-used', `${percentage} 100`]]) {
+          const circle = document.createElementNS(SVG_NS, 'circle');
+          for (const [k, v] of Object.entries({ class: cls, cx: 8, cy: 8, r: 6, pathLength: 100, 'stroke-dasharray': dash, transform: 'rotate(-90 8 8)' })) circle.setAttribute(k, v);
+          ring.append(circle);
+        }
+        const cost = usage.cost ? ` · ${usage.cost.amount} ${usage.cost.currency}` : '';
+        marks.push(h('span', { class: `context-usage${percentage >= 80 ? ' high' : ''}`, title: `Context ${percentage}% used\n${usage.used.toLocaleString()} of ${usage.size.toLocaleString()} tokens${cost}` }, h('span', { class: 'sr-only' }, `Context ${percentage}%`), ring));
       }
-      if (state.capabilities?.loadSession && state.sessionId) controls.push(h('span', { class: 'context-usage', title: 'Use this ID with the same agent and workspace to resume' }, `Session: ${state.sessionId}`));
+      if (state.capabilities?.loadSession && state.sessionId) {
+        marks.push(h('button', { type: 'button', class: 'composer-icon', 'aria-label': 'Copy session ID', title: `Session ${state.sessionId}\nUse this ID with the same agent and workspace to resume. Click to copy.`,
+          onclick: () => navigator.clipboard?.writeText(state.sessionId) }, icon(ICONS.info)));
+      }
       const promptCaps = state.capabilities?.promptCapabilities || {};
       if (promptCaps.image || promptCaps.embeddedContext) {
         attachmentInput.accept = promptCaps.embeddedContext ? '' : 'image/*';
         attachmentInput.disabled = view.terminal || session.sending;
-        controls.push(h('label', {}, h('span', {}, 'Attach · 96 KiB total'), attachmentInput));
+        attachLabel.classList.toggle('disabled', attachmentInput.disabled);
+        controls.unshift(attachLabel);
       }
       settings.replaceChildren(...controls);
+      meta.replaceChildren(...marks);
     }
 
     function renderAttachments() {
@@ -498,15 +526,15 @@
           details.open = session.expanded.has(event.id);
           details.addEventListener('toggle', () => { if (details.isConnected) { if (details.open) session.expanded.add(event.id); else session.expanded.delete(event.id); } });
           const preview = toolPreview(event), input = parseJsonish(event.detail), edit = editOf(input);
-          details.append(h('summary', { 'data-chat-focus': `tool:${event.id}` }, h('span', { class: 'tool-mark', 'aria-hidden': 'true' }, event.status === 'ok' ? '✓' : event.status === 'error' ? '!' : '↻'), h('span', { class: 'tool-name' }, event.name || 'Tool'), preview ? h('span', { class: 'tool-summary' }, preview) : null, h('span', { class: 'tool-status' }, event.status || 'running')),
-            event.summary && String(event.summary).toLowerCase() !== String(event.name || '').toLowerCase() ? h('p', { class: 'tool-full-summary' }, event.summary) : null,
+          details.append(...[h('summary', { 'data-chat-focus': `tool:${event.id}` }, h('span', { class: 'tool-mark', 'aria-hidden': 'true' }, event.status === 'ok' ? '✓' : event.status === 'error' ? '!' : '↻'), h('span', { class: 'tool-name' }, event.name || 'Tool'), preview ? h('span', { class: 'tool-summary' }, preview) : null, h('span', { class: 'tool-status' }, event.status || 'running')),
+            event.summary && String(event.summary).toLowerCase() !== String(event.name || '').toLowerCase() && String(event.summary) !== preview ? h('p', { class: 'tool-full-summary' }, event.summary) : null,
             edit ? diffView(edit.before, edit.after, h) : event.detail ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Input'), codeView(event.detail, h)) : null,
             event.output ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Output'), codeView(event.output, h)) : null,
             ...(event.content || []).map(item => item.type === 'diff'
               ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, item.path || 'Changes'), diffView(item.oldText || '', item.newText || '', h))
               : item.type === 'terminal' ? h('div', { class: 'tool-section' }, h('div', { class: 'tool-section-label' }, 'Terminal output'),
                   codeView(session.rows.find(row => row.id === `terminal:${item.terminalId}`)?.output || 'Waiting for output…', h))
-              : item.content?.type === 'text' ? h('div', { class: 'tool-section' }, codeView(item.content.text, h)) : null).filter(Boolean));
+              : item.content?.type === 'text' ? h('div', { class: 'tool-section' }, codeView(item.content.text, h)) : null)].filter(Boolean));
           return details;
         }
         if (event.type === 'question') return renderQuestion(event, session);
@@ -538,7 +566,9 @@
         }
         if (event.type === 'error') return h('div', { class: 'transcript-error', role: 'note' }, h('strong', {}, event.will_retry ? 'Retrying after an error' : 'Agent error'), h('div', {}, event.message));
         return h('details', { class: 'tool-row' }, h('summary', {}, 'Agent plan'), codeView(event.entries || event.plan || event, h));
-      })].filter(Boolean) : !session.loaded ? [h('div', { class: 'chat-empty', role: 'status' }, h('span', { class: 'spinner large', 'aria-hidden': 'true' }), h('strong', {}, 'Loading conversation…'))]
+      })].filter(Boolean) : !session.loaded ? [h('div', { class: 'chat-empty', role: 'status' }, session.loadError ? null : h('span', { class: 'spinner large', 'aria-hidden': 'true' }),
+          h('strong', {}, session.loadError ? "Couldn't load this conversation" : 'Loading conversation…'),
+          session.loadError ? h('p', {}, session.loadError) : session.slow ? h('p', {}, 'Still waiting for the engine. It may be busy or unreachable.') : null)]
         : [h('div', { class: 'chat-empty' }, h('div', { class: 'empty-orbit', 'aria-hidden': 'true' }, '✦'), h('strong', {}, 'A new conversation is starting'), h('p', {}, 'Agent messages, tool activity, and requests will appear here.'))]));
       if (focus?.key) {
         const next = Array.from(log.querySelectorAll('[data-chat-focus]')).find(node => node.dataset.chatFocus === focus.key);
@@ -557,17 +587,21 @@
       if (changed) { text.value = session.draft; dismissed = false; selected = 0; fit(); error.hidden = true; }
       banner.className = `session-banner state-${view.state}`;
       // replaceChildren() would render a null child as the text "null".
-      banner.replaceChildren(...[h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', {}, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null].filter(Boolean));
+      banner.replaceChildren(...[h('span', { class: 'state-dot', 'aria-hidden': 'true' }), h('div', { title: view.hint }, h('strong', {}, view.title), h('p', {}, view.hint)), card.agent === 'demo' ? h('span', { class: 'simulation-badge' }, 'SIMULATED') : null].filter(Boolean));
       text.disabled = view.terminal; send.disabled = view.terminal || session.sending;
       renderCommands();
       renderSettings(session);
       renderAttachments();
-      text.placeholder = view.terminal ? 'This session has ended.' : 'Give the agent a direction…';
-      hint.textContent = view.terminal ? 'Session closed' : view.queued ? 'Queued for next turn · Ctrl/⌘ Enter to send' : 'Ctrl/⌘ Enter to send';
+      text.placeholder = view.offline ? `Waiting for ${card.offline_worker} to reconnect` : view.terminal ? 'This session has ended.' : view.queued ? 'Queued for the next turn. Ctrl+Enter to send' : 'Give the agent a direction. Ctrl+Enter to send';
       actions.replaceChildren(...view.actions.map(action => {
-        const button = h('button', { type: 'button', class: action === 'done' ? 'secondary finish-session' : 'secondary', onclick: () => post(action === 'continue' ? { type: 'message', text: 'continue' } : { type: action }) }, action === 'done' ? '✓ Mark done' : action === 'continue' ? 'Continue' : 'Interrupt turn');
+        const name = action === 'done' ? 'Mark done' : action === 'continue' ? 'Continue' : 'Interrupt turn';
+        const button = h('button', { type: 'button', class: `composer-icon${action === 'done' ? ' finish-session' : ''}`, 'aria-label': name, title: name, onclick: () => post(action === 'continue' ? { type: 'message', text: 'continue' } : { type: action }) }, icon(ICONS[action] || ICONS.interrupt));
         button.disabled = session.sending; return button;
       }));
+      // A conversation that doesn't arrive says so, rather than spinning forever.
+      if (!session.loaded && !session.slowTimer) {
+        session.slowTimer = setTimeout(() => { session.slow = true; if (sessions.get(currentKey) === session && !session.loaded) renderRows(); }, 6000);
+      }
       const nextSignature = `${session.version}|${session.loaded}|${view.state}`;
       if (changed || signature !== nextSignature) {
         signature = nextSignature;
@@ -593,7 +627,7 @@
         const first = message.rows[0]?.key, at = first ? session.rows.findIndex(row => row.key === first) : -1;
         session.rows = at > 0 ? [...session.rows.slice(0, at), ...message.rows] : message.rows;
         if (at <= 0) session.more = message.more;
-        session.truncated = !!message.truncated; session.loaded = true;
+        session.truncated = !!message.truncated; session.loaded = true; session.loadError = null;
       } else {
         const index = new Map(session.rows.map((row, i) => [row.key, i]));
         for (const row of message.rows) {
@@ -606,6 +640,12 @@
       }
       session.version++;
       if (key === currentKey && card) this.render(card, key);
+    },
+    // The engine couldn't give us this conversation.
+    fail(message) {
+      const session = currentKey && sessions.get(currentKey);
+      if (!session || session.loaded) return;
+      session.loadError = message; renderRows();
     },
     focus() { if (!text.disabled) text.focus(); } };
   }

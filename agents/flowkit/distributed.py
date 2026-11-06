@@ -34,6 +34,27 @@ def execution_info(run_id):
     return result
 
 
+def worker_jobs(worker_id, limit=200):
+    """Every card and step placed on a worker that this coordinator still has a record of, newest first."""
+    base = workspace_path('run').parent
+    jobs = []
+    try:
+        runs = [p for p in base.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    for run in runs:
+        for path in (run/'.flow-workers').glob('*.json'):
+            try:
+                info = json.loads(path.read_text(encoding='utf-8'))
+                placed = info.get('worker')
+                if isinstance(placed, dict) and placed.get('id') == worker_id:
+                    jobs.append({'run': run.name, 'step': path.stem, 'state': info.get('state'), 'engine': info.get('engine'), 'at': path.stat().st_mtime})
+            except (OSError, ValueError, AttributeError):
+                pass
+    jobs.sort(key=lambda job: job['at'], reverse=True)
+    return jobs[:limit]
+
+
 def set_selection(run_id, step, wanted):
     from .definition import STEP_ID
     if not STEP_ID.fullmatch(step): raise ValueError('Invalid step id')
