@@ -5,6 +5,7 @@
 #   AGENT_INSTALL_NO_SERVICE set to 1 to skip the startup entry and the registration (testing)
 #   AGENT_INSTALL_PYTHON     the Python to use (default python3)
 #   AGENT_INSTALL_PORT       the worker's local port (default 8096; it listens on 127.0.0.1 only)
+# Afterwards `agent-worker` manages it: status, start, stop, restart, update, uninstall, logs.
 main() {
   set -euo pipefail
   local SERVER=@@SERVER@@ CODE=@@CODE@@ NAME=@@NAME@@ SLOTS=@@SLOTS@@ TARGET_OS=@@OS@@
@@ -27,6 +28,19 @@ main() {
   esac
   [ "$detected" = "$TARGET_OS" ] || echo "Note: the form said $TARGET_OS but this PC is $detected; continuing"
   if [ "$(id -u)" = 0 ]; then fail "Run this as a normal user, not root or sudo: the worker installs for one user"; fi
+  # One worker per PC: a finished install (or its startup entry) means this must be an update or an uninstall, never a second install.
+  local existing=""
+  for candidate in "$PREFIX" "$HOME/.agent-worker"; do
+    [ -f "$candidate/installed.json" ] && { existing="$candidate"; break; }
+  done
+  if [ -z "$existing" ]; then
+    for entry in "$HOME"/.config/systemd/user/agent-worker-*.service "$HOME"/Library/LaunchAgents/agent-worker-*.plist; do
+      [ -e "$entry" ] && { existing="$entry"; break; }
+    done
+  fi
+  if [ -n "$existing" ]; then
+    fail "A worker is already installed on this PC ($existing). Update it with: agent-worker update. Remove it with: agent-worker uninstall (then run this command again)."
+  fi
   command -v curl >/dev/null || fail "curl is required"
   command -v tar >/dev/null || fail "tar is required"
   local hint="install Python 3.10+ (for example: sudo apt install python3 python3-venv, or: brew install python)"
@@ -55,17 +69,38 @@ main() {
   token="$("$PREFIX/venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
   ( umask 077; printf '%s' "$token" > "$PREFIX/token" )
   chmod 600 "$PREFIX/token"
-  printf '{"id": "%s", "slots": %s, "server": "%s", "port": %s}\n' "$NAME" "$SLOTS" "$SERVER" "$PORT" > "$PREFIX/worker.json"
+  "$PREFIX/venv/bin/python" "$PREFIX/agents/worker_ctl.py" --home "$PREFIX" version --compute > "$PREFIX/version"
 
+  # The agent-worker command: a wrapper next to the install and a link on the usual per-user PATH.
+  mkdir -p "$PREFIX/bin" "$HOME/.local/bin"
+  printf '#!/bin/sh\nexec "%s/venv/bin/python" "%s/agents/worker_ctl.py" --home "%s" "$@"\n' "$PREFIX" "$PREFIX" "$PREFIX" > "$PREFIX/bin/agent-worker"
+  chmod 755 "$PREFIX/bin/agent-worker"
+  ln -sf "$PREFIX/bin/agent-worker" "$HOME/.local/bin/agent-worker"
+  local cli_links="[\"$HOME/.local/bin/agent-worker\"]"
+
+  write_config() {  # write_config <service kind> <unit name>
+    printf '{"id": "%s", "slots": %s, "server": "%s", "port": %s, "service": "%s", "unit": "%s", "cli_links": %s}\n' \
+      "$NAME" "$SLOTS" "$SERVER" "$PORT" "$1" "$2" "$cli_links" > "$PREFIX/worker.json"
+  }
   local run=("$PREFIX/venv/bin/python" -u "$PREFIX/agents/worker_runner.py" --home "$PREFIX" --log "$PREFIX/worker.log")
+  local unit="agent-worker-@@NAME_RAW@@"
   if [ "${AGENT_INSTALL_NO_SERVICE:-0}" = 1 ]; then
+    write_config process "$unit"
+    printf '{"id": "%s", "at": %s, "service": "none"}\n' "$NAME" "$(date +%s)" > "$PREFIX/installed.json"
     echo "Installed in $PREFIX (AGENT_INSTALL_NO_SERVICE=1: no startup entry, not registered)."
-    echo "Start it with: ${run[*]}"
+    echo "Start it with: agent-worker start    (or: ${run[*]})"
     return 0
   fi
 
   step service "Starting the worker"
-  start_service "${run[@]}"
+  local kind
+  kind="$(install_service "$unit" "${run[@]}")"
+  write_config "$kind" "$unit"
+  case "$kind" in
+    systemd) systemctl --user enable --now "$unit.service" ;;
+    launchd) launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$unit.plist"; launchctl kickstart "gui/$(id -u)/$unit" ;;
+    *) "$PREFIX/bin/agent-worker" start ;;
+  esac
   local waited=0
   until curl -fsS -m 3 -H "Authorization: Bearer $token" "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 </dev/null; do
     waited=$((waited + 1)); [ "$waited" -le 40 ] || fail "The worker did not start; see $PREFIX/worker.log"
@@ -85,22 +120,16 @@ main() {
     waited=$((waited + 1)); [ "$waited" -le 60 ] || fail "Registered, but the worker is not connected yet; see $PREFIX/worker.log"
     sleep 1
   done
+  printf '{"id": "%s", "at": %s, "service": "%s"}\n' "$NAME" "$(date +%s)" "$kind" > "$PREFIX/installed.json"
   echo
-  echo "Done. $NAME is connected and will start again when you log in."
-  echo "Remove it later with: $PREFIX/uninstall.sh"
+  echo "Done. $NAME is connected and starts again when you log in (or at boot, with systemd lingering)."
+  echo "Manage it with: agent-worker status | stop | start | restart | update | uninstall | logs"
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "Note: add $HOME/.local/bin to your PATH to run agent-worker by name, or use $PREFIX/bin/agent-worker" ;; esac
 }
 
-start_service() {
-  local prefix="${AGENT_INSTALL_PREFIX:-$HOME/.agent-worker}"
-  local unit="agent-worker-@@NAME_RAW@@"
-  cat > "$prefix/uninstall.sh" <<UNINSTALL
-#!/usr/bin/env bash
-systemctl --user disable --now $unit.service 2>/dev/null || true
-launchctl bootout gui/\$(id -u) "\$HOME/Library/LaunchAgents/$unit.plist" 2>/dev/null || true
-rm -f "\$HOME/.config/systemd/user/$unit.service" "\$HOME/Library/LaunchAgents/$unit.plist"
-rm -rf "$prefix"
-UNINSTALL
-  chmod 700 "$prefix/uninstall.sh"
+# install_service <unit> <command...>: create the per-user startup entry (not started here); prints its kind
+install_service() {
+  local unit="$1"; shift
   if [ "$(uname -s)" = Darwin ]; then
     mkdir -p "$HOME/Library/LaunchAgents"
     local args=""; for a in "$@"; do args="$args<string>$a</string>"; done
@@ -113,8 +142,7 @@ UNINSTALL
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST
-    launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/$unit.plist" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$unit.plist"
+    echo launchd
   elif command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
     mkdir -p "$HOME/.config/systemd/user"
     local exec_line=""; for a in "$@"; do exec_line="$exec_line \"$a\""; done
@@ -127,16 +155,19 @@ After=network-online.target
 ExecStart=$exec_line
 Restart=always
 RestartSec=5
+KillMode=control-group
 
 [Install]
 WantedBy=default.target
 UNIT
     systemctl --user daemon-reload
-    systemctl --user enable --now "$unit.service"
-    echo "Note: to keep it running when nobody is logged in, run once: sudo loginctl enable-linger $USER"
+    if [ -z "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null | grep -i yes)" ]; then
+      echo "Note: it starts at login. To start at boot, before anyone logs in, run once: sudo loginctl enable-linger $USER" >&2
+    fi
+    echo systemd
   else
-    echo "Note: no per-user service manager here, so it runs in the background and will not restart after a reboot."
-    nohup "$@" >/dev/null 2>&1 </dev/null &
+    echo "Note: no per-user service manager here, so it runs as a background process and will not restart after a reboot or a crash." >&2
+    echo process
   fi
 }
 

@@ -55,8 +55,9 @@ class Call:
     def __init__(self, method, path, query, headers, source):
         self.id = os.urandom(8).hex()
         self.method, self.path, self.query, self.headers = method, path, query, headers
-        self.source = source  # the coordinator's request: its body is piped to the connector
-        self.has_body = bool(source.can_read_body and source.content_length != 0)
+        self.source = source  # the coordinator's request: its body is piped to the connector (None for a control call)
+        self.internal = source is None
+        self.has_body = bool(source is not None and source.can_read_body and source.content_length != 0)
         self.picked = asyncio.Event()
         self.response = asyncio.get_running_loop().create_future()  # (status, headers, connector request)
         self.finished = asyncio.Event()  # the coordinator's response has been written out
@@ -88,10 +89,31 @@ class Relay:
     def peer(self, worker_id):
         return self.peers.setdefault(worker_id, Peer())
 
+    def queue_control(self, worker_id, action):
+        """Ask a PC's connector to do something about itself (see connector.control); nobody waits for the answer."""
+        peer = self.peer(worker_id)
+        call = Call('POST', f'/_control/{action}', '', {}, None)
+        peer.calls[call.id] = call
+        peer.pending.append(call)
+        peer.wake.set()
+        async def reap():
+            try: await asyncio.wait_for(asyncio.shield(call.response), 120)
+            except (asyncio.TimeoutError, asyncio.CancelledError): pass
+            finally:
+                call.closed = True
+                peer.calls.pop(call.id, None)
+        asyncio.ensure_future(reap())
+        return call
+
     def state(self):
         now = time.monotonic()
-        return {wid: {'online': bool(p.online(now)), 'last_poll_seconds': None if not p.last_poll else round(now - p.last_poll, 1), 'queued': len(p.pending)}
-                for wid, p in self.peers.items()}
+        out = {}
+        for wid, p in self.peers.items():
+            status = p.status or {}
+            out[wid] = {'online': bool(p.online(now)), 'last_poll_seconds': None if not p.last_poll else round(now - p.last_poll, 1), 'queued': len(p.pending),
+                        'version': status.get('worker_version'), 'update_state': status.get('update_state'), 'update_error': status.get('update_error'),
+                        'attempts': getattr(p, 'update_attempts', 0)}
+        return out
 
 
 def registry_token_for():
@@ -223,6 +245,10 @@ async def call_response(request):
     except ValueError: status = 502
     headers = {k: v for k, v in request.headers.items() if k.lower() in ('content-type',)}
     if not call.response.done(): call.response.set_result((status, headers, request))
+    if call.internal:  # a control call has no coordinator waiting: take the answer and let it go
+        await request.read()
+        call.finished.set()
+        return web.Response(status=204)
     await call.finished.wait()  # the body is piped from this request while the coordinator's response is written
     return web.Response(status=204)
 
@@ -234,6 +260,8 @@ async def push_status(request):
     if not isinstance(body, dict): return json_error(400, 'Status must be an object')
     peer.status, peer.status_at = body, time.monotonic()
     peer.last_poll = peer.last_poll or time.monotonic()
+    hook = request.app.get('on_status')
+    if hook is not None: hook(request.app, request.match_info['id'], body)
     return web.Response(status=204)
 
 

@@ -7,6 +7,7 @@ relay.py) with the settings from the form. The code is the only credential on th
 bits, single use, expiring, compared in constant time.
 """
 import asyncio
+import hashlib
 import hmac
 import io
 import json
@@ -168,9 +169,9 @@ def commands(record, server=None):
 
 
 # --------------------------------------------------------------------------- the worker bundle
-BUNDLE_FILES = ('flow_execution_worker.py', 'relay_connector.py', 'worker_runner.py', 'requirements-worker.txt', 'package.json', 'package-lock.json')
+BUNDLE_FILES = ('flow_execution_worker.py', 'relay_connector.py', 'worker_runner.py', 'worker_ctl.py', 'requirements-worker.txt', 'package.json', 'package-lock.json')
 BUNDLE_DIRS = ('flowkit', 'agentdriver')
-_bundle = {'stamp': None, 'data': b''}
+_bundle = {'stamp': None, 'data': b'', 'version': ''}
 
 
 def bundle_members():
@@ -192,8 +193,17 @@ def build_bundle():
             info = archive.gettarinfo(str(path), arcname=f'agents/{path.relative_to(ROOT / "agents").as_posix()}')
             info.uid = info.gid = 0; info.uname = info.gname = ''
             with path.open('rb') as handle: archive.addfile(info, handle)
-    _bundle.update(stamp=stamp, data=buffer.getvalue())
+    digest = hashlib.sha256()
+    for path in sorted(members, key=lambda p: p.relative_to(ROOT / 'agents').as_posix()):  # paths and contents only, never timestamps (worker_ctl.hash_tree does the same)
+        digest.update(path.relative_to(ROOT / 'agents').as_posix().encode() + b'\x00' + hashlib.sha256(path.read_bytes()).digest())
+    _bundle.update(stamp=stamp, data=buffer.getvalue(), version=digest.hexdigest()[:16])
     return _bundle['data']
+
+
+def bundle_version():
+    """The worker version: a short hash of what the bundle contains. A PC reports the one it installed."""
+    build_bundle()
+    return _bundle['version']
 
 
 # --------------------------------------------------------------------------- scripts
