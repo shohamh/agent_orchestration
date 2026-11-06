@@ -169,7 +169,8 @@ async def attached_files(root, context, wanted, engine, receive, sink):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                message = f'Could not prepare what was attached to this run ({launch_context.targets(remote)}): {exc}'
+                # A worker's own report already says which source failed and why.
+                message = f'Could not prepare what was attached to this run ({launch_context.targets(remote)}): {exc}'.replace(': Could not prepare what was attached to this run:', ':')
                 await launch_context.Emitter(sink)('error', message=message[:2000], will_retry=False)
                 raise RuntimeError(message) from exc
             atomic_json(path, validate(files))

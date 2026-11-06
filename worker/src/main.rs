@@ -1,17 +1,22 @@
 //! agent-worker: the execution worker for the agent orchestration fleet, in one static binary.
+mod acp;
 mod artifacts;
 mod capabilities;
 mod components;
+mod confluence;
 mod config;
 mod connector;
 mod ctl;
+mod environment;
 mod gate;
 mod install;
 mod job;
 mod procutil;
 mod program;
 mod runner;
+mod schema;
 mod service;
+mod session;
 mod svc;
 mod sysmetrics;
 mod template;
@@ -95,6 +100,13 @@ enum Cmd {
     },
     /// The installed worker version
     Version,
+    /// `install`: the coding-agent adapters this worker can drive (needs Node.js). `status`: what this PC can run.
+    Agents {
+        action: String,
+        /// The npm registry to install from (an offline mirror, for example)
+        #[arg(long)]
+        registry: Option<String>,
+    },
     /// Extra processes the worker keeps running (any engine worker): list | add [--cwd DIR] [--env K=V] NAME -- COMMAND... | remove NAME
     Component {
         action: String,
@@ -186,6 +198,21 @@ async fn main() {
         Cmd::Version => {
             println!("{}", config::self_version());
             std::process::exit(0)
+        }
+        Cmd::Agents { action, registry } => {
+            let adapters = home.file("adapters");
+            acp::set_adapter_home(adapters.clone());
+            let outcome = match action.as_str() {
+                "install" => acp::install_adapters(&adapters, registry.as_deref()),
+                "status" => Ok(()),
+                other => Err(format!("agents takes install or status, not {other}")),
+            };
+            if outcome.is_ok() {
+                for agent in capabilities::AGENTS {
+                    println!("{agent}: {}", capabilities::probe_agent(agent)["status"].as_str().unwrap_or("unknown"));
+                }
+            }
+            finish(outcome)
         }
         Cmd::Component { action, name, cwd, env, argv } => finish(ctl::component(&home, &action, name.as_deref(), cwd, env, argv)),
         Cmd::Install { uuid, server, port, no_service } => finish(install::install(home, install::Options { uuid, server, port, no_service }).await),

@@ -354,7 +354,8 @@ there) and when **Advanced** has a workspace or resume ID: a placed card runs in
 that PC. The same compatibility panel is shown, and a blocked card cannot be created.
 A program card checks the executable it can read from the command. A pipeline or a variable is not
 checked in advance and fails on the worker if the program is missing. Its workspace stays on the PC.
-Program cards run on every worker, Python or Rust. Agent cards need a Python execution worker.
+Agent cards need the agent on that PC: on the `agent-worker`, `agent-worker agents install` adds the
+adapters (it needs Node.js) and the worker reports what it can run in its capabilities.
 With a blank workspace and no selection, new Hatchet and Prefect cards check all registered workers and run on a compatible one. Cards using an existing workspace or resume ID run locally as before.
 
 **Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
@@ -429,12 +430,11 @@ the run with its error.
 |---|---|---|
 | Files | `context/files/<name>` | Uploaded through the board to the flow host, kept in the coordinators' shared `FLOW_WORKSPACES` volume |
 | GitHub, GitLab or any git repository | `repos/<name>` | Cloned on a worker with its credential helper or SSH, shallow unless the ref is a commit |
-| Confluence page tree | `context/confluence/<page id>` | Exported on a Python execution worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there |
+| Confluence page tree | `context/confluence/<page id>` | Exported on a worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there. The `agent-worker` uses a simpler converter than the Python worker's exporter |
 
 Sources are prepared once per run, on a worker the run's selection allows, and every step gets the same
 copy, so parallel steps don't conflict where they join. An agent's prompt gets a note listing them.
-Everything attached must fit the transfer limit of **64 MiB and 10,000 files**. The Rust worker clones
-repositories but does not import Confluence pages: a run that lands on one fails and says so.
+Everything attached must fit the transfer limit of **64 MiB and 10,000 files**.
 
 Uploads the run has not used are removed after 7 days; a schedule keeps the ones it needs.
 

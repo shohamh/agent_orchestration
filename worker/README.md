@@ -26,5 +26,15 @@ and `SHA256SUMS`. On GitLab set `WINDOWS_RUNNER_TAG` to your Windows runner's ta
 The version a worker reports is the first 16 hex characters of the SHA-256 of its program, so
 the server and a PC always agree on what "the same version" means.
 
-Not built yet: running agent sessions (ACP) and the environment/Confluence setup inside the
-Rust worker. Those still use the Python worker.
+The worker runs what a Python execution worker runs, with nothing else to install but the
+agents themselves: program steps and cards, agent sessions over ACP (permissions, questions,
+terminals, interrupts, retries), the built-in demo agent, environment setup and files,
+repositories and Confluence page trees attached to a run. `git` is needed for repositories.
+
+Agents: `agent-worker agents install [--registry URL]` puts the pinned npm adapters for Claude
+Code, Codex, opencode v2 and pi next to the worker (needs Node.js). `opencode` and `omp` are found
+on the PATH. `agent-worker agents status` says what this PC can run; set
+`AGENT_WORKER_ACP_<AGENT>` to a JSON list to start an agent another way.
+Confluence pages are exported by a small converter in the worker, with `CONFLUENCE_TOKEN` and
+`CONFLUENCE_EMAIL` when set. It is not equal to the pinned `confluence-markdown-exporter`: macros
+(alerts, Jira, includes, page trees, diagrams) and many attachments are not handled the same way.

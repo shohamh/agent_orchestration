@@ -54,9 +54,11 @@ harness passes.
    fleet updates. Verified on Windows and in Linux containers, including crash restarts and the real startup entries.
 2. **Agent steps.** The ACP session driver (`agentdriver`): drive a coding agent's adapter over stdio (JSON-RPC),
    permissions, questions, interrupt, usage, attachments, plus the built-in `demo` agent.
-3. **Environment setup.** Git sources. Confluence export needs the `confluence-markdown-exporter` Python package; it
-   stays a Python-only feature (a PC that needs it keeps Python), and the Rust worker refuses such a step with a clear
-   error instead of failing in the middle.
+3. **Environment setup.** Git sources, files, the repair session and validation. Confluence export is native (REST
+   and a small HTML converter), so no PC needs Python. Its Markdown is simpler than the Python exporter's, and its
+   manifest names its own exporter version, so an import is validated by the worker type that made it.
+
+Stages 2 and 3 are done.
 
 ## Non-goals
 

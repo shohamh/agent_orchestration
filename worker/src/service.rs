@@ -60,6 +60,9 @@ type ApiResult = Result<Json<Value>, ApiError>;
 impl App {
     pub fn new(config: Config) -> Arc<App> {
         let _ = std::fs::create_dir_all(&config.root);
+        if let Some(home) = config.root.parent() {
+            crate::acp::set_adapter_home(home.join("adapters"));
+        }
         let gate = Gate::open(config.root.join("gate.json"), config.slots);
         let inventory = read_json(&config.root.join("capabilities.json")).filter(|v| v.is_object()).unwrap_or(json!({}));
         let hostname = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
@@ -233,11 +236,15 @@ async fn create(State(app): State<Arc<App>>, Json(mut config): Json<Value>) -> A
         if run_id.is_empty() || run_id.len() > 150 || !run_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
             return Err(bad("Invalid run id"));
         }
-        if start.get("session").is_some() {
-            return Err(bad("This worker does not run agent sessions yet"));
+        if let Some(session) = start.get("session") {
+            let agent = card_agent(&start, session).map_err(bad)?;
+            return admit(&app, job_id, config, json!({"agent": agent}), run_id).await;
         }
-        if start.get("attached").is_some() {
-            return Err(bad("This worker does not import Confluence pages yet; choose a pool with a Python execution worker"));
+        if let Some(sources) = start.get("attached") {
+            if !sources.is_object() || start.as_object().map(|s| s.len()).unwrap_or(0) != 2 {
+                return Err(bad("Invalid source job"));
+            }
+            return admit(&app, job_id, config, json!({}), run_id).await;
         }
         let flow = start.get("flow").ok_or_else(|| bad("'flow'"))?;
         let step_id = start.get("step").and_then(|s| s.as_str()).ok_or_else(|| bad("'step'"))?;
@@ -247,29 +254,62 @@ async fn create(State(app): State<Arc<App>>, Json(mut config): Json<Value>) -> A
         if kind != "program" && kind != "agent" {
             return Err(bad(format!("Unknown step kind {kind:?}")));
         }
-        if let Some(command) = requirement.get("command").and_then(|c| c.as_str()) {
-            app.refresh_inventory(&[command.to_string()]).await;
-        }
-        crate::artifacts::validate(&config["files"]).map_err(bad)?;
-        crate::artifacts::validate(&config["assets"]).map_err(bad)?;
-        config["requirement"] = requirement;
-        config["runId"] = json!(run_id);
-        if let Some(expected) = config.get("gate_id").and_then(|g| g.as_str()) {
-            if expected != app.gate_id {
-                return Err(bad("Worker capacity gate identity changed"));
-            }
-        }
-        // A concurrent submit or cancel may have registered or terminated this id while the inventory refreshed.
-        if app.jobs.lock().unwrap().contains_key(&job_id) {
-            return Ok(Json(json!({"id": job_id})));
-        }
-        if app.termination_path(&job_id).exists() {
-            return Err(bad("A terminated job ID cannot be reused"));
-        }
-        let job = Job::new(app.clone(), job_id.clone(), config);
-        app.jobs.lock().unwrap().insert(job_id.clone(), job.clone());
-        job.spawn();
+        return admit(&app, job_id, config, requirement, run_id).await;
     }
+    Ok(Json(json!({"id": job_id})))
+}
+
+/// A standalone card, as a placed worker accepts it. It runs in a new workspace here, so a host path or a resumed
+/// session (bound to its original workspace) is refused rather than assumed to exist.
+fn card_agent(start: &Value, session: &Value) -> Result<String, String> {
+    const FIELDS: [&str; 7] = ["goal", "agent", "workspace", "simulateFailures", "resumeSessionId", "programInput", "attached"];
+    if start.as_object().map(|s| s.len()).unwrap_or(0) != 2 {
+        return Err("Invalid card job".into());
+    }
+    let fields = session.as_object().ok_or("Invalid card job")?;
+    if fields.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return Err("A card session contains only goal, agent, workspace, simulateFailures, resumeSessionId, programInput and attached".into());
+    }
+    let filled = |key: &str| fields.get(key).and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
+    if filled("workspace") || filled("resumeSessionId") {
+        return Err("A card placed on a fleet worker runs in a new workspace on that worker; clear the workspace (host paths and resumed sessions are not available on other PCs)".into());
+    }
+    if !fields.get("goal").and_then(|g| g.as_str()).map(|g| !g.trim().is_empty() && g.chars().count() <= 30000).unwrap_or(false) {
+        return Err("A card needs a goal of at most 20000 characters".into());
+    }
+    let agent = fields.get("agent").and_then(|a| a.as_str()).unwrap_or("codex");
+    if !capabilities::AGENTS.contains(&agent) {
+        return Err(format!("agent must be one of {}", capabilities::AGENTS.join(", ")));
+    }
+    if !fields.get("simulateFailures").map(|f| f.as_u64().map(|f| f <= 20).unwrap_or(false)).unwrap_or(true) {
+        return Err("simulateFailures must be a whole number from 0 to 20".into());
+    }
+    Ok(agent.to_string())
+}
+
+async fn admit(app: &Arc<App>, job_id: String, mut config: Value, requirement: Value, run_id: String) -> ApiResult {
+    if let Some(command) = requirement.get("command").and_then(|c| c.as_str()) {
+        app.refresh_inventory(&[command.to_string()]).await;
+    }
+    crate::artifacts::validate(&config["files"]).map_err(bad)?;
+    crate::artifacts::validate(&config["assets"]).map_err(bad)?;
+    config["requirement"] = requirement;
+    config["runId"] = json!(run_id);
+    if let Some(expected) = config.get("gate_id").and_then(|g| g.as_str()) {
+        if expected != app.gate_id {
+            return Err(bad("Worker capacity gate identity changed"));
+        }
+    }
+    // A concurrent submit or cancel may have registered or terminated this id while the inventory refreshed.
+    if app.jobs.lock().unwrap().contains_key(&job_id) {
+        return Ok(Json(json!({"id": job_id})));
+    }
+    if app.termination_path(&job_id).exists() {
+        return Err(bad("A terminated job ID cannot be reused"));
+    }
+    let job = Job::new(app.clone(), job_id.clone(), config);
+    app.jobs.lock().unwrap().insert(job_id.clone(), job.clone());
+    job.spawn();
     Ok(Json(json!({"id": job_id})))
 }
 

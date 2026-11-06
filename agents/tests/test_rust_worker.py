@@ -43,7 +43,12 @@ class Service:
     def __init__(self):
         self.dir = tempfile.TemporaryDirectory()
         self.port = free_port()
-        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1', 'FLOW_WORKER_TOKEN': TOKEN}
+        # The agents the tests drive: real JSON-RPC subprocesses, without model credits.
+        here = Path(__file__).resolve().parent
+        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1', 'FLOW_WORKER_TOKEN': TOKEN,
+               'AGENT_WORKER_ACP_OMP': json.dumps([sys.executable, str(here/'fake_acp_agent.py')]),
+               'AGENT_WORKER_ACP_PI': json.dumps([sys.executable, str(here/'fake_acp_terminal_agent.py')]),
+               'AGENT_WORKER_ACP_CODEX': json.dumps([sys.executable, '-c', 'raise SystemExit("codex cannot start")'])}
         self.process = subprocess.Popen([find_binary(), 'serve', '--id', 'rust-pc', '--uuid', UUID, '--port', str(self.port), '--slots', '2', '--root', self.dir.name],
                                         env=env, stdout=subprocess.DEVNULL, stderr=open(Path(self.dir.name) / 'service.log', 'wb'))
         deadline = time.time() + 20
@@ -121,7 +126,8 @@ class RustWorkerTests(FleetFixture):
         self.assertEqual(status, 200)
         self.assertEqual(refreshed['commands']['definitely-not-a-program-xyz']['status'], 'absent')
         self.assertEqual(self.pc.post('/capabilities/refresh', {'commands': ['a\nb']})[0], 400)
-        self.assertTrue(all(v['status'] == 'absent' for v in refreshed['agents'].values()), 'agent steps are not run by this worker yet')
+        self.assertEqual(refreshed['agents']['demo']['status'], 'installed')
+        self.assertEqual(refreshed['agents']['omp']['status'], 'installed')
 
     def test_limits_are_pushed_with_a_revision_and_stale_pushes_refused(self):
         gate = self.pc.get('/health')['capacity']['gate_id']
@@ -183,13 +189,6 @@ class RustWorkerTests(FleetFixture):
         tools = {e['id']: e for e in self.events if e.get('type') == 'tool'}
         self.assertEqual((tools['context:repositories']['status'], tools['program']['status']), ('ok', 'ok'))
         self.assertEqual(self.events[-1]['state'], 'done')
-
-    async def test_a_confluence_source_explains_that_this_worker_cannot_import_it(self):
-        from flowkit.distributed import execute_session
-        config = {'goal': 'python -c "print(1)"', 'agent': 'program', 'worker': {'pools': ['build']},
-                  'context': {'confluence': [{'base_url': 'https://x.io/wiki', 'page_id': '1', 'target': 'context/confluence/1'}]}}
-        with self.assertRaisesRegex(RuntimeError, 'does not import Confluence pages'):
-            await asyncio.wait_for(execute_session(config, 'rust-wiki', self.receive, self.sink, engine='hatchet'), 60)
 
     async def test_a_failing_step_fails_with_its_exit_code_and_last_output(self):
         with self.assertRaisesRegex(RuntimeError, r"exited with code 3: .*boom"):
@@ -254,7 +253,234 @@ class RustWorkerTests(FleetFixture):
         self.assertEqual(self.pc.post('/jobs', {**base, 'start': {**base['start'], 'runId': '../x'}})[1]['error'], 'Invalid run id')
         self.assertEqual(self.pc.post('/jobs', {**base, 'start': {**base['start'], 'step': 'nope'}})[1]['error'], 'Unknown step')
         self.assertEqual(self.pc.post('/jobs', {**base, 'files': {'../evil': {'data': '', 'mode': 420}}})[0], 400)
-        self.assertEqual(self.pc.post('/jobs', {**base, 'start': {'session': {'goal': 'x'}, 'runId': 'r1'}})[0], 400)
+        for session in ({'goal': 'x', 'workspace': 'C:/somewhere'}, {'goal': 'x', 'resumeSessionId': 'y'}, {'goal': ' '}, {'goal': 'x', 'agent': 'nope'}, {'goal': 'x', 'other': 1}):
+            self.assertEqual(self.pc.post('/jobs', {**base, 'start': {'session': session, 'runId': 'r1'}})[0], 400, session)
+        self.assertEqual(self.pc.post('/jobs', {**base, 'start': {'attached': 'x', 'runId': 'r1'}})[0], 400)
+
+    # ------------------------------------------------------------------ agents
+    def human(self, inbox, events, approve='allow', answers=None, say=None):
+        """Someone at the board: answers what is asked, then marks the card done."""
+        said = []
+        async def sink(event):
+            events.append(event)
+            if event.get('type') == 'approval': await inbox.put({'type': 'approval', 'id': event['id'], 'optionId': approve})
+            if event.get('type') == 'question': await inbox.put({'type': 'answer', 'id': event['id'], 'answers': answers or {'style': 'brief'}})
+            if event.get('type') == 'status' and event.get('state') == 'awaiting_review':
+                if say and not said:
+                    said.append(True)
+                    await inbox.put({'type': 'message', 'text': say})
+                else:
+                    await inbox.put({'type': 'done'})
+        return sink
+
+    async def card(self, run_id, goal='Fix the cart', agent='demo', timeout=60, **options):
+        from flowkit.distributed import execute_session
+        inbox, events = asyncio.Queue(), []
+        handlers = {k: options.pop(k) for k in ('approve', 'answers', 'say') if k in options}
+        config = {'goal': goal, 'agent': agent, 'workspace': '', 'simulateFailures': 0, 'resumeSessionId': '', 'worker': {'pools': ['build']}, **options}
+        result = await asyncio.wait_for(execute_session(config, run_id, inbox.get, self.human(inbox, events, **handlers), engine='hatchet'), timeout)
+        return result, events
+
+    async def test_a_demo_card_runs_here_with_permission_question_and_review(self):
+        result, events = await self.card('rust-demo', say='thanks')
+        self.assertEqual((result['state'], result['agent']), ('done', 'demo'))
+        self.assertIn('rust-pc', info(self.root, 'rust-demo', 'card')['worker']['id'])
+        states = [e['state'] for e in events if e['type'] == 'status']
+        for state in ('starting', 'working', 'approval', 'question', 'awaiting_review', 'done'): self.assertIn(state, states)
+        self.assertEqual(states[-1], 'done')
+        kinds = {e['type'] for e in events}
+        self.assertLessEqual({'user', 'agent', 'approval', 'approval_resolved', 'question', 'answer', 'tool'}, kinds)
+        self.assertTrue(any(e['type'] == 'user' and e.get('text') == 'thanks' for e in events), 'a follow-up message is a new turn')
+        self.assertIn('Demo turn 2 finished', result['text'])
+        self.assertTrue(Path(result['workspace'], 'cart.py').is_file() or result['workspace'], 'a blank card works in the demo project')
+
+    async def test_a_wrong_answer_is_refused_and_a_denied_permission_ends_the_turn(self):
+        result, events = await self.card('rust-deny', approve='deny')
+        self.assertIn("won't run that tool", result['text'])
+        self.assertEqual([e['decision'] for e in events if e['type'] == 'approval_resolved'], ['deny'])
+        from flowkit.distributed import execute_session
+        inbox, seen = asyncio.Queue(), []
+        async def sink(event):
+            seen.append(event)
+            if event['type'] == 'approval': await inbox.put({'type': 'approval', 'id': event['id'], 'optionId': 'allow'})
+            if event['type'] == 'question':
+                await inbox.put({'type': 'answer', 'id': event['id'], 'answers': {'style': 'not a choice'}})
+                await inbox.put({'type': 'answer', 'id': event['id'], 'answers': {'style': 'brief'}})
+            if event['type'] == 'status' and event['state'] == 'awaiting_review': await inbox.put({'type': 'done'})
+        await asyncio.wait_for(execute_session({'goal': 'x', 'agent': 'demo', 'worker': {'pools': ['build']}}, 'rust-answer', inbox.get, sink, engine='hatchet'), 60)
+        self.assertTrue(any(e['type'] == 'error' and 'Please check your answer' in e['message'] for e in seen))
+        self.assertEqual([e['answers'] for e in seen if e['type'] == 'answer'], [{'style': 'brief'}])
+
+    async def test_failed_turns_retry_then_get_stuck_until_continued(self):
+        result, events = await self.card('rust-retry', simulateFailures=1)
+        self.assertEqual(result['state'], 'done')
+        errors = [e for e in events if e['type'] == 'error']
+        self.assertEqual((errors[0]['message'], errors[0]['will_retry']), ('Simulated failure (demo switch)', True))
+        self.assertTrue(any(e['type'] == 'status' and e['state'] == 'retrying' for e in events))
+        from flowkit.distributed import execute_session
+        inbox, seen = asyncio.Queue(), []
+        async def sink(event):
+            seen.append(event)
+            if event['type'] == 'status' and event['state'] == 'stuck': await inbox.put({'type': 'done'})
+        await asyncio.wait_for(execute_session({'goal': 'x', 'agent': 'codex', 'worker': {'pools': ['build']}}, 'rust-stuck', inbox.get, sink, engine='hatchet'), 60)
+        self.assertEqual([e['will_retry'] for e in seen if e['type'] == 'error'], [True, True, False])
+        self.assertIn('codex cannot start', [e for e in seen if e['type'] == 'error'][0]['message'])
+
+    async def test_an_interrupt_stops_the_turn_and_the_card_can_continue(self):
+        from flowkit.distributed import execute_session
+        inbox, seen = asyncio.Queue(), []
+        async def sink(event):
+            seen.append(event)
+            if event['type'] == 'approval': await inbox.put({'type': 'interrupt'})
+            if event['type'] == 'status' and event['state'] == 'awaiting_input': await inbox.put({'type': 'done'})
+        result = await asyncio.wait_for(execute_session({'goal': 'x', 'agent': 'demo', 'worker': {'pools': ['build']}}, 'rust-interrupt', inbox.get, sink, engine='hatchet'), 60)
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual([e['decision'] for e in seen if e['type'] == 'approval_resolved'], ['cancelled'])
+
+    async def test_a_real_acp_process_asks_for_permission_and_answers(self):
+        result, events = await self.card('rust-acp', agent='omp', approve='once', answers={'style': 'short'})
+        self.assertEqual(result['text'], 'It works.')
+        self.assertEqual([e['decision'] for e in events if e['type'] == 'approval_resolved'], ['allow'])
+        self.assertEqual([e['commands'][0]['name'] for e in events if e['type'] == 'commands' and e['commands']], ['test'])
+        self.assertEqual([e['sessionId'] for e in events if e['type'] == 'acp_state' and e.get('sessionId')][-1], 'test-session')
+
+    async def test_acp_terminals_tools_plans_usage_modes_and_settings(self):
+        from flowkit.distributed import execute_session
+        inbox, seen = asyncio.Queue(), []
+        changed = []
+        async def sink(event):
+            seen.append(event)
+            if event['type'] == 'approval': await inbox.put({'type': 'approval', 'id': event['id'], 'optionId': 'allow'})
+            if event['type'] == 'status' and event['state'] == 'awaiting_review':
+                if not changed:
+                    changed.append(True)
+                    await inbox.put({'type': 'mode', 'id': 'b'})
+                    await inbox.put({'type': 'config', 'id': 'model', 'value': 'y'})
+                    await inbox.put({'type': 'done'})
+        result = await asyncio.wait_for(execute_session({'goal': 'go', 'agent': 'pi', 'worker': {'pools': ['build']}}, 'rust-term', inbox.get, sink, engine='hatchet'), 60)
+        self.assertEqual(result['text'], 'Part one, part two.', 'chunks of one message are one message')
+        terminal = [e for e in seen if e['type'] == 'tool' and e['id'].startswith('terminal:')]
+        self.assertEqual(terminal[-1]['status'], 'ok')
+        self.assertIn('from the terminal', terminal[-1]['output'])
+        self.assertTrue(any(e['type'] == 'approval' and e['summary'] == 'Run terminal command' for e in seen))
+        tools = [e for e in seen if e['type'] == 'tool' and e['id'] == 't1']
+        self.assertEqual((tools[0]['name'], tools[0]['summary'], tools[0]['status']), ('edit', 'Edit a file', 'running'))
+        self.assertEqual((tools[1]['name'], tools[1]['summary'], tools[1]['status'], tools[1]['output']), ('edit', 'Edit a file', 'ok', 'wrote x'), 'an update repeats what the tool was')
+        self.assertTrue(any(e['type'] == 'plan' for e in seen))
+        self.assertTrue(any(e['type'] == 'acp_state' and e.get('usage') == {'used': 5, 'size': 10} for e in seen))
+
+    async def test_an_interrupt_reaches_a_real_agent_through_acp(self):
+        from flowkit.distributed import execute_session
+        inbox, seen = asyncio.Queue(), []
+        async def sink(event):
+            seen.append(event)
+            if event['type'] == 'status' and event['state'] == 'working': asyncio.get_running_loop().call_later(1, inbox.put_nowait, {'type': 'interrupt'})
+            if event['type'] == 'status' and event['state'] == 'awaiting_input': await inbox.put({'type': 'done'})
+        result = await asyncio.wait_for(execute_session({'goal': 'wait', 'agent': 'pi', 'worker': {'pools': ['build']}}, 'rust-acp-int', inbox.get, sink, engine='hatchet'), 60)
+        self.assertEqual(result['state'], 'done')
+
+    async def test_cancelling_a_card_ends_its_agent_and_frees_the_slot(self):
+        from flowkit.distributed import execute_session, mark_cancelled
+        async def never(): await asyncio.Event().wait()
+        seen = []
+        async def sink(event): seen.append(event)
+        run = asyncio.create_task(execute_session({'goal': 'wait', 'agent': 'pi', 'worker': {'pools': ['build']}}, 'rust-cancel', never, sink, engine='hatchet'))
+        await until(lambda: any(e['type'] == 'status' and e['state'] == 'working' for e in seen), timeout=30, message='the agent to work')
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await until(lambda: self.pc.get('/health')['active'] == 0, timeout=30, message='the slot to be free')
+
+    async def test_a_flow_agent_step_finishes_with_its_answer_for_the_next_step(self):
+        flow = parse({'name': 'rust-agent-flow', 'worker': {'pool': 'build'}, 'input': {'topic': 'caching'}, 'steps': {
+            'think': {'kind': 'agent', 'agent': 'demo', 'prompt': 'Write about {{ input.topic }}'},
+            'after': {'kind': 'program', 'needs': ['think'], 'run': 'python -c "print(1)"'}}})
+        from flowkit.distributed import execute_step
+        import base64
+        from flowkit import launch_context
+        saved = launch_context.save_upload('notes.txt', base64.b64encode(b'hello').decode())
+        attached = {'files': [{'id': saved['id'], 'name': 'notes.txt', 'source': 'x', 'target': 'context/files/notes.txt'}]}
+        output = await asyncio.wait_for(execute_step(flow, 'think', {'input': {'topic': 'caching'}, 'steps': {}, '_flow_context': attached}, 'rust-flow-agent', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertIn('Write about caching', output)
+        self.assertEqual(self.events[-1]['type'], 'step')
+        self.assertEqual((self.events[-1]['state'], self.events[-1]['kind']), ('done', 'agent'))
+        self.assertTrue(any(e['type'] == 'tool' and 'context/files/notes.txt' in e.get('output', '') for e in self.events), 'the note reaches the prompt')
+
+    # ------------------------------------------------------------------ environment and Confluence
+    def repository(self):
+        origin = self.root/'origin'
+        origin.mkdir()
+        git = lambda *args: subprocess.run(['git', *args], cwd=origin, check=True, capture_output=True)
+        git('init', '-b', 'main')
+        (origin/'hello.txt').write_text('repo context', encoding='utf-8')
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'a')
+        git('checkout', '-b', 'feature')
+        (origin/'feature.txt').write_text('on the branch', encoding='utf-8')
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'b')
+        git('checkout', 'main')
+        return str(origin)
+
+    async def confluence(self):
+        from aiohttp.test_utils import TestServer
+        from agents.tests.confluence_fixture import confluence_app
+        app = confluence_app()
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        return app, str(server.make_url('')).rstrip('/')
+
+    async def test_a_confluence_tree_attached_to_a_card_is_markdown_on_this_worker(self):
+        app, base = await self.confluence()
+        read = ("python -c \"from pathlib import Path as P; w=P('context/confluence/1'); print((w/'1.md').read_text()); print((w/'2.md').read_text()); "
+                "print(len((w/'attachments/1/att10.png').read_bytes())); print(sorted(p.name for p in w.glob('*.md')))\"")
+        config = {'goal': read, 'agent': 'program', 'worker': {'pools': ['build']},
+                  'context': {'confluence': [{'base_url': base, 'page_id': '1', 'target': 'context/confluence/1'}]}}
+        from flowkit.distributed import execute_session
+        result = await asyncio.wait_for(execute_session(config, 'rust-wiki', self.receive, self.sink, engine='hatchet'), 60)
+        output = result['output']['stdout']
+        self.assertIn('**content 1**', output)
+        self.assertIn('[Child page](2.md)', output)
+        self.assertIn('[Relative child](2.md)', output)
+        self.assertIn('attachments/1/att10.png', output)
+        self.assertIn('| Name | Value |', output)
+        self.assertIn('print(42)', output)
+        self.assertIn("['1.md', '2.md', '3.md']", output)
+        self.assertIn('68', output, 'the attachment bytes')
+
+    async def test_a_flow_environment_prepares_repairs_validates_and_hands_on_its_files(self):
+        app, base = await self.confluence()
+        origin = self.repository()
+        source = self.root/'requirements.txt'
+        source.write_text('from a file', encoding='utf-8')
+        flow = parse({'name': 'rust-setup', 'worker': {'pool': 'build'}, 'environment': {'agent': 'demo',
+            'repositories': [{'url': origin, 'target': 'repos/main'}, {'url': origin, 'ref': 'feature', 'target': 'repos/feature'}],
+            'files': [{'source': str(source), 'target': 'context/requirements.txt'}],
+            'confluence': [{'base_url': base, 'page_id': '1', 'target': 'context/wiki'}]},
+            'steps': {'read': {'kind': 'program', 'requires_command': 'python', 'run':
+                "python -c \"from pathlib import Path as P; print(P('repos/main/hello.txt').read_text(), P('repos/feature/feature.txt').read_text(), P('context/requirements.txt').read_text(), P('context/wiki/index.json').is_file())\""}}})
+        from flowkit.distributed import execute_step
+        inbox, seen = asyncio.Queue(), []
+        async def sink(event):
+            seen.append(event)
+            if event.get('type') == 'status' and event.get('state') == 'awaiting_review':
+                # The human marks setup done too early, once: the changed source keeps dependents waiting.
+                if not any(e.get('type') == 'error' for e in seen) and not seen_broken:
+                    seen_broken.append(True)
+                    app['versions']['2'] = 9
+                elif seen_broken and len(seen_broken) == 1:
+                    seen_broken.append(True)
+                    app['versions']['2'] = 1
+                await inbox.put({'type': 'done'})
+        seen_broken = []
+        output = await asyncio.wait_for(execute_step(flow, 'setup_environment', {'input': {}, 'steps': {}}, 'rust-setup-run', inbox.get, sink, engine='hatchet'), 90)
+        self.assertEqual(output['validated'], True)
+        self.assertTrue(all(s['ok'] for s in output['sources']), output)
+        self.assertTrue(any(e.get('type') == 'error' and 'changed; re-import' in e.get('message', '') for e in seen), 'validation failed while the page differed')
+        rows = {e['id']: e for e in seen if e.get('type') == 'tool' and e['id'].startswith('setup:')}
+        self.assertEqual(set(rows), {'setup:repos/main', 'setup:repos/feature', 'setup:context/requirements.txt', 'setup:context/wiki'})
+        read = await asyncio.wait_for(execute_step(flow, 'read', {'input': {}, 'steps': {'setup_environment': {'output': output}}}, 'rust-setup-run', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertIn('repo context on the branch from a file True', read['stdout'])
 
 
 if __name__ == '__main__':
