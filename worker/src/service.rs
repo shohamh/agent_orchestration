@@ -236,6 +236,9 @@ async fn create(State(app): State<Arc<App>>, Json(mut config): Json<Value>) -> A
         if start.get("session").is_some() {
             return Err(bad("This worker does not run agent sessions yet"));
         }
+        if start.get("attached").is_some() {
+            return Err(bad("This worker does not import Confluence pages yet; choose a pool with a Python execution worker"));
+        }
         let flow = start.get("flow").ok_or_else(|| bad("'flow'"))?;
         let step_id = start.get("step").and_then(|s| s.as_str()).ok_or_else(|| bad("'step'"))?;
         let step = flow.get("steps").and_then(|s| s.get(step_id)).ok_or_else(|| bad("Unknown step"))?.clone();

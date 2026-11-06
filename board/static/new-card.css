@@ -1,0 +1,124 @@
+/* New card (new-card.js). */
+dialog.nc-dialog { color-scheme: light dark; width: min(720px, 96vw); max-height: 92vh; padding: 0; overflow: hidden; border-radius: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, .35); }
+dialog.nc-dialog[open] { display: flex; }
+dialog.nc-dialog::backdrop { background: rgba(8, 11, 18, .55); }
+.nc-form { display: flex; flex-direction: column; gap: 0 !important; flex: 1; min-height: 0; width: 100%; }
+.nc-head { padding: 16px 22px 14px; border-bottom: 1px solid var(--line); font-size: 16px; }
+.nc-body { overflow-y: auto; padding: 4px 22px 8px; flex: 1; min-height: 0; scrollbar-gutter: stable; }
+.nc-section { display: flex; flex-direction: column; gap: 12px; padding: 16px 0 18px; border-bottom: 1px solid var(--line); }
+.nc-section:last-child { border-bottom: 0; }
+.nc-section h3 { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 14px; font-weight: 600; color: var(--ink); }
+.nc-number { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--chip); color: var(--muted); font-size: 11px; font-weight: 700; }
+.nc-stack { display: flex; flex-direction: column; gap: 10px; }
+.nc-stack[hidden], .nc-field[hidden], .nc-row[hidden], .nc-chips[hidden], .nc-more[hidden], .nc-context[hidden], .nc-flow-picker[hidden], .nc-flow-search[hidden], .nc-hint[hidden], .nc-error[hidden], #n-placement[hidden], .nc-attached[hidden] { display: none; }
+.nc-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.nc-row > .nc-field { flex: 1 1 160px; }
+.nc-field, dialog.nc-dialog label.nc-field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+.nc-field input, .nc-field select, .nc-field textarea, .nc-context input:not([type]), .nc-tag-line input { font-size: 14px; padding: 8px 10px; width: 100%; border-radius: 8px; min-height: 38px; }
+.nc-field textarea { resize: vertical; line-height: 1.45; }
+.nc-field small, .nc-hint { color: var(--muted); font-size: 12px; font-weight: 400; margin: 0; line-height: 1.4; }
+.nc-label { font-size: 13px; color: var(--muted); }
+.nc-label small { font-size: 12px; opacity: .8; }
+.nc-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace !important; font-size: 13px !important; }
+.nc-warning { color: var(--warn); }
+.nc-error { color: var(--danger); font-size: 13px; margin: 0; flex: 1 1 100%; }
+.nc-body input:focus-visible, .nc-body select:focus-visible, .nc-body textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+
+/* What runs */
+.nc-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+dialog.nc-dialog label.nc-mode { position: relative; display: flex; flex-direction: row; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; color: var(--ink); transition: border-color .12s ease, background .12s ease; }
+.nc-mode:hover { border-color: var(--muted); }
+.nc-mode input, .nc-flow-card input, .nc-segment input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.nc-mode-icon { color: var(--muted); flex: none; line-height: 0; margin-top: 1px; }
+.nc-mode-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.nc-mode-text strong { font-size: 14px; }
+.nc-mode-text small { font-size: 12px; color: var(--muted); line-height: 1.3; }
+dialog.nc-dialog label.nc-mode:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
+.nc-mode:has(input:checked) .nc-mode-icon { color: var(--accent); }
+.nc-mode:has(input:focus-visible), .nc-flow-card:has(input:focus-visible), .nc-segment:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nc-flow-picker { display: flex; flex-direction: column; gap: 8px; }
+.nc-flow-search { width: 100%; padding: 7px 10px; border-radius: 8px; }
+.nc-flow-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; max-height: 268px; overflow-y: auto; padding: 2px; }
+dialog.nc-dialog label.nc-flow-card { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; color: var(--ink); min-width: 0; }
+.nc-flow-card:hover { border-color: var(--muted); }
+dialog.nc-dialog label.nc-flow-card:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 0 0 0 1px var(--accent); }
+.nc-flow-title { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.nc-flow-desc { font-size: 12px; color: var(--muted); line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.nc-flow-facts { font-size: 11px; color: var(--muted); margin-top: auto; padding-top: 2px; }
+.nc-empty { grid-column: 1 / -1; padding: 6px 2px; }
+
+/* Attachments */
+.nc-context { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px dashed var(--line); border-radius: 10px; transition: border-color .12s ease, background .12s ease; }
+.nc-context.nc-dropping { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.nc-context > .nc-stack:empty { display: none; }
+.nc-context-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.nc-add-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.nc-add-buttons button { font-size: 12px; padding: 4px 10px; border-radius: 999px; }
+.nc-attached { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.nc-attached li { display: flex; align-items: center; gap: 8px; padding: 5px 4px 5px 10px; background: var(--chip); border-radius: 8px; font-size: 13px; }
+.nc-attached li[data-state="failed"] { color: var(--danger); }
+.nc-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-attached small { color: var(--muted); font-size: 12px; flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-source { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.nc-provider { flex: none; min-width: 72px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.nc-source input.nc-grow { flex: 1 1 220px; width: auto; min-width: 0; }
+.nc-source input.nc-ref { flex: 0 1 130px; width: auto; min-width: 90px; }
+dialog.nc-dialog label.nc-check { display: inline-flex; flex-direction: row; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+.nc-remove { flex: none; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.nc-remove:hover { background: var(--line); color: var(--ink); }
+
+/* Details */
+.nc-more { font-size: 13px; }
+.nc-more > summary { cursor: pointer; color: var(--muted); padding: 2px 0; width: fit-content; }
+.nc-more > summary:hover { color: var(--ink); }
+.nc-more[open] > summary { margin-bottom: 8px; }
+.nc-more label { font-size: 13px; }
+#n-placement .nc-more > summary { font-weight: 600; }
+#n-placement .nc-check-ready > summary { color: var(--ok); }
+#n-placement .nc-check-wait > summary { color: var(--warn); }
+#n-placement .nc-check-blocked > summary { color: var(--danger); }
+#n-placement h5 { margin: 0 0 4px; font-size: 12px; }
+
+/* Where */
+.nc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.nc-chip { font: inherit; font-size: 13px; padding: 4px 11px; min-height: 30px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+.nc-chip:hover:not(:disabled) { border-color: var(--muted); }
+.nc-chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.nc-chip:disabled { opacity: .5; cursor: default; }
+.nc-tag-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.nc-tag-line input { flex: 1 1 120px; width: auto; max-width: 200px; min-height: 30px; padding: 4px 10px; font-size: 13px; border-radius: 999px; }
+.nc-fit { margin: 0; font-size: 12px; color: var(--muted); }
+
+/* When */
+.nc-when { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.nc-when[hidden] { display: none; }
+.nc-when > .nc-field { flex: 0 1 220px; }
+#n-overlap-row > .nc-field { flex-basis: 320px; }
+.nc-segments { display: inline-flex; padding: 3px; background: var(--chip); border-radius: 9px; gap: 2px; }
+dialog.nc-dialog label.nc-segment { position: relative; display: block; cursor: pointer; font-size: 13px; }
+.nc-segment span { display: block; padding: 6px 16px; border-radius: 7px; color: var(--muted); }
+.nc-segment:has(input:checked) span { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+
+/* Footer */
+.nc-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 22px; border-top: 1px solid var(--line); background: var(--panel); }
+.nc-foot .nc-hint { flex: 1 1 100%; }
+.nc-actions { display: flex; gap: 8px; margin-left: auto; }
+.nc-actions button { padding: 8px 16px; border-radius: 8px; min-height: 38px; }
+
+/* A schedule on the board */
+.nc-schedule { cursor: default; border-style: dashed; }
+.nc-schedule.nc-paused { opacity: .75; }
+.nc-schedule:hover { border-color: var(--line); }
+.nc-schedule-error { color: var(--danger); }
+.nc-schedule-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+button.nc-mini { font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+
+@media (max-width: 600px) {
+  dialog.nc-dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; height: 100dvh; border-radius: 0; margin: 0; }
+  .nc-modes { grid-template-columns: 1fr; }
+  .nc-body { padding: 4px 16px 8px; }
+  .nc-head { padding: 14px 16px 12px; }
+  .nc-foot { padding: 10px 16px; }
+  .nc-field input, .nc-field select, .nc-field textarea { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { .nc-mode, .nc-context { transition: none; } }

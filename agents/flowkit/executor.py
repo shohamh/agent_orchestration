@@ -45,7 +45,10 @@ def step_context(flow: Flow, step: Step, params: dict[str, Any], outputs: dict[s
     params = dict(params or {})
     plan = params.pop('flowRestart', None)
     execution = params.pop('flowExecution', None)
-    return {"input": {**flow.input, **params}, "_flow_restart": plan, '_flow_execution': execution,
+    attached = params.pop('flowContext', None)
+    # What was typed in New card. A flow reads it as {{ input.text }}; its own `text` input wins.
+    if attached and attached.get('text') and 'text' not in flow.input: params['text'] = attached['text']
+    return {"input": {**flow.input, **params}, "_flow_restart": plan, '_flow_execution': execution, '_flow_context': attached,
             "steps": {need: {"output": outputs.get(need)} for need in step.needs}}
 
 
@@ -99,7 +102,9 @@ def _bounded(output: Any, limit: int = 60000) -> Any:
 async def _agent(step: Step, context: dict, workspace: Path, receive, sink) -> str:
     from agentdriver.session import run_session
 
-    config = {"goal": render(step.prompt, context, os.environ.get('FLOW_ASSETS_DIR', str(FLOWS_DIR))), "agent": step.agent, "workspace": str(workspace),
+    goal = render(step.prompt, context, os.environ.get('FLOW_ASSETS_DIR', str(FLOWS_DIR)))
+    if context.get('_context_note'): goal += '\n\n' + context['_context_note']
+    config = {"goal": goal, "agent": step.agent, "workspace": str(workspace),
               "autoDone": not step.review, "quietDemo": step.agent == "demo" and not step.review}
     result = await run_session(config, receive, sink)
     return result.get("text") or ""

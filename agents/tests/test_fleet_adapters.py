@@ -7,6 +7,7 @@ built with the pinned SDKs offline and their task functions invoked with stand-i
 the services are real worker services on this machine, each root simulating one PC.
 Live engine servers are not exercised here (see board/workers_smoke_test.py).
 """
+import subprocess
 import asyncio
 import base64
 import json
@@ -223,6 +224,92 @@ def responder(inbox, events, finish=True):
             continued = any(e.get('type') == 'user' and e.get('text') == 'thanks' for e in events)
             await inbox.put({'type': 'done'} if continued else {'type': 'message', 'text': 'thanks'})
     return sink
+
+
+class AttachedSourceTests(ServiceFixture):
+    """What is attached in New card, through real execution services."""
+    READ = "python -c \"from pathlib import Path as P; print(P('context/files/notes.txt').read_text(), P('repos/origin/a.txt').read_text())\""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.origin = self.root/'origin'
+        self.origin.mkdir()
+        git = lambda *args: subprocess.run(['git', *args], cwd=self.origin, check=True, capture_output=True)
+        git('init', '-b', 'main')
+        (self.origin/'a.txt').write_text('from git', encoding='utf-8')
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'a')
+        _, self.plain = await self.service('pc-a')
+        _, self.gpu = await self.service('pc-b')
+        write_registry(self.registry, [('pc-a', self.plain.make_url(''), ['pools: [build]', 'tags: []']),
+                                       ('pc-b', self.gpu.make_url(''), ['pools: [gpu]', 'tags: []'])])
+        from flowkit import launch_context
+        self.upload = launch_context.save_upload('notes.txt', base64.b64encode(b'from the form').decode())
+        self.context = {'files': [{'id': self.upload['id'], 'name': 'notes.txt', 'source': 'x', 'target': 'context/files/notes.txt'}],
+                        'repositories': [{'url': str(self.origin), 'target': 'repos/origin', 'shallow': True}]}
+
+    async def test_a_program_card_runs_in_a_chosen_pool_with_what_was_attached(self):
+        from flowkit.distributed import execute_session
+        config = {'goal': self.READ, 'agent': 'program', 'workspace': '', 'simulateFailures': 0, 'resumeSessionId': '',
+                  'worker': {'pools': ['gpu', 'other']}, 'context': self.context, 'programInput': 'typed'}
+        result = await asyncio.wait_for(execute_session(config, 'program-run', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertEqual(result['state'], 'done')
+        self.assertIn('from the form from git', result['output']['stdout'])
+        self.assertEqual(self.record('program-run', 'card')['worker']['id'], 'pc-b')
+        self.assertEqual(self.record('program-run', 'context-setup')['state'], 'done')
+        tools = {e['id']: e for e in self.events if e.get('type') == 'tool'}
+        self.assertEqual(tools['program']['status'], 'ok')
+        self.assertEqual(tools['context:repositories']['status'], 'ok')
+        self.assertEqual(self.events[-1]['state'], 'done')
+
+    async def test_a_program_card_fails_with_its_exit_and_reports_it(self):
+        from flowkit.distributed import execute_session
+        config = {'goal': 'python -c "print(1/0)"', 'agent': 'program', 'worker': {'pools': ['build']}}
+        with self.assertRaisesRegex(RuntimeError, 'code 1'):
+            await asyncio.wait_for(execute_session(config, 'failed-run', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertEqual({e['id']: e for e in self.events if e.get('type') == 'tool'}['program']['status'], 'error')
+
+    async def test_a_bad_source_fails_the_card_before_it_starts(self):
+        from flowkit.distributed import execute_session
+        config = {'goal': 'python -c "print(1)"', 'agent': 'program', 'worker': {'pools': ['build']},
+                  'context': {'repositories': [{'url': str(self.root/'missing'), 'target': 'repos/missing'}]}}
+        with self.assertRaisesRegex(RuntimeError, 'Could not prepare.*repos/missing'):
+            await asyncio.wait_for(execute_session(config, 'bad-source', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertEqual(self.record('bad-source', 'card'), {}, 'the card itself never started')
+        tools = {e['id']: e for e in self.events if e.get('type') == 'tool'}
+        self.assertEqual(tools['context:repositories']['status'], 'error')
+        self.assertIn('does not appear to be a git repository', tools['context:repositories']['output'])
+        self.assertTrue(any(e['type'] == 'error' and 'repos/missing' in e['message'] for e in self.events))
+
+    async def test_an_agent_card_is_told_what_was_attached_and_works_in_that_folder(self):
+        from flowkit.distributed import execute_session
+        inbox, events = asyncio.Queue(), []
+        config = {'goal': 'Summarize', 'agent': 'demo', 'workspace': '', 'simulateFailures': 0, 'resumeSessionId': '',
+                  'worker': {'pools': ['build']}, 'context': self.context, 'programInput': ''}
+        result = await asyncio.wait_for(execute_session(config, 'agent-run', inbox.get, responder(inbox, events), engine='prefect'), 60)
+        self.assertEqual(result['state'], 'done')
+        workspace = Path(result['workspace'])
+        self.assertEqual(workspace.name, 'agent-run')
+        self.assertIn(str(self.root/'pc-a'), result['workspace'], 'on the worker')
+
+    async def test_every_step_of_a_flow_sees_the_attachments_prepared_once(self):
+        from flowkit.definition import parse
+        from flowkit.distributed import execute_step
+        flow = parse({'name': 'attached', 'steps': {
+            'left': {'kind': 'program', 'run': self.READ},
+            'right': {'kind': 'program', 'worker': {'pool': 'gpu'}, 'run': self.READ},
+            'join': {'kind': 'program', 'needs': ['left', 'right'], 'run': self.READ}}})
+        base = {'input': {}, 'steps': {}, '_flow_execution': {'default': {'pools': ['build']}}, '_flow_context': self.context}
+        left, right = await asyncio.wait_for(asyncio.gather(
+            execute_step(flow, 'left', base, 'flow-run', self.receive, self.sink, engine='hatchet'),
+            execute_step(flow, 'right', base, 'flow-run', self.receive, self.sink, engine='hatchet')), 90)
+        self.assertIn('from the form from git', left['stdout'])
+        self.assertIn('from the form from git', right['stdout'])
+        self.assertEqual({left_or_right: self.record('flow-run', left_or_right)['worker']['id'] for left_or_right in ('left', 'right')}, {'left': 'pc-a', 'right': 'pc-b'})
+        # Parallel steps got one copy: cloning twice would make their joining step conflict.
+        joined = await asyncio.wait_for(execute_step(flow, 'join', base, 'flow-run', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertIn('from the form from git', joined['stdout'])
+        self.assertEqual(self.record('flow-run', 'context-setup')['state'], 'done')
 
 
 class CardPlacementTests(ServiceFixture):

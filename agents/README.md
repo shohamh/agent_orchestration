@@ -150,8 +150,8 @@ every waiting reason are described in [Workers and environment context](../docs/
   Agents that ask questions as ordinary prose can be answered through the composer instead.
 - A successful turn goes to **Awaiting your review**, in the Waiting column. **Continue** sends
   another turn; only **Mark done** completes the session.
-- Three consecutive failures go to **Stuck**. Continue retries. **Simulated failures** in the
-  create form exercises this without needing an actual provider error.
+- Three consecutive failures go to **Stuck**. Continue retries. **Simulated failures** under
+  **Advanced** in New card exercises this without needing an actual provider error.
 - **Demo (simulated)** exercises permissions and questions without a model or file changes.
   Codex and Claude are real agents; their availability depends on their CLI login/provider.
 

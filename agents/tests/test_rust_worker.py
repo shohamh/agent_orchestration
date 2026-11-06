@@ -161,6 +161,36 @@ class RustWorkerTests(FleetFixture):
         output = await self.run_step(flow, 'rust-run-tpl', context={'input': {'who': "it's a name"}})
         self.assertEqual(output, {'stdout': "it's a name"})
 
+    async def test_a_program_card_with_a_repository_and_an_upload_runs_on_this_worker(self):
+        from flowkit import launch_context
+        from flowkit.distributed import execute_session
+        origin = self.root/'origin'
+        origin.mkdir()
+        git = lambda *args: subprocess.run(['git', *args], cwd=origin, check=True, capture_output=True)
+        git('init', '-b', 'main')
+        (origin/'a.txt').write_text('from git', encoding='utf-8')
+        git('add', '.')
+        git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', 'a')
+        import base64
+        saved = launch_context.save_upload('notes.txt', base64.b64encode(b'from the form').decode())
+        read = "python -c \"from pathlib import Path as P; print(P('context/files/notes.txt').read_text(), P('repos/origin/a.txt').read_text())\""
+        config = {'goal': read, 'agent': 'program', 'worker': {'pools': ['other', 'build']}, 'programInput': 'typed',
+                  'context': {'files': [{'id': saved['id'], 'name': 'notes.txt', 'source': 'x', 'target': 'context/files/notes.txt'}],
+                              'repositories': [{'url': str(origin), 'target': 'repos/origin', 'shallow': True}]}}
+        result = await asyncio.wait_for(execute_session(config, 'rust-card', self.receive, self.sink, engine='hatchet'), 60)
+        self.assertEqual(result['state'], 'done')
+        self.assertIn('from the form from git', result['output']['stdout'])
+        tools = {e['id']: e for e in self.events if e.get('type') == 'tool'}
+        self.assertEqual((tools['context:repositories']['status'], tools['program']['status']), ('ok', 'ok'))
+        self.assertEqual(self.events[-1]['state'], 'done')
+
+    async def test_a_confluence_source_explains_that_this_worker_cannot_import_it(self):
+        from flowkit.distributed import execute_session
+        config = {'goal': 'python -c "print(1)"', 'agent': 'program', 'worker': {'pools': ['build']},
+                  'context': {'confluence': [{'base_url': 'https://x.io/wiki', 'page_id': '1', 'target': 'context/confluence/1'}]}}
+        with self.assertRaisesRegex(RuntimeError, 'does not import Confluence pages'):
+            await asyncio.wait_for(execute_session(config, 'rust-wiki', self.receive, self.sink, engine='hatchet'), 60)
+
     async def test_a_failing_step_fails_with_its_exit_code_and_last_output(self):
         with self.assertRaisesRegex(RuntimeError, r"exited with code 3: .*boom"):
             await self.run_step(self.flow('python -c "import sys; print(\'boom\'); sys.exit(3)"'), 'rust-run-fail')

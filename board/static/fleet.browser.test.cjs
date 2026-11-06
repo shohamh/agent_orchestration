@@ -135,7 +135,7 @@ const installCommands = (record, origin) => {
     bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
 const installView = (r) => { const { commands, ...rest } = r; return rest; };
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;

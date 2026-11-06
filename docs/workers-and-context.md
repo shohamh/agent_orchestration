@@ -319,10 +319,21 @@ can be deleted at any time.
 
 ## Choosing workers in the board
 
-**Starting a flow (New card).** Choose a default worker or pool and required tags, and expand
-**Choose workers for individual steps** to override placement per step. A step's own worker ID
+**New card.** The form asks four things, in order:
+
+1. **What runs**: an agent, a program or a flow, the active flows shown as cards.
+2. **Input**: a prompt, a command or the flow's inputs (the first text input is a paragraph; a flow
+   with no inputs gets one paragraph that its steps read as `{{ input.text }}`), plus optional
+   attachments, described in [Attaching files, repositories and Confluence](#attaching-files-repositories-and-confluence).
+3. **Where it runs**: required tags (a worker needs all of them) and worker pools (**All pools**, or
+   any number of pools, of which a worker needs one). The form says how many workers match while you
+   choose. **More placement options** chooses one worker or, for a flow, workers per step.
+4. **When**: right now or later, and an optional repeat. See [Schedules](#schedules).
+
+**Starting a flow.** The pools and tags are the flow's default, and
+**Choose workers for individual steps** overrides placement per step. A step's own worker ID
 chooses that worker regardless of the default pool; a step pool replaces the default pool; step
-tags replace the default's tags and keep its pool. A default chosen at launch replaces the flow's
+tags replace the default's tags and keep its pools. A default chosen at launch replaces the flow's
 default worker, and a step chosen at launch replaces that step's own setting; otherwise the flow
 definition's default and step settings apply as before. While you choose, the dialog asks the flow host
 (`POST /api/launch/validate`, with the selected backend) where each step can run and shows, per step:
@@ -337,10 +348,13 @@ Under each step every registered worker is listed as Compatible, Might match (wa
 compatible, with the reasons, and the required agent or command with its last detected status and
 check time (for an offline PC, its last known result, marked as such).
 
-**Standalone coding agent cards.** **Run on (fleet worker)** places the card on a pool, a worker
-or tags, on Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the
-coordinator there) and when a workspace or resume ID is filled in: a placed card runs in a new
-workspace on that PC. The same compatibility panel is shown, and a blocked card cannot be created.
+**Agent and program cards.** **Where it runs** places the card on pools, tags or one worker, on
+Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the coordinator
+there) and when **Advanced** has a workspace or resume ID: a placed card runs in a new workspace on
+that PC. The same compatibility panel is shown, and a blocked card cannot be created.
+A program card checks the executable it can read from the command. A pipeline or a variable is not
+checked in advance and fails on the worker if the program is missing. Its workspace stays on the PC.
+Program cards run on every worker, Python or Rust. Agent cards need a Python execution worker.
 With a blank workspace and no selection, new Hatchet and Prefect cards check all registered workers and run on a compatible one. Cards using an existing workspace or resume ID run locally as before.
 
 **Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
@@ -405,6 +419,42 @@ network currently carries full snapshots rather than binary diffs or compressed 
 coordinator's saved publications are deltas. Parallel branches changing one path differently
 produce an explicit conflict; identical changes are allowed, and later dependent edits win.
 
+## Attaching files, repositories and Confluence
+
+**New card** can attach sources to one run of any agent, program or flow. Unlike `environment` below,
+this is not part of the flow's definition and nobody has to review it: what can't be prepared fails
+the run with its error.
+
+| Source | Where it lands in the workspace | How it gets there |
+|---|---|---|
+| Files | `context/files/<name>` | Uploaded through the board to the flow host, kept in the coordinators' shared `FLOW_WORKSPACES` volume |
+| GitHub, GitLab or any git repository | `repos/<name>` | Cloned on a worker with its credential helper or SSH, shallow unless the ref is a commit |
+| Confluence page tree | `context/confluence/<page id>` | Exported on a Python execution worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there |
+
+Sources are prepared once per run, on a worker the run's selection allows, and every step gets the same
+copy, so parallel steps don't conflict where they join. An agent's prompt gets a note listing them.
+Everything attached must fit the transfer limit of **64 MiB and 10,000 files**. The Rust worker clones
+repositories but does not import Confluence pages: a run that lands on one fails and says so.
+
+Uploads the run has not used are removed after 7 days; a schedule keeps the ones it needs.
+
+## Schedules
+
+**When** in New card stores a card that starts later or repeats. The record is the card's request plus
+its time and five-field cron, in `FLOW_STATE_DIR/schedules.json` on the flow host; the board checks
+every 10 seconds and starts what is due through the same checks as a card started by hand. A schedule
+therefore behaves the same on every engine, but the engine does not know about it until it starts.
+
+Schedules show in the board's **Scheduled** column with **Run now**, **Pause** and **Delete**.
+
+- Repeats follow the time zone of the browser that created them, across daylight saving changes.
+- **Right now** with a repeat starts one run immediately, then follows the repeat.
+- **If the previous run is still active** chooses what a repeat does then. **Skip this run** is the
+  default, and the card says when it skipped: an agent waiting for a human would otherwise collect a
+  new run each time. **Start another run** lets runs overlap. **Run now** starts one regardless.
+- A start that fails is recorded on the card; a repeat tries again at its next time.
+- Runs missed while the board was down are not made up: the schedule starts once and moves on.
+
 ## Flow YAML
 
 ```yaml
@@ -443,7 +493,8 @@ steps:
 ```
 
 Configure context in the existing **Flows** YAML editor. Files are source paths on the setup PC,
-including directories; browser uploads are not implemented. Git uses that PC's credential helper
+including directories; to upload a file for one run, attach it in **New card**
+([Attaching files, repositories and Confluence](#attaching-files-repositories-and-confluence)). Git uses that PC's credential helper
 or SSH, with interactive terminal prompting disabled so failures appear in setup chat. HTTP URLs
 must not contain credentials. Confluence imports use
 [Spenhouet's Confluence Markdown Exporter](https://github.com/Spenhouet/confluence-markdown-exporter),

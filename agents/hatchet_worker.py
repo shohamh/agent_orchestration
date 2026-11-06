@@ -65,12 +65,15 @@ def build_task(hatchet: Any) -> Any:
 
     class SessionInput(BaseModel):
         goal: str = Field(min_length=1, max_length=20000)
-        agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo"] = "codex"
+        agent: Literal["codex", "claude", "opencode", "opencode2", "omp", "pi", "demo", "program"] = "codex"
         workspace: str = Field(default="", max_length=4096)
         simulateFailures: int = Field(default=0, ge=0, le=20)
         resumeSessionId: str = Field(default="", max_length=512)
         # Fleet requirement {id, pool, tags}; None runs the card on this worker as before.
         worker: dict | None = None
+        # What was attached in New card (flowkit/launch_context.py), and a program card's input text.
+        context: dict | None = None
+        programInput: str = Field(default="", max_length=20000)
 
     @hatchet.task(name="agent-session", input_validator=SessionInput, retries=0,
                   schedule_timeout=SCHEDULE_TIMEOUT, execution_timeout=timedelta(hours=24))

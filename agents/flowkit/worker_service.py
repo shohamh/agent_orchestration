@@ -229,7 +229,9 @@ class Job:
                         code = await self.process.wait()
                         error = await errors
                         if code or not got_result: raise RuntimeError(error or f'Worker process exited {code} without a result')
-                        files = await asyncio.to_thread(snapshot, workspaces/self.config['runId'])
+                        # A card's workspace stays on this PC; only a step or source job hands files on.
+                        discard = 'session' in self.config['start'] or self.config['start'].get('discardFiles')
+                        files = {} if discard else await asyncio.to_thread(snapshot, workspaces/self.config['runId'])
                         if os.name == 'nt':
                             for name,entry in files.items():
                                 original=self.config['files'].get(name)
@@ -370,6 +372,11 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             if 'session' in start:  # a standalone card; it never uses a coordinator path
                 if set(start) != {'session', 'runId'}: raise ValueError('Invalid card job')
                 config['requirement'] = {'agent': card_session(start['session']).get('agent', 'codex')}
+            elif 'attached' in start:  # import the Confluence pages attached to a run
+                from .environment import configuration
+                if set(start) != {'attached', 'runId'}: raise ValueError('Invalid source job')
+                configuration(start['attached'])
+                config['requirement'] = {}
             else:
                 flow = parse(start['flow'])
                 if start['step'] not in flow.steps: raise ValueError('Unknown step')

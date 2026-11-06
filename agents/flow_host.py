@@ -546,9 +546,9 @@ class Api(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _json_body(self) -> dict:
+    def _json_body(self, limit: int = 1024 * 1024) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 1024 * 1024:
+        if length > limit:
             raise ValueError("request too large")
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict): raise ValueError('body must be an object')
@@ -684,8 +684,55 @@ class Api(BaseHTTPRequestHandler):
             self._send(502, {'error': f'The worker did not answer as expected ({type(exc).__name__})'})
         return True
 
+    def _launch(self, method: str) -> bool:
+        """Uploads, attached sources and schedules behind the board's New card form; False otherwise."""
+        url = urlsplit(self.path)
+        if not re.match(r'/(uploads|schedules|launch/context)(/|$)', url.path):
+            return False
+        from flowkit import launch_context, schedules
+        store = schedules.Schedules(self.host.store.state / 'schedules.json')
+        try:
+            target = (method, url.path)
+            found = re.fullmatch(r'/schedules/([0-9a-f]{32})(?:/(enable|disable|result))?', url.path)
+            upload = re.fullmatch(r'/uploads/([0-9a-f]{32})', url.path)
+            if target == ('POST', '/launch/context'):
+                result = {'context': launch_context.normalize(self._json_body().get('context'))}
+            elif target == ('POST', '/uploads'):
+                body = self._json_body(limit=90 * 1024 * 1024)  # 64 MiB as base64, the transfer limit of a run
+                result = launch_context.save_upload(body.get('name'), body.get('data'), keep=store.referenced_uploads())
+            elif method == 'DELETE' and upload:
+                launch_context.delete_upload(upload[1])
+                result = {'ok': True}
+            elif target == ('GET', '/schedules'):
+                query = parse_qs(url.query)
+                result = {'schedules': store.list(query.get('system', [None])[0], query.get('board', [None])[0])}
+            elif target == ('POST', '/schedules'):
+                result = store.create(self._json_body(limit=256 * 1024))
+            elif target == ('POST', '/schedules/preview'):
+                result = {'next': schedules.upcoming(self._json_body())}
+            elif target == ('POST', '/schedules/claim'):
+                result = {'schedules': store.claim(self._json_body().get('systems') or [])}
+            elif method == 'GET' and found and not found[2]:
+                result = store.get(found[1])
+            elif method == 'DELETE' and found and not found[2]:
+                store.delete(found[1])
+                result = {'ok': True}
+            elif method == 'POST' and found and found[2] in ('enable', 'disable'):
+                result = store.set_enabled(found[1], found[2] == 'enable')
+            elif method == 'POST' and found and found[2] == 'result':
+                body = self._json_body()
+                result = store.record(found[1], run=body.get('run'), error=body.get('error'), skipped=body.get('skipped')) or {'ok': True}
+            else:
+                result = None
+            self._send(*((200, result) if result is not None else (404, {'error': 'not found'})))
+        except LookupError as exc:
+            self._send(404, {'error': str(exc)})
+        except ValueError as exc:
+            self._send(400, {'error': str(exc)})
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("GET") or self._fleet("GET"):
+        if not self._allowed() or self._documents("GET") or self._fleet("GET") or self._launch("GET"):
             return
         if self.path == '/workers':
             from flowkit.workers import catalog
@@ -703,7 +750,7 @@ class Api(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("POST") or self._fleet("POST"):
+        if not self._allowed() or self._documents("POST") or self._fleet("POST") or self._launch("POST"):
             return
         if self.path == '/workers':
             from flowkit.fleet_registry import save_worker
@@ -732,7 +779,7 @@ class Api(BaseHTTPRequestHandler):
                 card = body.get('card')
                 if card is not None:  # a standalone card: {agent, worker}
                     if not isinstance(card, dict) or set(card) - {'agent', 'worker'}: raise ValueError('card must contain agent and worker')
-                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine)))
+                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine, card.get('command'))))
                 source = body.get('flow')
                 flow = parse_text(source) if isinstance(source, str) else parse(source)
                 return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'), engine)))
@@ -816,7 +863,7 @@ class Api(BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("DELETE") or self._fleet("DELETE"):
+        if not self._allowed() or self._documents("DELETE") or self._fleet("DELETE") or self._launch("DELETE"):
             return
         match = re.fullmatch(r'/workers/([^/]+)', urlsplit(self.path).path)
         if match:

@@ -124,6 +124,7 @@
 <link rel="stylesheet" href="/static/chat.css">
 <link rel="stylesheet" href="/static/flow-builder.css">
 <link rel="stylesheet" href="/static/fleet.css">
+<link rel="stylesheet" href="/static/new-card.css">
 </head>
 <body>
 <header>
@@ -185,38 +186,7 @@
   </div>
 </aside>
 
-<dialog id="new-dialog">
-  <form id="new-form" method="dialog">
-    <strong>New card</strong>
-    <label>Type
-      <select id="n-kind">
-        <option value="agent-session">Coding agent session (chat)</option>
-        <option value="steerable-agent">Steerable agent (long-running, steerable)</option>
-        <option value="research-report">Research report (multi-step DAG)</option>
-      </select>
-    </label>
-    <p class="status" id="n-flow-desc" hidden></p>
-    <div id="n-flow-fields" hidden></div>
-    <div id="n-worker-fields" hidden></div>
-    <label id="n-goal-wrap"><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
-    <div class="session-fields" id="n-session-fields">
-      <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
-      <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
-      <label>Resume ACP session ID <input id="n-resume" placeholder="Optional"><small>Use the same agent and workspace as the original session. The agent must support loading sessions.</small></label>
-      <div id="n-card-worker"></div>
-      <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
-      <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
-    </div>
-    <p class="session-note warning" id="n-production-note" hidden>Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.</p>
-    <label class="agent-only" hidden>Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
-    <label class="agent-only" hidden>Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
-    <div id="n-placement" hidden aria-live="polite"></div>
-    <div class="row" style="justify-content:flex-end">
-      <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
-      <button class="primary" id="n-create" value="create" type="submit">Create session</button>
-    </div>
-  </form>
-</dialog>
+<dialog id="new-dialog"></dialog>
 
 <!-- The flow builder (flow-builder.js): a flow runs on every backend as a native workflow. Saving
      stores a draft only; activation is a separate, previewed step. -->
@@ -228,6 +198,7 @@
 <script src="/static/card-search.js"></script>
 <script src="/static/flow-builder.js"></script>
 <script src="/static/fleet.js"></script>
+<script src="/static/new-card.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
   // Chrome honours interactive-widget=resizes-content above; this covers browsers that only
@@ -280,7 +251,8 @@ function workerPicker(label, selected, changed, emptyLabel = 'Use flow selection
   return el('label', {}, label, select, tags);
 }
 
-let launchExecution = {default:{}, steps:{}};
+let newCard = null;      // the New card form (new-card.js), mounted below
+let schedules = [];     // this board's cards that start later or repeat
 let openCardId = null;
 const contextKey = () => `${system}/${board}`;
 const runKey = () => `${contextKey()}/${openCardId}`;
@@ -330,7 +302,7 @@ function el(tag, attrs = {}, ...children) {
 
 function renderHeader() {
   $("systems").replaceChildren(...systems.map((s) =>
-    el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); refresh(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
+    el("button", { type: "button", "aria-pressed": String(s === system), onclick: () => { system = s; store.set("system", s); closeDrawer(); cards = []; schedules = []; shownLimit = {}; renderBoard(); refresh(); loadSchedules(); renderHeader(); } }, SYSTEM_LABELS[s] || s)));
   $("board").replaceChildren(...boards.map((b) => { const o = el("option", { value: b }, b); if (b === board) o.selected = true; return o; }));
   updateNewForm();
 }
@@ -400,13 +372,14 @@ function renderBoard() {
     const shown = hidden ? [] : inCol.sort(columnOrder).slice(0, shownLimit[col] || PAGE);
     renderedCount += shown.length;
     const rest = inCol.length - shown.length;
-    const count = query ? `${inCol.length} / ${total[col]}` : String(inCol.length);
+    const planned = col === "scheduled" ? schedules.filter((s) => !query || s.title.toLowerCase().includes(query.toLowerCase())) : [];
+    const count = query ? `${inCol.length + planned.length} / ${total[col] + (col === "scheduled" ? schedules.length : 0)}` : String(inCol.length + planned.length);
     sortedColumns[col] = hidden ? [] : inCol;
     const more = !hidden && rest > 0 ? moreButton(col, rest) : null;
     const note = hidden && inCol.length ? el("div", { class: "hidden-note" }, `${inCol.length} hidden`)
-      : !inCol.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : "—") : null;
-    return el("section", { class: shown.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
-      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, count)), ...shown.map(cardNode), more, note);
+      : !inCol.length && !planned.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : "—") : null;
+    return el("section", { class: shown.length || planned.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
+      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, count)), ...planned.map((s) => NewCard.scheduleNode(s, scheduleActions)), ...shown.map(cardNode), more, note);
   }));
   if (renderedCount <= FLIP_MAX) flip(before);
   moreObserver?.disconnect();
@@ -631,7 +604,7 @@ function renderCard(card, when) {
       onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
       onpointerdown: movable ? (e) => dragStart(e, card) : null },
     el("div", { class: "title" }, card.title, priority ? " " : null, priority),
-    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when),
+    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent === "program" ? "Program" : card.agent || card.task), el("span", {}, when),
       workers.length ? el("span", { title: "Execution workers" }, `on ${workers.slice(0, 2).join(", ")}${workers.length > 2 ? ` +${workers.length - 2}` : ""}`) : null),
     q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
     last ? el("div", { class: "last" }, last) : null,
@@ -1177,185 +1150,73 @@ function onLive(message) {
   liveStatus();
 }
 
-$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); refresh(); });
+$("board").addEventListener("change", (e) => { board = e.target.value; store.set("board", board); closeDrawer(); cards = []; schedules = []; shownLimit = {}; renderBoard(); refresh(); loadSchedules(); });
 $("add-board").addEventListener("click", () => {
   const name = (prompt("Board name (letters, digits, - and _)") || "").trim();
   if (!/^[\w-]+$/.test(name)) return;
   if (!boards.includes(name)) boards.push(name);
-  board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; shownLimit = {}; renderBoard(); renderHeader(); refresh();
+  board = name; store.set("boards", boards); store.set("board", board); closeDrawer(); cards = []; schedules = []; shownLimit = {}; renderBoard(); renderHeader(); refresh(); loadSchedules();
 });
-function renderKindOptions() {
-  const select = $("n-kind"), current = select.value;
-  select.querySelector("optgroup")?.remove();
-  if (flows.length) select.append(el("optgroup", { label: "Flows (run on every backend)" },
-    ...flows.map((f) => el("option", { value: `flow:${f.name}` }, `${f.name}${f.description ? " — " + f.description : ""}`))));
-  if ([...select.options].some((o) => o.value === current)) select.value = current;
-}
-
 async function loadFlows() {
   try { flows = (await api("GET", "/api/flows")).flows; } catch (e) { flows = []; setStatus(e.message, true); }
-  renderKindOptions();
   try { executionWorkers = (await api('GET', '/api/workers')).workers; } catch (_) { executionWorkers = []; }
 }
 
-// A standalone card may run on a fleet worker (Hatchet and Prefect). It then gets a new workspace
-// on that PC, so a host workspace or resumed session rules the selection out.
-let cardWorker = {};
-function cardWorkerBlock() {
-  if (!["hatchet", "prefect"].includes(system)) return "Fleet placement of standalone cards is available on Hatchet and Prefect. On Trigger.dev a card always runs on the coordinator.";
-  if ($("n-workspace").value.trim() || $("n-resume").value.trim()) return "A card placed on a fleet worker runs in a new workspace on that PC. Clear the workspace and the resume ID to choose a worker.";
-  return null;
-}
-function cardSelection() {
-  if (cardWorkerBlock()) return null;
-  return Object.values(cardWorker).some((v) => (Array.isArray(v) ? v.length : v)) ? cardWorker : { tags: [] };
-}
-function syncCardWorker() {
-  const box = $("n-card-worker"), key = JSON.stringify(executionWorkers);
-  if (box.dataset.key !== key) {
-    box.dataset.key = key;
-    box.replaceChildren(workerPicker("Run on (fleet worker)", cardWorker, (value) => { cardWorker = value; scheduleLaunchCheck(); }, "Any compatible fleet worker"),
-      el("p", { class: "fb-note" }));
-  }
-  const why = cardWorkerBlock(), note = box.querySelector(".fb-note");
-  box.querySelectorAll("select, input").forEach((n) => { n.disabled = !!why || $("n-session-fields").hidden; });
-  note.textContent = why || ""; note.hidden = !why;
-}
-
-// Ask the flow host whether a registered worker can run what is about to start: ready, wait
-// (offline, busy or unchecked: it starts by itself later) or blocked (start is refused).
-const launch = { key: null, serial: 0, result: null, blocked: false, timer: null };
-function launchRequest() {
-  const kind = $("n-kind").value;
-  if (kind.startsWith("flow:")) return system === "trigger" ? null : { flow: kind.slice(5), execution: launchExecution, system };
-  const worker = kind === "agent-session" ? cardSelection() : null;
-  return worker ? { card: { agent: $("n-agent").value, worker }, system } : null;
-}
-function scheduleLaunchCheck() { clearTimeout(launch.timer); launch.timer = setTimeout(checkLaunch, 250); }
-async function checkLaunch() {
-  const body = launchRequest(), key = body ? JSON.stringify(body) : null;
-  if (key === launch.key) return;
-  launch.key = key;
-  const serial = ++launch.serial;
-  if (!body) { Object.assign(launch, { result: null, blocked: false }); renderLaunch(); updateCreate(); return; }
-  // Keep showing the previous answer for the same card or flow while the new one is on its way.
-  const previous = launch.result?.body, same = previous && (body.card ? !!previous.card : previous.flow === body.flow);
-  launch.result = same ? { ...launch.result, pending: true } : { body, pending: true }; renderLaunch();
-  let result;
-  try { result = { body, data: await api("POST", "/api/launch/validate", body) }; } catch (e) { result = { body, error: e.message }; }
-  if (serial !== launch.serial) return;
-  Object.assign(launch, { result, blocked: result.data?.status === "blocked" });
-  renderLaunch(); updateCreate();
-  if (result.data?.status === "blocked") launch.timer = setTimeout(() => { if ($("new-dialog").open) { launch.key = null; checkLaunch(); } }, 5000);
-}
-function renderLaunch() {
-  const box = $("n-placement"), r = launch.result;
-  box.hidden = !r;
-  if (!r) { box.replaceChildren(); return; }
-  const parts = [];
-  if (r.pending) parts.push(el("p", { class: "status", role: "status" }, "Checking the fleet…"));
-  if (r.error) parts.push(el("p", { class: "status error" }, `Couldn't check the fleet: ${r.error}. The board checks again when you start.`));
-  const data = r.data;
-  if (data?.card) parts.push(FlowBuilder.placementView(data.card, { title: "Where this card can run" }));
-  else if (data && data.fleet === false) parts.push(FlowBuilder.placementView(data));
-  else if (data) parts.push(el("strong", {}, "Where each step can run"),
-    ...Object.entries(data.steps || {}).map(([sid, decision]) => el("section", { "data-step": sid }, el("h5", {}, sid), FlowBuilder.placementView(decision))));
-  if (data?.status === "blocked") parts.push(el("p", { class: "session-note warning" }, r.body.card
-    ? "Launch is blocked until a registered worker can run this card. Change the selection, or fix the worker in the fleet tab."
-    : "Launch is blocked until every step can run on a registered worker. The flow stays saved: change the workers here, or fix the flow in Flows or the worker in the fleet tab."));
-  box.replaceChildren(...parts);
-}
-function updateCreate() {
-  const kind = $("n-kind").value, session = kind === "agent-session", flow = kind.startsWith("flow:");
-  const button = $("n-create");
-  button.disabled = ((session || flow) && system === "trigger") || launch.blocked;
-  button.title = launch.blocked ? "Launch is blocked: no registered worker can run it (see the explanation above)" : "";
-}
-
-function updateNewForm() {
-  const kind = $("n-kind").value;
-  const flow = kind.startsWith("flow:") ? flows.find((f) => f.name === kind.slice(5)) : null;
-  $("n-goal-wrap").hidden = !!flow; $("n-goal").disabled = !!flow;
-  $("n-flow-fields").hidden = !flow; $("n-flow-desc").hidden = !flow;
-  $('n-worker-fields').hidden = !flow;
-  if (flow && $("n-flow-fields").dataset.flow !== flow.name) {
-    $("n-flow-fields").dataset.flow = flow.name;
-    $("n-flow-desc").textContent = `${Object.keys(flow.steps).length} steps: ${Object.entries(flow.steps).map(([id, s]) => `${id} (${s.kind})`).join(" → ")}`;
-    $("n-flow-fields").replaceChildren(...Object.entries(flow.input).map(([key, value]) => el("label", {}, key,
-      typeof value === "boolean" ? el("select", { "data-key": key }, el("option", { value: "true" }, "true"), el("option", { value: "false" }, "false"))
-        : el("input", { "data-key": key, value: value ?? "", type: typeof value === "number" ? "number" : "text" }))));
-    for (const [key, value] of Object.entries(flow.input)) if (typeof value === "boolean") $("n-flow-fields").querySelector(`[data-key="${key}"]`).value = String(value);
-    launchExecution = {default:{}, steps:{}};
-  }
-  const workerKey = flow ? flow.name + JSON.stringify(executionWorkers) : '';
-  if (flow && $('n-worker-fields').dataset.key !== workerKey) {
-    $('n-worker-fields').dataset.key = workerKey;
-    $('n-worker-fields').replaceChildren(el('strong', {}, 'Execution workers'),
-      workerPicker('Default worker / pool', launchExecution.default, value => { launchExecution.default = value; scheduleLaunchCheck(); }),
-      el('details', {}, el('summary', {}, 'Choose workers for individual steps'),
-        ...Object.keys(flow.steps).map(sid => workerPicker(sid, launchExecution.steps[sid], value => {
-          if (Object.keys(value).length) launchExecution.steps[sid]=value; else delete launchExecution.steps[sid];
-          scheduleLaunchCheck();
-        }))),
-      el('small', {}, flow.environment ? 'Environment context is prepared in setup_environment. File source paths refer to that worker PC.' : 'Steps receive files from their dependencies, including across worker PCs.'));
-  }
-  const agent = kind === "steerable-agent", session = kind === "agent-session";
-  document.querySelectorAll(".agent-only").forEach((n) => { n.hidden = !agent; });
-  document.querySelectorAll(".agent-only input").forEach((n) => { n.disabled = !agent; });
-  document.querySelectorAll(".session-fields input, .session-fields select").forEach((n) => { n.disabled = !session; });
-  $("n-session-fields").hidden = !session;
-  syncCardWorker();
-  $("n-goal-label").textContent = session ? "Opening prompt" : agent ? "Goal" : "Topic";
-  $("n-production-note").hidden = !session || system !== "trigger";
-  updateCreate();
-  $("n-create").textContent = session ? "Create session" : flow ? "Start flow" : "Create card";
-  if (flow && system === "trigger") { $("n-production-note").hidden = false; $("n-production-note").textContent = "Flows run on the local development worker. Choose the Trigger.dev · local tab, Hatchet or Prefect."; }
-  else $("n-production-note").textContent = "Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.";
-  $("n-demo-note").hidden = $("n-agent").value !== "demo";
-  scheduleLaunchCheck();
-}
-function openNewCard(kind) {
-  launch.key = null; // the fleet may have changed since the dialog was last open
-  if (kind) { renderKindOptions(); if ([...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; }
-  updateNewForm();
-  loadFlows().then(() => { if (kind && [...$("n-kind").options].some(o => o.value === kind)) $("n-kind").value = kind; updateNewForm(); });
-  $("new-dialog").showModal(); pushOverlay("dialog", () => $("new-dialog").close());
-}
+// New card (new-card.js). Escape and the Close button close the dialog natively; drop its history
+// entry too. When Back closed it, its entry is already gone and this is a no-op. Watching the `open`
+// attribute (removed synchronously on every close path) is more dependable than the "close" event,
+// which a background tab may deliver late.
+newCard = NewCard.mount($("new-dialog"), {
+  api, workerPicker, placementView: FlowBuilder.placementView,
+  getSystem: () => system, getBoard: () => board, getFlows: () => flows, getWorkers: () => executionWorkers,
+  loadFleet: loadFlows,
+  onOpen: () => pushOverlay("dialog", () => $("new-dialog").close()),
+  onClose: () => { $("new-dialog").close(); return dropOverlay("dialog"); },
+  // The new card arrives on the live stream; sessions and flows open as soon as it does.
+  onCreated: (id, opens, createdSystem, createdBoard) => {
+    if (!opens || createdSystem !== system || createdBoard !== board) return;
+    if (cards.some((c) => c.id === id)) openCard(id); else pendingOpen = id;
+  },
+  onScheduled: (item) => { setStatus(`Scheduled: ${item.title}`); loadSchedules(); },
+});
+function openNewCard(kind) { newCard.open(kind); }
+function updateNewForm() { newCard?.refresh(); }
 $("new-card").addEventListener("click", () => openNewCard());
-// Escape and the dialog's Close button close it natively; drop its history entry too. When Back
-// closed it, its entry is already gone and this is a no-op. Watching the `open` attribute (removed
-// synchronously on every close path) is more dependable than the "close" event, which a
-// background tab may deliver late.
 new MutationObserver(() => { if (!$("new-dialog").open) dropOverlay("dialog"); })
   .observe($("new-dialog"), { attributes: true, attributeFilter: ["open"] });
-function closeNewDialog() { $("new-dialog").close(); return dropOverlay("dialog"); }
-$("n-kind").addEventListener("change", updateNewForm);
-$("n-agent").addEventListener("change", updateNewForm);
-$("n-workspace").addEventListener("input", updateNewForm);
-$("n-resume").addEventListener("input", updateNewForm);
-$("new-form").addEventListener("submit", async (e) => {
-  if (e.submitter?.value !== "create") return;
-  e.preventDefault();
-  const kind = $("n-kind").value, key = contextKey();
-  if (((kind === "agent-session" || kind.startsWith("flow:")) && system === "trigger") || launch.blocked) { updateNewForm(); return; }
-  const body = kind.startsWith("flow:")
-    ? { kind: "flow", flow: kind.slice(5), execution: launchExecution, input: Object.fromEntries([...$("n-flow-fields").querySelectorAll("[data-key]")].map((n) => [n.dataset.key,
-        n.tagName === "SELECT" ? n.value === "true" : n.type === "number" ? Number(n.value) : n.value])) }
-    : kind === "agent-session"
-    ? { kind, goal: $("n-goal").value, agent: $("n-agent").value, workspace: $("n-workspace").value.trim(), resumeSessionId: $("n-resume").value.trim(), simulateFailures: Number($("n-failures").value),
-        ...(cardSelection() ? { worker: cardSelection() } : {}) }
-    : { kind, goal: $("n-goal").value, turns: Number($("n-turns").value), stepSeconds: Number($("n-step").value) };
-  $("n-create").disabled = true;
+
+// Schedules are records on the flow host, not engine runs, so they load apart from the cards.
+const scheduleKey = () => `${system}/${board}`;
+async function loadSchedules() {
+  if (!system) return;
+  const key = scheduleKey();
   try {
-    const result = await api("POST", `/api/boards/${system}/${encodeURIComponent(board)}/cards`, body);
-    await closeNewDialog(); $("n-goal").value = "";
-    // The new card arrives on the live stream; sessions and flows open as soon as it does.
-    if (key === contextKey() && (kind === "agent-session" || kind.startsWith("flow:"))) {
-      if (cards.some(c => c.id === result.id)) openCard(result.id); else pendingOpen = result.id;
-    }
-  } catch (err) { setStatus(err.message, true); }
-  finally { updateNewForm(); }
-});
+    const found = (await api("GET", `/api/schedules?system=${encodeURIComponent(system)}&board=${encodeURIComponent(board)}`)).schedules;
+    if (key !== scheduleKey() || JSON.stringify(found) === JSON.stringify(schedules)) return;
+    schedules = found;
+  } catch (_) {
+    if (!schedules.length) return; // the flow host is down: the board still shows the engine's cards
+    schedules = [];
+  }
+  renderBoard();
+}
+setInterval(() => { if (!document.hidden) loadSchedules(); }, 15000);
+const scheduleActions = {
+  run: async (item) => {
+    try { const r = await api("POST", `/api/schedules/${item.id}/run`, {}); setStatus(`Started: ${item.title}`); if (r.run) pendingOpen = r.run; }
+    catch (e) { setStatus(e.message, true); }
+    loadSchedules();
+  },
+  toggle: async (item, enable) => {
+    try { await api("POST", `/api/schedules/${item.id}/${enable ? "enable" : "disable"}`, {}); } catch (e) { setStatus(e.message, true); }
+    loadSchedules();
+  },
+  remove: async (item) => {
+    if (!confirm(`Delete the schedule "${item.title}"? Runs it already started stay on the board.`)) return;
+    try { await api("DELETE", `/api/schedules/${item.id}`); } catch (e) { setStatus(e.message, true); }
+    loadSchedules();
+  },
+};
 // ---------------------------------------------------------------- Flows (builder)
 // Draft saves never restart workers; activation is an explicit, previewed step inside the builder.
 const flowsDialog = $("flows-dialog");
@@ -1404,7 +1265,7 @@ $("d-pause").addEventListener("click", async () => {
     system = systems.includes(store.get("system")) ? store.get("system") : systems[0];
     if (!boards.includes(board)) board = boards[0];
     setStatus(`${SYSTEM_LABELS[system] || system} · connecting…`);
-    renderHeader(); refresh(); loadFlows();
+    renderHeader(); refresh(); loadFlows(); loadSchedules();
   } catch (e) { setStatus(e.message, true); }
 })();
 </script>

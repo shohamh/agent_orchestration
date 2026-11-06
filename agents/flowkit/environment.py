@@ -21,14 +21,14 @@ def configuration(value):
     selector(value.get('worker'))
     targets=[]
     for kind, allowed, required in (
-        ('repositories', {'url','target','ref'}, {'url','target'}),
+        ('repositories', {'url','target','ref','shallow'}, {'url','target'}),
         ('files', {'source','target'}, {'source','target'}),
         ('confluence', {'base_url','page_id','target','token_env','username_env','include_descendants','attachments'}, {'base_url','page_id','target'})):
         items=value.get(kind, [])
         if not isinstance(items, list) or len(items)>50: raise ValueError(f'{kind} must be a list of at most 50 sources')
         for item in items:
             if not isinstance(item,dict) or set(item)-allowed or required-set(item) or any(
-                    type(v) is not bool if k=='include_descendants' else not isinstance(v,str) or not v or '\x00' in v
+                    type(v) is not bool if k in ('include_descendants','shallow') else not isinstance(v,str) or not v or '\x00' in v
                     for k,v in item.items()):
                 raise ValueError(f'Invalid {kind} source')
             target=item['target']
@@ -66,6 +66,30 @@ async def git(*args, cwd=None):
         if tree: tree.close()
 
 
+async def clone(item,target):
+    """A shallow clone keeps a repository within a run's transfer limit. It only works for a branch
+    or tag (or the default branch), so a commit id falls back to a full clone."""
+    if item.get('shallow'):
+        branch=('--branch',item['ref']) if item.get('ref') else ()
+        try:
+            await git('clone','--no-hardlinks','--depth','1',*branch,'--',item['url'],str(target))
+            return
+        except ValueError:
+            if not item.get('ref'): raise
+            shutil.rmtree(target,ignore_errors=True)
+    await git('clone','--no-hardlinks','--',item['url'],str(target))
+    if item.get('ref'): await git('-C',str(target),'checkout','--detach',await resolved_ref(item['ref'],target))
+
+
+async def resolved_ref(ref,target):
+    """A branch other than the default exists only as origin/<branch> after a full clone."""
+    try:
+        await git('-C',str(target),'rev-parse','--verify','--quiet',ref+'^{commit}')
+        return ref
+    except ValueError:
+        return 'origin/'+ref
+
+
 def target_path(workspace,item):
     path=workspace/item['target']
     if not path.resolve().is_relative_to(workspace.resolve()) or path.is_symlink(): raise ValueError('Unsafe context destination')
@@ -82,8 +106,7 @@ async def prepare_sources(config, workspace):
                 target.parent.mkdir(parents=True,exist_ok=True)
                 if kind=='repositories':
                     if not target.exists():
-                        await git('clone','--no-hardlinks','--',item['url'],str(target))
-                        if item.get('ref'): await git('-C',str(target),'checkout','--detach',item['ref'])
+                        await clone(item,target)
                     await validate_repository(item,target)
                 elif kind=='files':
                     source=Path(item['source']).expanduser()
@@ -109,7 +132,7 @@ async def validate_repository(item,target):
     head=await git('-C',str(target),'rev-parse','HEAD')
     if await git('-C',str(target),'ls-files','--deleted'):
         raise ValueError('Repository has missing tracked files; restore the worktree before completing setup')
-    if item.get('ref') and head != await git('-C',str(target),'rev-parse',item['ref']+'^{commit}'): raise ValueError('Repository revision differs from requested ref')
+    if item.get('ref') and head != await git('-C',str(target),'rev-parse',await resolved_ref(item['ref'],target)+'^{commit}'): raise ValueError('Repository revision differs from requested ref')
 
 
 async def validate_sources(config,workspace):

@@ -6,3 +6,4 @@ jsonschema==4.26.0
 prefect==3.9.1
 python-dotenv==1.2.4
 PyYAML==6.0.3
+tzdata==2026.6

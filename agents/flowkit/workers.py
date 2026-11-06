@@ -22,13 +22,14 @@ _PUSH_BACKOFF = {}
 
 def selector(value):
     if value is None: return {}
-    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'tags'}:
-        raise ValueError('worker selector must contain id, pool and/or tags')
+    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'pools', 'tags'}:
+        raise ValueError('worker selector must contain id, pool, pools and/or tags')
     for key in ('id', 'pool'):
         if key in value and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 100):
             raise ValueError(f'worker {key} must be nonempty text (max 100)')
-    if 'tags' in value and (not isinstance(value['tags'], list) or len(value['tags']) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in value['tags'])):
-        raise ValueError('worker tags must be a list of at most 50 nonempty strings')
+    for key in ('pools', 'tags'):  # pools: any of them; tags: all of them
+        if key in value and (not isinstance(value[key], list) or len(value[key]) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in value[key])):
+            raise ValueError(f'worker {key} must be a list of at most 50 nonempty strings')
     return value.copy()
 
 
@@ -46,7 +47,9 @@ def selection_for(flow, step, configured):
     specific=routes['steps'].get(step,flow.steps[step].worker)
     if specific.get('id'): return specific
     result={**base,**specific}
-    if specific.get('pool'): result.pop('id',None)
+    # A step's own pool choice replaces the default one, in either spelling.
+    if specific.get('pool'): result.pop('id',None); result.pop('pools',None)
+    elif specific.get('pools'): result.pop('id',None); result.pop('pool',None)
     return result
 
 
@@ -260,6 +263,7 @@ async def choose(wanted):
     candidates = [w for w in snapshot if statuses[w['id']]['online'] and
                   (not wanted.get('id') or wanted['id'] == w['id']) and
                   (not wanted.get('pool') or wanted['pool'] in w['pools']) and
+                  (not wanted.get('pools') or set(wanted['pools']) & set(w['pools'])) and
                   set(wanted.get('tags', [])) <= set(w.get('tags', []))]
     if not candidates: raise ValueError(f'No online execution worker matches {wanted or "the default selection"}')
     return min(candidates, key=lambda w: (statuses[w['id']]['active'] / statuses[w['id']]['slots'], w['id']))

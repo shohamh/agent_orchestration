@@ -411,7 +411,10 @@ impl Job {
             other => return Err(Stop::Failed(format!("Unknown step kind {other:?}"))),
         };
         self.inner.lock().unwrap().output = Some(output);
-        let snapshot = {
+        // A program card's workspace stays on this PC, however large it gets; a step hands its files on.
+        let snapshot = if start["discardFiles"].as_bool().unwrap_or(false) {
+            json!({})
+        } else {
             let (w, original) = (workspace.clone(), files.clone());
             tokio::task::spawn_blocking(move || artifacts::snapshot(&w, Some(&original))).await.map_err(|e| Stop::Failed(e.to_string()))?.map_err(Stop::Failed)?
         };
