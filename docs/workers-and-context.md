@@ -72,12 +72,21 @@ programs, which the capability check reports.
 | | Windows | Linux |
 |---|---|---|
 | Service | Scheduled Task `AgentWorker-<name>` | `systemd --user` unit `agent-worker-<name>.service` |
-| Starts | at **logon** of that user (not at boot) | at login; with `sudo loginctl enable-linger $USER`, at **boot** |
-| After a crash | restarted after 1 minute, up to 999 times | `Restart=always`, 5 seconds |
+| Starts | at **logon** of that user; at **boot**, before anyone logs in, after `agent-worker boot enable` (Administrator once) | at login; at **boot** after `agent-worker boot enable` (runs `loginctl enable-linger`) |
+| After a crash or kill | the task re-runs every minute and starts the worker if it is not running (at most a minute), plus Task Scheduler's own restart on failure | `Restart=always`, 5 seconds |
+| `agent-worker stop` | disables the task until `agent-worker start` | stops it until the next login or `start` |
 | Limits | no time limit, runs on battery | none |
 | macOS | LaunchAgent (`KeepAlive`) | |
 
 Without a per-user service manager the worker falls back to a background process and says so.
+`AGENT_WORKER_SERVICE=process` forces that fallback (used by the tests; no startup entry is created).
+
+Tested on both systems with the real program, not mocks: install by uuid, the second install refused,
+the startup entry created and removed, the worker killed with `kill -9` / `taskkill /F` and brought
+back, and a fleet update through the service manager (the updater is started outside the service so
+that stopping the service does not stop it). Run them with
+`AGENT_WORKER_SERVICE_TESTS=1 AGENT_WORKER_BIN=<program> python -m unittest agents.tests.test_agent_worker_cli`
+(the service tests create a real Scheduled Task or systemd user unit for the current user and remove it again).
 
 ### Managing a worker: `agent-worker`
 
@@ -85,6 +94,7 @@ Without a per-user service manager the worker falls back to a background process
 |---|---|
 | `agent-worker status [--json]` | Service, local health, connection to the server, version, components |
 | `agent-worker start`, `stop`, `restart [NAME]` | The worker and its components, or one component |
+| `agent-worker boot [enable\|disable\|status]` | Start with the PC, even at the Windows logon screen. On Windows run `enable` once in an Administrator PowerShell: it adds a boot trigger and runs the task as you without a stored password (S4U), so the worker has no network credentials and none of your logon environment; the install recorded your PATH and profile folders and the worker restores them. On Linux it turns on systemd lingering |
 | `agent-worker logs` | The worker log |
 | `agent-worker update` | Fetches the version the server serves, waits for running jobs (drain), swaps the program, restarts, and goes back to the previous one if the new one does not come up |
 | `agent-worker uninstall [--yes] [--keep-registration]` | Stops and removes the service, deregisters from the server and deletes the install folder |
@@ -108,7 +118,9 @@ over the old one). Put the new programs in `dist/worker/` (see below) before pre
 server serves. Pushing a tag `worker-vX.Y.Z` runs the same scripts in **GitHub Actions**
 (`.github/workflows/worker-release.yml`) and in **GitLab CI** (`.gitlab-ci.yml`), which publish a
 release with both programs. `worker/ci/fetch-release.sh` downloads the assets of a release into
-`dist/worker/` for an offline server. Windows may flag an unsigned program as unknown: sign the
+`dist/worker/` for an offline server. The Rust dependencies are vendored in `worker/vendor/` (pruned of import libraries for Windows targets we do not build), so
+`cargo build --locked` needs no network; `worker/ci/vendor.sh` refreshes them after a `Cargo.toml` change.
+Windows may flag an unsigned program as unknown: sign the
 Windows build (or have your security team allow it) before distributing it.
 
 ### Why the PC needs no open port: the relay

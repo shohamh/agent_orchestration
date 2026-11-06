@@ -49,6 +49,7 @@ impl Connector {
                 Ok(calls) => {
                     if !self.connected.swap(true, Ordering::SeqCst) {
                         crate::log!("connector", "connected to the server");
+                        self.write_state();
                     }
                     failures = 0;
                     for call in calls {
@@ -59,6 +60,7 @@ impl Connector {
                 Err(error) => {
                     if self.connected.swap(false, Ordering::SeqCst) || failures == 0 {
                         crate::log!("connector", "relay poll failed: {error}");
+                        self.write_state();
                     }
                     tokio::time::sleep(Duration::from_secs(BACKOFF[failures.min(BACKOFF.len() - 1)])).await;
                     failures += 1;
@@ -105,7 +107,13 @@ impl Connector {
                         if let (Some(map), Some(extra)) = (health.as_object_mut(), self.update_state().as_object()) {
                             map.extend(extra.clone());
                         }
-                        let _ = self.authed(self.client.post(format!("{}/status", self.base)).json(&health).timeout(Duration::from_secs(10))).send().await;
+                        // the first poll is held for up to 25 seconds, so an accepted status push is what proves the server is reachable and accepts the token
+                        if let Ok(pushed) = self.authed(self.client.post(format!("{}/status", self.base)).json(&health).timeout(Duration::from_secs(10))).send().await {
+                            if pushed.status().is_success() && !self.connected.swap(true, Ordering::SeqCst) {
+                                crate::log!("connector", "connected to the server");
+                                self.write_state();
+                            }
+                        }
                     }
                 }
             }
@@ -132,11 +140,13 @@ impl Connector {
         let action = call["path"].as_str().unwrap_or("").rsplit('/').next().unwrap_or("");
         let (status, body) = match action {
             "update" => {
-                if self.update_state()["update_state"] == "running" {
+                // an updater that died (power loss, killed) leaves "running" behind: after ten minutes it no longer counts
+                let stale = read_json(&self.home.file("update-status.json")).and_then(|d| d["at"].as_f64()).map(|at| now_unix() - at > 600.0).unwrap_or(false);
+                if self.update_state()["update_state"] == "running" && !stale {
                     (202, json!({"started": false, "reason": "an update is already running"}))
                 } else {
                     match std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
-                        crate::procutil::spawn_detached(&exe, &["--home".into(), self.home.0.to_string_lossy().to_string(), "update".into(), "--background".into()], Some(&self.home.0), Some(&self.home.file("update.log"))).map_err(|e| e.to_string())
+                        crate::procutil::spawn_outside_service(&exe, &["--home".into(), self.home.0.to_string_lossy().to_string(), "update".into(), "--background".into()], Some(&self.home.0), Some(&self.home.file("update.log"))).map_err(|e| e.to_string())
                     }) {
                         Ok(_) => (202, json!({"started": true})),
                         Err(e) => (500, json!({"error": e})),

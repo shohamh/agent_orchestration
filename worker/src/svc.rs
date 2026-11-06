@@ -39,7 +39,10 @@ impl Kind {
 
     /// The best startup mechanism on this PC.
     pub fn detect() -> Kind {
-        if cfg!(windows) {
+        // For tests and PCs where a startup entry is unwanted: AGENT_WORKER_SERVICE=process runs the worker as a plain background process.
+        if std::env::var("AGENT_WORKER_SERVICE").map(|v| v == "process").unwrap_or(false) {
+            Kind::Process
+        } else if cfg!(windows) {
             Kind::Task
         } else if cfg!(target_os = "macos") {
             Kind::Launchd
@@ -62,6 +65,8 @@ pub fn run(program: &str, args: &[&str]) -> std::io::Result<(i32, String, String
 }
 
 pub struct Svc {
+    /// start at boot, before anyone logs in (Windows: a boot trigger; Linux: lingering)
+    pub boot: bool,
     pub home: Home,
     pub kind: Kind,
     pub unit: String,
@@ -70,7 +75,43 @@ pub struct Svc {
 impl Svc {
     pub fn from_config(home: Home, config: &Value) -> Svc {
         let name = crate::config::name_of(config);
-        Svc { kind: Kind::parse(config["service"].as_str().unwrap_or("process")), unit: config["unit"].as_str().map(String::from).unwrap_or_else(|| default_unit(&name)), home }
+        Svc { boot: config["boot"] == true, kind: Kind::parse(config["service"].as_str().unwrap_or("process")), unit: config["unit"].as_str().map(String::from).unwrap_or_else(|| default_unit(&name)), home }
+    }
+
+    /// Does the worker start when the PC starts, without anyone logging in?
+    pub fn starts_at_boot(&self) -> bool {
+        match self.kind {
+            Kind::Task => self.boot,
+            Kind::Systemd => run("loginctl", &["show-user", &whoami(), "-p", "Linger", "--value"]).map(|o| o.1.trim() == "yes").unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Turn starting at boot on or off. Windows needs an Administrator shell (a boot trigger is a machine-level task);
+    /// on Linux lingering lets the user's systemd instance run without a login.
+    pub fn set_boot(&mut self, enable: bool) -> Result<(), String> {
+        if self.kind == Kind::Systemd && self.starts_at_boot() == enable {
+            return Ok(()); // already so; loginctl would ask for rights it does not need
+        }
+        match self.kind {
+            Kind::Task => {
+                if enable && !crate::procutil::is_elevated() {
+                    return Err("Starting before anyone logs in needs Administrator rights once. Open PowerShell with \"Run as administrator\" and run: agent-worker boot enable".into());
+                }
+                self.boot = enable;
+                self.install()?;
+                Ok(())
+            }
+            Kind::Systemd => {
+                let verb = if enable { "enable-linger" } else { "disable-linger" };
+                let (code, out, err) = run("loginctl", &[verb, &whoami()]).map_err(|e| e.to_string())?;
+                if code != 0 {
+                    return Err(format!("loginctl {verb} failed ({}). Ask an administrator to run: sudo loginctl {verb} {}", if err.trim().is_empty() { out.trim() } else { err.trim() }, whoami()));
+                }
+                Ok(())
+            }
+            _ => Err("Starting at boot needs a Windows Scheduled Task or a systemd user service; this worker runs as a plain background process".into()),
+        }
     }
 
     pub fn running(&self) -> bool {
@@ -91,7 +132,7 @@ impl Svc {
 
     pub fn describe(&self) -> String {
         match self.kind {
-            Kind::Task => format!("Windows scheduled task {} (starts when you log in; restarted if it fails)", self.unit),
+            Kind::Task => format!("Windows scheduled task {} (starts {}; checked every minute and restarted if it is not running)", self.unit, if self.boot { "when the PC starts, even before anyone logs in" } else { "when you log in" }),
             Kind::Systemd => format!("systemd user service {} (restarted if it fails)", self.unit),
             Kind::Launchd => format!("launchd agent {} (restarted if it fails)", self.unit),
             Kind::Process => "background process (no startup entry)".into(),
@@ -123,6 +164,7 @@ impl Svc {
         }
         match self.kind {
             Kind::Task => {
+                let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/ENABLE"]);
                 let (code, out, err) = run("schtasks", &["/Run", "/TN", &self.unit]).map_err(|e| e.to_string())?;
                 if code != 0 {
                     return Err(format!("Could not start the scheduled task {}: {}", self.unit, if err.trim().is_empty() { out.trim() } else { err.trim() }));
@@ -149,6 +191,8 @@ impl Svc {
     pub fn stop(&self) -> Result<(), String> {
         match self.kind {
             Kind::Task => {
+                // The task re-runs every minute to bring back a worker that was killed; disabled, a stopped worker stays stopped until `start`.
+                let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/DISABLE"]);
                 let _ = run("schtasks", &["/End", "/TN", &self.unit]);
             }
             Kind::Systemd => {
@@ -193,7 +237,7 @@ impl Svc {
         match self.kind {
             Kind::Task => {
                 let user = run("whoami", &[]).map_err(|e| e.to_string())?.1.trim().to_string();
-                let xml = task_xml(&user, &exe, &home);
+                let xml = task_xml(&user, &exe, &home, self.boot);
                 let path = self.home.file("task.xml");
                 let mut bytes = vec![0xFF, 0xFE];
                 bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
@@ -237,6 +281,10 @@ pub fn default_unit(id: &str) -> String {
     if cfg!(windows) { format!("AgentWorker-{id}") } else { format!("agent-worker-{id}") }
 }
 
+fn whoami() -> String {
+    std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| run("whoami", &[]).map(|o| o.1.trim().to_string()).unwrap_or_default())
+}
+
 fn unsafe_uid() -> u32 {
     #[cfg(unix)]
     unsafe {
@@ -248,14 +296,17 @@ fn unsafe_uid() -> u32 {
 
 /// The scheduled task: starts when this user logs in, restarts a minute after a failure (up to 999 times), has no time
 /// limit and keeps going on battery. Runs as the user with ordinary rights, so no administrator is needed.
-fn task_xml(user: &str, exe: &str, home: &str) -> String {
+fn task_xml(user: &str, exe: &str, home: &str, boot: bool) -> String {
+    // boot: also start when the PC starts, before anyone logs in. S4U runs the task as this user without a stored password
+    // (and without network credentials, which the worker does not need: it only connects out to the server).
+    let (boot_trigger, logon_type) = if boot { ("<BootTrigger><Enabled>true</Enabled></BootTrigger>", "S4U") } else { ("", "InteractiveToken") };
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Agent orchestration execution worker</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Triggers>{boot_trigger}<LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger><TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>{logon_type}</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
@@ -272,6 +323,28 @@ fn task_xml(user: &str, exe: &str, home: &str) -> String {
 "#,
         user = esc(user),
         exe = esc(exe),
-        home = esc(home)
+        home = esc(home),
+        boot_trigger = boot_trigger,
+        logon_type = logon_type
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_xml;
+
+    #[test]
+    fn the_task_starts_at_logon_and_every_minute_and_only_with_boot_also_at_startup() {
+        let normal = task_xml("PC-me", "C:/w/x.exe", "C:/w", false);
+        assert!(normal.contains("<LogonTrigger>") && normal.contains("<TimeTrigger>") && normal.contains("InteractiveToken"));
+        assert!(!normal.contains("BootTrigger") && !normal.contains("S4U"));
+        let boot = task_xml("PC-me", "C:/w/x.exe", "C:/w", true);
+        assert!(boot.contains("<BootTrigger>") && boot.contains("<LogonType>S4U</LogonType>") && !boot.contains("InteractiveToken"));
+        assert!(boot.contains("<LogonTrigger>"), "still starts at logon if the boot start was missed");
+    }
+
+    #[test]
+    fn names_with_markup_are_escaped() {
+        assert!(task_xml("a&b<c>", "x", "y", true).contains("a&amp;b&lt;c&gt;"));
+    }
 }

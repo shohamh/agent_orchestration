@@ -15,6 +15,7 @@ pub async fn run(home: Home) -> Result<(), String> {
     if token.is_empty() {
         return Err("The token file is empty".into());
     }
+    restore_profile(&config);
     let port = port_of(&config);
     let pidfile = home.file("worker.pid");
     std::fs::write(&pidfile, std::process::id().to_string()).map_err(|e| e.to_string())?; // `agent-worker stop` and status find the runner here
@@ -50,5 +51,20 @@ async fn wait_for_stop() {
     #[cfg(windows)]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Started at boot (no logon), Windows gives the worker no user environment: put back what the install saw, so agents and tools
+/// find their PATH and profile folders.
+fn restore_profile(config: &serde_json::Value) {
+    if std::env::var_os("USERPROFILE").is_some() {
+        return;
+    }
+    if let Some(profile) = config["profile"].as_object() {
+        for (key, value) in profile {
+            if let Some(value) = value.as_str() {
+                std::env::set_var(key, value);
+            }
+        }
     }
 }

@@ -14,6 +14,11 @@ fn client() -> reqwest::Client {
     reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().unwrap()
 }
 
+/// The version of the worker installed in this folder (not of the program that happens to be running this command).
+fn installed_version(home: &Home) -> String {
+    std::fs::read(home.exe()).map(|bytes| config::file_version(&bytes)).unwrap_or_else(|_| config::self_version())
+}
+
 pub async fn local_health(home: &Home, config: &Value) -> Option<Value> {
     let response = client().get(format!("http://127.0.0.1:{}/health", port_of(config))).bearer_auth(home.token()).timeout(Duration::from_secs(5)).send().await.ok()?;
     if response.status().is_success() { response.json().await.ok() } else { None }
@@ -32,11 +37,11 @@ pub async fn status(home: &Home, json_output: bool) -> Result<i32, String> {
     let active = health.as_ref().and_then(|h| h["active"].as_u64());
     let draining = health.as_ref().map(|h| h["draining"] == true).unwrap_or(false);
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&json!({"name": config::name_of(&config), "uuid": config::relay_id(&config), "version": config::self_version(), "home": home.0, "server": config["server"], "service": svc.describe(),
-            "service_exists": svc.exists(), "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
+        println!("{}", serde_json::to_string_pretty(&json!({"name": config::name_of(&config), "uuid": config::relay_id(&config), "version": installed_version(home), "home": home.0, "server": config["server"], "service": svc.describe(),
+            "service_exists": svc.exists(), "starts_at_boot": svc.starts_at_boot(), "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
             "components": components, "update": update})).unwrap());
     } else {
-        println!("Worker      {}  ({})  version {}", config::name_of(&config), config::relay_id(&config), config::self_version());
+        println!("Worker      {}  ({})  version {}", config::name_of(&config), config::relay_id(&config), installed_version(home));
         println!("Service     {}", svc.describe());
         let mut state = format!("State       {}", if running { "running" } else { "stopped" });
         if running && home.pid() != 0 && svc.kind != crate::svc::Kind::Systemd {
@@ -356,4 +361,28 @@ pub async fn uninstall(home: &Home, yes: bool, keep_registration: bool) -> Resul
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// `agent-worker boot [enable|disable|status]`: start with the PC, before anyone logs in.
+pub fn boot(home: &Home, action: &str) -> Result<(), String> {
+    let mut config = home.config()?;
+    let mut svc = Svc::from_config(Home(home.0.clone()), &config);
+    match action {
+        "status" => {
+            println!("{}", if svc.starts_at_boot() { "Starts when the PC starts, even before anyone logs in" } else { "Starts when you log in (run `agent-worker boot enable` to start with the PC)" });
+            Ok(())
+        }
+        "enable" | "disable" => {
+            let enable = action == "enable";
+            svc.set_boot(enable)?;
+            config["boot"] = serde_json::json!(enable);
+            home.save_config(&config).map_err(|e| e.to_string())?;
+            if enable && !svc.running() {
+                svc.start()?;
+            }
+            println!("{}", if enable { "The worker now starts when the PC starts, even before anyone logs in" } else { "The worker starts when you log in again" });
+            Ok(())
+        }
+        other => Err(format!("Unknown boot action {other:?}; use enable, disable or status")),
+    }
 }

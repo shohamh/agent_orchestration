@@ -13,6 +13,7 @@ mod program;
 mod runner;
 mod service;
 mod svc;
+mod sysmetrics;
 mod template;
 #[macro_use]
 mod util;
@@ -71,6 +72,12 @@ enum Cmd {
         yes: bool,
         #[arg(long, help = "Leave the PC registered in the fleet")]
         keep_registration: bool,
+    },
+    /// Start the worker with the PC, before anyone logs in (Windows: run once in an Administrator shell)
+    Boot {
+        /// enable, disable or status
+        #[arg(default_value = "status")]
+        action: String,
     },
     /// The end of the worker's log
     Logs {
@@ -164,6 +171,7 @@ async fn main() {
         Cmd::Restart { name } => finish(ctl::restart(&home, name.as_deref())),
         Cmd::Update { force, drain_timeout, background: _, from_file, server, code } => finish(ctl::update(&home, force, drain_timeout, from_file, server.zip(code)).await),
         Cmd::Uninstall { yes, keep_registration } => finish(ctl::uninstall(&home, yes, keep_registration).await),
+        Cmd::Boot { action } => finish(ctl::boot(&home, &action)),
         Cmd::Logs { lines } => finish(ctl::logs(&home, lines)),
         Cmd::Version => {
             println!("{}", config::self_version());

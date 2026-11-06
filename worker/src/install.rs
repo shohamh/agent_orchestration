@@ -118,7 +118,7 @@ fn explain_network(server: &str, error: &reqwest::Error) -> String {
 
 /// Check in with the server: proves the PC can reach it, claims the link and returns what the form saved.
 async fn claim(options: &Options, secret: &str) -> Result<Value, String> {
-    let body = json!({"claim": secret, "host_os": config::os_name(), "hostname": sysinfo::System::host_name().unwrap_or_default()});
+    let body = json!({"claim": secret, "host_os": config::os_name(), "hostname": crate::sysmetrics::host_name().unwrap_or_default()});
     let response = reqwest::Client::new().post(format!("{}/install/{}/claim", origin(options), options.uuid)).json(&body).timeout(Duration::from_secs(20)).send().await
         .map_err(|e| explain_network(&options.server, &e))?;
     let status = response.status().as_u16();
@@ -153,6 +153,11 @@ fn install_self(home: &Home) -> Result<Option<PathBuf>, String> {
     Ok(Some(me))
 }
 
+fn in_temp_dir(path: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(path).starts_with(canon(&std::env::temp_dir()))
+}
+
 /// Remove the temporary download once the install is done (Windows cannot delete a running program, so a helper does it).
 fn remove_download(path: PathBuf) {
     #[cfg(windows)]
@@ -163,6 +168,20 @@ fn remove_download(path: PathBuf) {
     #[cfg(not(windows))]
     {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Windows: remember the user's profile folders and PATH. A worker started at boot runs without the user's environment
+/// (their PATH, where Codex, Claude Code and npm tools live, and their profile folders), so `run` restores it from here.
+fn capture_profile(worker: &mut Value) {
+    if cfg!(windows) {
+        let mut profile = serde_json::Map::new();
+        for key in ["PATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN", "TEMP", "TMP"] {
+            if let Ok(value) = std::env::var(key) {
+                profile.insert(key.into(), json!(value));
+            }
+        }
+        worker["profile"] = Value::Object(profile);
     }
 }
 
@@ -249,6 +268,7 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     let mut worker = default_config(&settings.name, &uuid, settings.slots, &options.server, options.port);
     worker["service"] = json!(kind.name());
     worker["unit"] = json!(svc::default_unit(&settings.name));
+    capture_profile(&mut worker);
     install_cli(home, &mut worker);
     home.save_config(&worker).map_err(|e| e.to_string())?;
     let svc = Svc::from_config(Home(home.0.clone()), &worker);
@@ -276,7 +296,7 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
 
     at("register", "Registering this PC with the server");
     report(options, "register", "running", "").await;
-    let host = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+    let host = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
     let reply = reqwest::Client::new().post(format!("{}/install/{}/complete", origin(options), options.uuid)).json(&json!({"token": token, "claim": secret, "hostname": host})).timeout(Duration::from_secs(30)).send().await.map_err(|e| format!("Could not reach the server to register: {e}"))?;
     let status = reply.status();
     let body = reply.text().await.unwrap_or_default();
@@ -300,7 +320,8 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     atomic_json(&home.file("installed.json"), &json!({"name": settings.name, "uuid": uuid, "at": now_unix(), "service": kind.name(), "version": config::self_version()})).map_err(|e| e.to_string())?;
-    if let Some(path) = download {
+    // only a download in the temporary folder is removed: a program run from anywhere else is the user's own file
+    if let Some(path) = download.filter(|p| in_temp_dir(p)) {
         remove_download(path);
     }
     println!();

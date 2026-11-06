@@ -123,7 +123,8 @@ def registry_token_for():
     cache = {'at': 0.0, 'tokens': {}}
     def lookup(worker_id):
         now = time.monotonic()
-        if now - cache['at'] > 3.0:
+        # a worker registered a moment ago is not in the cache yet: look again, but not more than once a second
+        if now - cache['at'] > 3.0 or (worker_id not in cache['tokens'] and now - cache['at'] > 1.0):
             try:
                 values = {**dotenv_values(env_path()), **os.environ}
                 cache['tokens'] = {relay_key(w): values.get(w.get('token_env', ''), '') for w in _read()}

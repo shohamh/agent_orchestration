@@ -67,10 +67,14 @@ pub fn init_log(path: Option<&Path>) {
 
 pub fn log_line(component: &str, message: &str) {
     let line = format!("{} {} {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), component, message);
-    if let Some(file) = LOG.lock().unwrap().as_mut() {
-        let _ = file.write_all(line.as_bytes());
+    let logged = match LOG.lock().unwrap().as_mut() {
+        Some(file) => file.write_all(line.as_bytes()).is_ok(),
+        None => false,
+    };
+    // a service's stderr usually points at the same file; only a terminal needs its own copy
+    if !logged || std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        eprint!("{line}");
     }
-    eprint!("{line}");
 }
 
 #[macro_export]

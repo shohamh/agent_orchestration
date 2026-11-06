@@ -5,6 +5,12 @@ It runs the execution service, the outbound relay connector and any registered c
 carries its own `install`, `update`, `uninstall` and control commands. How to register a PC, how
 it starts and restarts, and how a fleet update works: [docs/workers-and-context.md](../docs/workers-and-context.md#register-a-pc).
 
+Dependencies are vendored in `vendor/` (`.cargo/config.toml` points cargo at them), so every build works offline.
+After changing `Cargo.toml` run `ci/vendor.sh` (needs network once) and commit the result.
+
+Iterate with a debug build (`cargo build`, incremental, tens of seconds); the tests pick the newest of `target/debug` and
+`target/release`. Release with LTO (`ci/build.sh`, `ci/build.ps1`) is for CI and final versions only.
+
 ```
 cargo test                                # unit tests (gate, templates, artifacts, capabilities)
 ci/build.sh                               # Linux musl build  -> ../dist/worker/

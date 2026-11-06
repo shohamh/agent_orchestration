@@ -16,7 +16,6 @@ hex = "0.4"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
-sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 futures-util = "0.3"
 bytes = "1"
 regex = "1"
@@ -25,7 +24,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tokio-util = { version = "0.7", features = ["io"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

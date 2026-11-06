@@ -315,31 +315,7 @@ impl Gate {
     }
 }
 
-/// CPU and RAM of the whole machine, sampled once a second.
-pub struct Sampler {
-    system: sysinfo::System,
-}
-
-impl Sampler {
-    pub fn new() -> Sampler {
-        let mut system = sysinfo::System::new();
-        system.refresh_cpu_usage();
-        Sampler { system }
-    }
-
-    /// (cpu percent, ram percent), or None until a second reading exists.
-    pub fn sample(&mut self) -> Option<(f64, f64)> {
-        self.system.refresh_cpu_usage();
-        self.system.refresh_memory();
-        let total = self.system.total_memory() as f64;
-        if total <= 0.0 {
-            return None;
-        }
-        let ram = 100.0 * (1.0 - self.system.available_memory() as f64 / total);
-        let cpu = self.system.global_cpu_usage() as f64;
-        Some((cpu.clamp(0.0, 100.0), ram.clamp(0.0, 100.0)))
-    }
-}
+pub use crate::sysmetrics::Sampler;
 
 #[cfg(test)]
 mod tests {

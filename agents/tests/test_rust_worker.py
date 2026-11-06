@@ -26,7 +26,7 @@ EXE = '.exe' if os.name == 'nt' else ''
 
 
 def find_binary():
-    candidates = [os.environ.get('AGENT_WORKER_BIN')] + [str(ROOT / 'worker' / 'target' / kind / f'agent-worker{EXE}') for kind in ('release', 'debug')]
+    candidates = [os.environ.get('AGENT_WORKER_BIN')] + [str(ROOT / 'worker' / 'target' / kind / f'agent-worker{EXE}') for kind in ('debug', 'release')]
     return next((c for c in candidates if c and Path(c).is_file()), None)
 
 

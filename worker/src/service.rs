@@ -62,7 +62,7 @@ impl App {
         let _ = std::fs::create_dir_all(&config.root);
         let gate = Gate::open(config.root.join("gate.json"), config.slots);
         let inventory = read_json(&config.root.join("capabilities.json")).filter(|v| v.is_object()).unwrap_or(json!({}));
-        let hostname = sysinfo::System::host_name().unwrap_or_else(|| "unknown".into());
+        let hostname = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
         Arc::new(App {
             identity: json!({"id": config.id, "uuid": config.uuid, "hostname": hostname, "pool": "default", "tags": []}),
             token: config.token,
