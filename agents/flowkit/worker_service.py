@@ -109,6 +109,12 @@ class Job:
                 restore(self.config['files'], workspaces/self.config['runId'])
                 restore(self.config['assets'], assets)
                 while True:
+                    if self.app.get('draining'):
+                        # An update is waiting for running work to finish: never admit more, so the coordinator places it elsewhere.
+                        if lease is not None: await capacity_call(self.app['capacity'].release, self.id)
+                        lease = None
+                        self.state, self.error, self.reason = ('rejected' if self.authorize else 'failed'), 'This PC is updating', 'updating'
+                        return
                     if self.authorize and time.monotonic() - self.last_seen > COORDINATOR_STALE:
                         # Never take capacity for a coordinator that may have cancelled while unreachable.
                         self.waiting_reason = 'coordinator_unreachable'
@@ -272,11 +278,12 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         except (ValueError, KeyError) as exc: return web.json_response({'error': str(exc)}, status=400)
     app = web.Application(middlewares=[auth], client_max_size=190*1024*1024)
     count = slots or int(os.environ.get('FLOW_WORKER_SLOTS', '4'))
-    app['identity'] = {'id': worker_id or os.environ.get('FLOW_WORKER_ID', 'local'), 'hostname': socket.gethostname(),
+    app['identity'] = {'id': worker_id or os.environ.get('FLOW_WORKER_ID', 'local'), **({'uuid': os.environ['FLOW_WORKER_UUID']} if os.environ.get('FLOW_WORKER_UUID') else {}), 'hostname': socket.gethostname(),
                        'pool': pool or os.environ.get('FLOW_WORKER_POOL', 'default'),
                        'tags': tags if tags is not None else [t for t in os.environ.get('FLOW_WORKER_TAGS', '').split(',') if t]}
     if not 1 <= count <= 100: raise ValueError('Worker slots must be from 1 to 100')
     app['slots'], app['count'], app['stats'] = asyncio.Semaphore(count), count, {'active':0}
+    app['draining'], app['version'] = False, os.environ.get('FLOW_WORKER_VERSION', '')
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
     from .capacity import CapacityGate
     app['capacity'] = capacity
@@ -318,7 +325,16 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             await asyncio.sleep(3600)
             from .capabilities import overdue
             if overdue(app['inventory']): await refresh_inventory()
-    async def health(request): return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': await capacity_call(app['capacity'].metrics)})
+    async def health(request):
+        return web.json_response({**app['identity'], 'slots': count, 'active': app['stats']['active'], 'capacity': await capacity_call(app['capacity'].metrics),
+                                  'draining': bool(app.get('draining')), **({'worker_version': app['version']} if app.get('version') else {})})
+    async def drain(request):
+        """An update asks the service to stop admitting work; running jobs finish. {"drain": false} lifts it."""
+        try: data = await request.json()
+        except (ValueError, UnicodeDecodeError): raise ValueError('Invalid JSON body') from None
+        if not isinstance(data, dict) or set(data) != {'drain'} or not isinstance(data['drain'], bool): raise ValueError('Body must be {"drain": true|false}')
+        app['draining'] = data['drain']
+        return web.json_response({'draining': app['draining'], 'active': app['stats']['active']})
     async def configure(request):
         """The coordinator's registry pushes this PC's admission limits. Only limits are accepted;
         they apply to future admissions, never to running work (the gate reads them per admission)."""
@@ -471,6 +487,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.on_cleanup.append(cleanup)
     app.on_startup.append(startup)
     app.router.add_get('/health', health)
+    app.router.add_post('/drain', drain)
     app.router.add_get('/capabilities', inventory)
     app.router.add_post('/capabilities/refresh', refresh_capabilities)
     app.router.add_post('/capacity/settings', configure)

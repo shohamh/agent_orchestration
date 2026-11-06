@@ -5,8 +5,11 @@ service on 127.0.0.1 and its answer is sent back, with bodies streamed both ways
 answer is pushed every few seconds so the coordinator can read it without a round trip.
 """
 import asyncio
+import json
 import logging
 import os
+import time
+from pathlib import Path
 
 import aiohttp
 
@@ -18,7 +21,8 @@ CHUNK = 64 * 1024
 
 
 class Connector:
-    def __init__(self, server, worker_id, token, local_port=8096, local_host='127.0.0.1'):
+    def __init__(self, server, worker_id, token, local_port=8096, local_host='127.0.0.1', home=None):
+        self.home = Path(home) if home else None  # the install folder: lets the server ask this PC to update itself
         self.server = server.rstrip('/')
         self.worker_id, self.token = worker_id, token
         self.local = f'http://{local_host}:{local_port}'
@@ -59,21 +63,59 @@ class Connector:
             if response.status >= 400: raise RuntimeError(f'Server answered {response.status}')
             return await response.json()
 
+    def write_state(self):
+        if self.home is None: return
+        try:
+            target = self.home / 'runtime' / 'connector.json'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'connected': self.connected, 'at': time.time()}), encoding='utf-8')
+            os.replace(temporary, target)
+        except OSError: pass
+
     async def push_status(self, client):
         while True:
+            self.write_state()
             try:
                 async with client.get(f'{self.local}/health', timeout=aiohttp.ClientTimeout(total=10)) as local:
                     if local.status == 200:
-                        health = await local.json()
+                        health = {**await local.json(), **self.update_state()}
                         async with client.post(f'{self.base}/status', json=health, timeout=aiohttp.ClientTimeout(total=10)) as response:
                             await response.read()
             except asyncio.CancelledError: raise
             except Exception as exc: log.debug('Status push skipped: %s', exc)
             await asyncio.sleep(STATUS_EVERY)
 
+    def update_state(self):
+        """What `agent-worker update` last wrote about itself: running, updated or failed, with the reason."""
+        try:
+            data = json.loads((self.home / 'update-status.json').read_text(encoding='utf-8'))
+            return {'update_state': data.get('state'), **({'update_error': str(data['error'])[:300]} if data.get('error') else {})}
+        except (OSError, ValueError, TypeError, AttributeError): return {}
+
+    async def control(self, client, url, call):
+        """A request from the server about this PC itself (never forwarded to the execution service)."""
+        action = call['path'].rsplit('/', 1)[-1]
+        status, body = 404, {'error': f'Unknown control action {action}'}
+        if action == 'update':
+            if self.home is None: status, body = 501, {'error': 'This connector does not know its install folder'}
+            elif self.update_state().get('update_state') == 'running': status, body = 202, {'started': False, 'reason': 'an update is already running'}
+            else:
+                from .procutil import python_for, spawn_detached
+                ctl = self.home / 'agents' / 'worker_ctl.py'
+                spawn_detached([python_for(self.home), '-u', str(ctl), '--home', str(self.home), 'update', '--background'], cwd=str(self.home), log=str(self.home / 'update.log'))  # not inside agents/, which the update replaces
+                status, body = 202, {'started': True}
+        async with client.put(f'{url}/response', headers={'X-Relay-Status': str(status), 'Content-Type': 'application/json'}, data=json.dumps(body).encode()) as sent:
+            await sent.read()
+
     async def handle(self, client, call):
         """Make one relayed call locally and send the answer back; one call never ends the loop."""
         url = f'{self.base}/calls/{call["id"]}'
+        if call['path'].startswith('/_control/'):
+            try: await self.control(client, url, call)
+            except asyncio.CancelledError: raise
+            except Exception as exc: log.warning('Control call %s failed: %s', call.get('id'), exc)
+            return
         try:
             async def request_body():
                 async with client.get(f'{url}/body') as source:

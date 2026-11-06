@@ -121,6 +121,8 @@ def match_worker(worker, requirements, now=None):
         if not worker.get('online'):
             if worker.get('reason') == 'Worker credentials unavailable':
                 unknown.append(_reason('credentials_unavailable', f'{wid} has no usable credentials on the coordinator'))
+            elif worker.get('status') == 'updating':
+                unknown.append(_reason('offline', f'{wid} is updating its worker and takes no new work until it is done'))
             else:
                 unknown.append(_reason('offline', f'{wid} is offline'))
         else:

@@ -144,7 +144,7 @@
 
   // ------------------------------------------------------------------ One-line install (pure helpers)
   const INSTALL_STEPS = { check: 'Checking the PC', download: 'Downloading the worker', python: 'Installing Python packages', npm: 'Installing the agent adapters',
-    token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection' };
+    token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection', boot: 'Setting up start at boot (approve the administrator prompt on the PC)' };
   const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?)$/i;
 
   /* The server address as the server will accept it: scheme://host[:port] and never a loopback name. */
@@ -157,6 +157,37 @@
     if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) return { error: 'Use only scheme, host and port, for example http://192.168.1.10:8090' };
     if (LOOPBACK.test(url.hostname) || url.hostname.toLowerCase().endsWith('.localhost')) return { error: 'The PC cannot reach this server at localhost; use the name or address the PC can reach' };
     return { value: url.origin };
+  }
+
+  const AUTOSTARTS = ['logon', 'boot', 'none'];
+
+  /* The auto restart choice and what it means. It only applies when the worker starts by itself (logon or boot). */
+  function autoRestartText(os, autostart) {
+    const windows = os === 'windows';
+    if (autostart === 'none') return 'Not used here: without a startup entry nothing restarts the worker.';
+    return 'Restart the worker automatically if it crashes or is killed. '
+      + (windows ? 'A Scheduled Task checks every minute and starts it again, so a crash costs up to a minute. ' : 'systemd starts it again after a few seconds. ')
+      + 'Turn it off to leave a stopped worker down (for example while you debug it): it then starts again only at the next '
+      + (autostart === 'boot' ? 'PC start-up' : 'logon') + ' or with agent-worker start. You can change this later with agent-worker autorestart on|off.';
+  }
+
+  /* What each way of starting the worker means, with its consequences, for the operating system chosen in the form. */
+  function autostartChoices(os) {
+    const windows = os === 'windows';
+    return [
+      { value: 'logon', label: 'When the user logs in',
+        text: 'The worker starts when the user logs in and runs with that user’s own environment, so tools and agents that rely on the user’s login, credentials and PATH work. '
+          + 'The consequence: after the PC restarts the worker is not running until someone logs in, and the PC shows as offline in the fleet until then.' },
+      { value: 'boot', label: 'When the PC starts, before anyone logs in',
+        text: windows
+          ? 'The worker starts with the PC, even at the logon screen. Windows asks for administrator approval once (a UAC prompt during the install). '
+            + 'The consequence: it runs without the user’s credentials: no saved Windows or network logins, mapped drives, desktop or logged-in sessions, and not the user’s logon environment (the PATH and folders seen at install time are used instead). '
+            + 'Agents and tools that need the user to be signed in can fail until the user logs in.'
+          : 'The worker starts with the PC, before anyone logs in (systemd lingering; it may ask for sudo once). '
+            + 'The consequence: it runs without a login session: no desktop, keyring or agent sessions that depend on the user being logged in, so tools that need those can fail until the user logs in.' },
+      { value: 'none', label: 'Do not start automatically',
+        text: 'The worker runs now but is not set up to start by itself. After the PC restarts it stays off, and shows as offline in the fleet, until you run agent-worker start on the PC.' },
+    ];
   }
 
   /* Check the install form the way the server will; returns {errors: {field: message}, body}. */
@@ -177,9 +208,13 @@
     if (!percent(v.ram_limit)) errors.ram_limit = 'The RAM limit is above 0 and at most 100';
     const server = serverAddress(v.server);
     if (server.error) errors.server = server.error;
+    const autostart = v.autostart || 'logon';
+    const autoRestart = v.auto_restart === undefined ? true : v.auto_restart;
+    if (typeof autoRestart !== 'boolean') errors.auto_restart = 'Auto restart is on or off';
+    if (!AUTOSTARTS.includes(autostart)) errors.autostart = 'Choose when the worker starts';
     if (Object.keys(errors).length) return { errors, body: null };
     return { errors, body: { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
-      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value } };
+      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart, auto_restart: autoRestart } };
   }
 
   /* The commands to show for the chosen operating system, with the elevation note. */
@@ -204,6 +239,19 @@
     if (record.error) return { text: `Failed${stepText ? ` while ${stepText.toLowerCase()}` : ''}: ${record.error}`, level: 'error' };
     if (!record.step) return { text: 'Waiting for you to run the command on the PC…', level: 'wait' };
     return { text: `${stepText || record.step}…`, level: 'wait' };
+  }
+
+  /* The words for one PC's update state; `link` when its user can use an update command. */
+  function updateStatusText(item) {
+    const states = {
+      up_to_date: { text: 'Up to date', level: 'ok', link: false },
+      updating: { text: 'Updating…', level: 'wait', link: false },
+      waiting: { text: 'Offline: updates when it connects', level: 'wait', link: true },
+      offline: { text: 'Offline', level: 'warn', link: true },
+      outdated: { text: 'Update available', level: 'warn', link: true },
+      failed: { text: `Update failed${item.error ? `: ${item.error}` : ''}`, level: 'error', link: true },
+    };
+    return states[item.status] || { text: 'Unknown', level: 'warn', link: false };
   }
 
   function minutesLeft(expiresAt, now = Date.now()) {
@@ -236,7 +284,7 @@
   // ------------------------------------------------------------------ The tab
   function mount(container, options = {}) {
     const request = options.request || fetchJson;
-    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false, installs: [], installTimer: null };
+    const S = { workers: [], tags: [], pools: [], open: false, timer: null, lastFull: 0, staleSince: null, states: new Map(), form: null, busy: false, installs: [], installTimer: null, updates: null };
 
     const status = h('p', { class: 'fl-status', role: 'status' });
     // One polite live region for action results and connection changes; metric ticks are not announced.
@@ -251,6 +299,7 @@
       h('div', { class: 'fl-actions' },
         h('button', { type: 'button', class: 'primary', onclick: () => openInstall() }, 'Register PC'),
         h('button', { type: 'button', class: 'secondary', 'data-action': 'advanced', onclick: () => openForm(null) }, 'Register by URL (advanced)'),
+        h('button', { type: 'button', class: 'secondary', 'data-action': 'updates', onclick: () => openUpdates() }, 'Update workers'),
         h('button', { type: 'button', class: 'secondary', onclick: () => load(true) }, 'Reload'),
         h('button', { type: 'button', class: 'secondary', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')),
       status);
@@ -300,18 +349,26 @@
       ];
     }
 
+    function versionLine(worker) {
+      const item = S.updates?.workers?.find((w) => w.id === worker.id);
+      if (!item) return null;
+      const words = updateStatusText(item);
+      return h('p', { class: `fl-version fl-${words.level}`, 'data-version': item.version || '' }, `Worker version ${shortVersion(item.version)} · ${words.text}`);
+    }
+
     function workerNode(worker) {
       const inv = worker.inventory;
       const agents = Object.entries(inv?.agents || {}), commands = Object.entries(inv?.commands || {});
       const offlineNote = !worker.online ? h('p', { class: 'fl-hint' }, 'Capabilities are checked when it connects.') : null;
       return h('article', { class: 'fl-worker', role: 'listitem', 'data-worker': worker.id, 'aria-labelledby': `fl-w-${worker.id}` },
-        h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id),
+        h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id), worker.uuid ? h('small', { class: 'fl-uuid', 'data-uuid': worker.uuid, title: 'Unique id (generated for this PC)' }, worker.uuid) : null,
           h('div', { class: 'fl-worker-actions' },
             h('button', { type: 'button', class: 'secondary', 'data-action': 'edit', onclick: () => openForm(worker) }, 'Edit settings'),
             h('button', { type: 'button', class: 'secondary', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Check installed agents and commands now' : 'The PC must be connected',
               onclick: (e) => refresh(worker.id, e.currentTarget) }, 'Refresh capabilities'))),
         (worker.warnings || []).map((w) => h('p', { class: 'fl-warning' }, `Warning: ${w}`)),
         h('div', { class: 'fl-live-parts' }, liveParts(worker)),
+        versionLine(worker),
         h('dl', { class: 'fl-facts' },
           h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => h('span', { class: 'fl-chip' }, p))),
           h('dt', {}, 'Tags'), h('dd', {}, worker.tags.length ? worker.tags.map((t) => h('span', { class: 'fl-chip' }, t)) : h('span', { class: 'fl-hint' }, 'none')),
@@ -352,6 +409,7 @@
       const first = !S.states.size;
       S.workers = r.data.workers || []; S.tags = r.data.tags || []; S.pools = r.data.pools || [];
       loadInstalls();
+      loadUpdates().then(() => render());
       S.lastFull = S.lastMetrics = Date.now(); S.staleSince = null; stale.hidden = true;
       noteStates(S.workers, first);
       render();
@@ -463,7 +521,8 @@
         h('p', { class: 'fl-hint' }, 'Run one command on the PC. It downloads the worker from this server, installs it for that user and connects back; nothing on the PC needs to be opened.'),
         ...blocks,
         h('p', { class: 'fl-elevation' }, h('strong', {}, 'Run as a normal user. '), 'Do not use Administrator or sudo: everything installs for your own user.'),
-        h('p', { class: 'fl-hint' }, 'The PC needs Python 3.10+ and Node.js 18+. If either is missing the command stops and tells you how to install it.'),
+        record.autostart === 'boot' ? h('p', { class: 'fl-hint fl-boot-note' }, record.os === 'windows' ? 'Starting before anyone logs in needs administrator approval: Windows shows a UAC prompt near the end of the install. Approve it on the PC. If you decline, the worker starts at logon instead and the install says so.' : 'Starting before anyone logs in may ask for your sudo password once (systemd lingering). If it cannot, the worker starts at login instead and the install prints the command for an administrator.') : null,
+        h('p', { class: 'fl-hint' }, 'The PC needs nothing installed first: the command downloads one program from this server.'),
         note, status,
         h('div', { class: 'fl-row fl-form-actions' }, cancel, done)));
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
@@ -491,15 +550,24 @@
       S.form = { install: true, engines: preset.engines || ['hatchet'] };
       const f = S.form;
       const taken = () => S.workers.map((w) => w.id);
-      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])] };
+      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon', autoRestart: preset.auto_restart !== false };
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
       const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
       const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
-        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server') };
+        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart'), auto_restart: fieldError('auto_restart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
       const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
-        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; } }), ` ${label}`)), errors.os);
+        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); drawRestart(); } }), ` ${label}`)), errors.os);
+      const autostartBox = h('fieldset', { class: 'fl-autostart-choice' }, h('legend', {}, 'When should the worker start on the PC?'));
+      const drawAutostart = () => autostartBox.replaceChildren(h('legend', {}, 'When should the worker start on the PC?'),
+        ...autostartChoices(state.os).map((c) => h('label', { class: 'fl-check fl-autostart', 'data-autostart': c.value },
+          h('input', { type: 'radio', name: 'autostart', value: c.value, checked: c.value === state.autostart, onchange: () => { state.autostart = c.value; drawRestart(); } }),
+          h('span', {}, ` ${c.label}`, h('small', { class: 'fl-hint' }, c.text)))), errors.autostart);
+      const restartHelp = h('small', { class: 'fl-hint' });
+      const restartBox = h('input', { type: 'checkbox', name: 'auto_restart', checked: state.autoRestart, onchange: (ev) => { state.autoRestart = ev.target.checked; } });
+      const restartLabel = h('label', { class: 'fl-check fl-auto-restart' }, restartBox, h('span', {}, ' Restart automatically if the worker crashes or is killed', restartHelp), errors.auto_restart);
+      const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartBox.disabled = state.autostart === 'none'; };
       const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
         ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
           onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`)), errors.engines);
@@ -549,7 +617,7 @@
         h('h3', { id: 'fl-form-title' }, 'Register a PC'),
         h('p', { class: 'fl-hint' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
-        osBoxes, engineBoxes,
+        osBoxes, autostartBox, restartLabel, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags (optional)'), chosen, tagInput, tagList, errors.tags),
         h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
@@ -567,7 +635,7 @@
         for (const node of Object.values(errors)) node.textContent = '';
         for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
         const pool = state.newPool ? newPoolInput.value : poolSelect.value;
-        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value }, { taken: taken() });
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
@@ -584,11 +652,86 @@
         showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
       });
 
-      drawPoolOptions(); drawChosen(); drawServerWarning();
+      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart();
       formPanel.replaceChildren(form);
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
       formPanel.parentElement.scrollTop = 0;
       idInput.focus();
+    }
+
+
+    // ---- worker updates: versions, "update all" and a command for a PC that was down
+    async function loadUpdates() {
+      const r = await request('GET', '/api/fleet/updates');
+      if (r.ok) S.updates = r.data;
+      return r.ok;
+    }
+
+    const shortVersion = (v) => (v ? String(v).slice(0, 8) : 'unknown');
+
+    function updateRow(item, onLink) {
+      const words = updateStatusText(item);
+      return h('li', { class: `fl-update-row fl-${words.level}`, 'data-update': item.id },
+        h('span', { class: 'fl-update-name' }, item.id), ' ',
+        h('span', { class: 'fl-update-version' }, `version ${shortVersion(item.version)}`), ' ',
+        h('span', { class: 'fl-update-state' }, words.text),
+        words.link ? h('button', { type: 'button', class: 'secondary', 'data-action': 'update-link', onclick: () => onLink(item) }, 'Get update command') : null);
+    }
+
+    /* The update view: what each PC runs, update them all, and a command for any PC that cannot update itself. */
+    function openUpdates() {
+      clearTimeout(S.installTimer);
+      S.form = { install: true, updates: true };
+      const summary = h('p', { class: 'fl-hint fl-update-summary', role: 'status' });
+      const listNode = h('ul', { class: 'fl-update-list', 'aria-label': 'Worker versions' });
+      const linkBox = h('div', { class: 'fl-update-link' });
+      const error = h('div', { class: 'fl-form-error', role: 'alert' });
+      const originInput = h('input', { name: 'server', type: 'url', value: typeof location !== 'undefined' && location.origin !== 'null' ? location.origin : '', 'aria-label': 'Address the PC uses to reach this server' });
+
+      const draw = () => {
+        const data = S.updates || { workers: [], latest: {} };
+        const counts = { up_to_date: 0, updating: 0, waiting: 0, failed: 0, outdated: 0, offline: 0 };
+        for (const w of data.workers) counts[w.status] = (counts[w.status] || 0) + 1;
+        summary.textContent = data.workers.length
+          ? `${counts.up_to_date || 0} up to date · ${(counts.updating || 0)} updating · ${(counts.waiting || 0) + (counts.offline || 0)} waiting for the PC to connect · ${(counts.outdated || 0)} outdated · ${(counts.failed || 0)} failed`
+          : 'No PC installed with the one-line command is registered yet.';
+        listNode.replaceChildren(...data.workers.map((w) => updateRow(w, showLink)));
+      };
+
+      async function showLink(item) {
+        error.textContent = '';
+        const os = item.os || (await promptOs());
+        const r = await request('POST', '/api/fleet/updates/link', { worker: item.id, os, server: originInput.value.trim() });
+        if (!r.ok) { error.textContent = errorText(r); return; }
+        const commands = installCommands(os, r.data.commands);
+        linkBox.replaceChildren(h('h4', {}, `Update ${item.id}`), h('p', { class: 'fl-hint' }, `Run on the PC as a normal user. It works once and expires in about ${minutesLeft(r.data.link.expires_at)} min. If the worker is installed and healthy, \`agent-worker update\` does the same.`),
+          ...commands.map((c) => h('section', { class: 'fl-command-block', 'aria-label': c.label }, h('h4', {}, c.label), h('pre', { class: 'fl-code fl-command', 'data-command': c.id, tabindex: '0' }, h('code', {}, c.text)),
+            h('div', { class: 'fl-row' }, h('button', { type: 'button', class: 'secondary', onclick: async (e) => { const ok = await copyText(c.text); e.currentTarget.textContent = ok ? 'Copied' : 'Select the command and copy it'; } }, 'Copy')))));
+      }
+      const promptOs = async () => (typeof window.prompt === 'function' ? (window.prompt('Operating system of this PC (windows or linux)', 'windows') || 'windows').trim().toLowerCase() : 'windows');
+
+      const updateAll = h('button', { type: 'button', class: 'primary', 'data-action': 'update-all', onclick: async () => {
+        error.textContent = '';
+        const r = await request('POST', '/api/fleet/updates');
+        if (!r.ok) { error.textContent = errorText(r); return; }
+        S.updates = r.data; draw(); announce('Fleet update started');
+      } }, 'Update all workers now');
+      const stop = h('button', { type: 'button', class: 'secondary', 'data-action': 'update-stop', onclick: async () => { const r = await request('DELETE', '/api/fleet/updates'); if (r.ok) { S.updates = r.data; draw(); } } }, 'Stop updating');
+      formPanel.replaceChildren(h('div', { class: 'fl-form-body fl-updates' },
+        h('h3', { id: 'fl-form-title' }, 'Worker updates'),
+        h('p', { class: 'fl-hint' }, 'Connected PCs update themselves within seconds: each waits for its running jobs to finish, swaps in the new worker and restarts, and goes back to the previous one if the new one fails. A PC that is down updates when it connects, or run the command below on it.'),
+        summary, listNode, error,
+        h('label', { class: 'fl-field' }, h('span', {}, 'Address the PC uses to reach this server (for the update command)'), originInput),
+        linkBox,
+        h('div', { class: 'fl-row fl-form-actions' }, h('button', { type: 'button', class: 'secondary', onclick: closeForm }, 'Close'), stop, updateAll)));
+      formPanel.hidden = false; list.hidden = true; pending.hidden = true;
+      draw();
+      const tick = async () => {
+        if (!S.form?.updates || !S.open) return;
+        await loadUpdates(); draw();
+        S.installTimer = setTimeout(tick, config.installMs);
+      };
+      tick();
     }
 
     // ---- direct-URL registration and settings form
@@ -785,7 +928,7 @@
     };
   }
 
-  const api = { MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { autoRestartText, autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

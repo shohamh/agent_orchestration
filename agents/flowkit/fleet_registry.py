@@ -4,6 +4,7 @@ import re
 import tempfile
 import time
 import threading
+import uuid
 import time
 from contextlib import contextmanager
 from dotenv import dotenv_values
@@ -63,6 +64,10 @@ def _locked():
                 else:
                     fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
 
+def relay_key(w):
+    """What a PC is known as to the relay: its uuid (generated on the PC at install), or its name for older registrations."""
+    return w.get('uuid') or w['id']
+
 def _default():
     return {'id': os.environ.get('FLOW_WORKER_ID', 'local'), 'pool': 'default', 'tags': [],
             'url': 'http://127.0.0.1:8096', 'token_env': 'FLOW_WORKER_TOKEN'}
@@ -74,6 +79,9 @@ def _normalize(item, stored=False):
     if not isinstance(item, dict): raise ValueError('Invalid registry worker')
     w = dict(item)
     if not isinstance(w.get('id'), str) or not w['id'] or len(w['id']) > 100: raise ValueError('Invalid worker id')
+    if 'uuid' in w:
+        try: w['uuid'] = str(uuid.UUID(str(w['uuid'])))
+        except ValueError: raise ValueError('Invalid worker uuid') from None
     for field, default in [('pools', [w.get('pool', 'default')]), ('tags', [])]:
         value = w.get(field, default)
         if not isinstance(value, list) or len(value) > 50 or (field == 'pools' and not value) or any(not isinstance(v, str) or not v or len(v) > 100 for v in value) or len(set(value)) != len(value):
@@ -129,7 +137,7 @@ def relayed(url):
 
 def _public(w):
     # Connection details never leave the coordinator: only whether an endpoint is configured.
-    return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')}
+    return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')} | ({'uuid': w['uuid']} if w.get('uuid') else {})
             | {'connection': 'relay' if relayed(w.get('url')) else 'configured' if w.get('url') else 'awaiting', 'online': False}
             | ({'warnings': warnings(w)} if warnings(w) else {}))
 
@@ -179,13 +187,17 @@ def save_worker(worker, create=False):
     """Create or update one PC's registration. With create, an existing id is refused: one PC
     is one registration however many engines and pools it serves."""
     if not isinstance(worker, dict): raise ValueError('Invalid worker')
-    allowed = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
+    allowed = {'id', 'uuid', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
     if set(worker) - allowed: raise ValueError('Unknown worker fields')
     with _locked():
         doc = _load(); workers = doc['workers']; existing = next((w for w in workers if w['id'] == worker.get('id')), None)
         if create and existing is not None:
             raise AlreadyRegistered(f"Worker {worker['id']} is already registered; edit it to add engines, pools or tags")
         updated = _normalize({**(existing or {}), **worker})
+        if existing and existing.get('uuid') and updated.get('uuid') != existing['uuid']: raise ValueError('A worker uuid never changes')
+        if updated.get('uuid') and any(w.get('uuid') == updated['uuid'] and w['id'] != updated['id'] for w in workers):
+            other = next(w['id'] for w in workers if w.get('uuid') == updated['uuid'])
+            raise ValueError(f"This PC is already registered as {other}; uninstall that worker first")
         updated['settings_revision'] = max(time.time_ns(), (existing or {}).get('settings_revision', 0) + 1)
         if updated.get('url'):
             u = urlsplit(updated['url'])

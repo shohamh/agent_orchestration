@@ -7,6 +7,7 @@ relay.py) with the settings from the form. The code is the only credential on th
 bits, single use, expiring, compared in constant time.
 """
 import asyncio
+import hashlib
 import hmac
 import io
 import json
@@ -15,6 +16,7 @@ import re
 import secrets
 import tarfile
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,12 +29,13 @@ TEMPLATES = Path(__file__).resolve().parent / 'install_templates'
 VALID_SECONDS = 30 * 60
 KEEP_SECONDS = 24 * 3600  # finished records stay visible (and the code unusable) this long
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
-CODE = re.compile(r'^[A-Za-z0-9_-]{43}$')
+CODE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')  # a version 4 uuid: the install's id, then the worker's
 OSES = ('windows', 'linux', 'macos')
 ENGINES = ('hatchet', 'prefect', 'trigger')
+AUTOSTARTS = ('logon', 'boot', 'none')  # when the worker starts on the PC: at the user's logon, at PC start-up, or only when told to
 MIN_TOKEN = 32
 WRONG_CODE_DELAY = 0.5  # seconds a wrong code is held before the generic answer
-STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'register', 'connect')
+STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'register', 'connect', 'boot')
 FAILED_ATTEMPTS = {}  # source address -> (count, window start): wrong codes are slowed per source
 
 
@@ -78,7 +81,7 @@ def validate_form(body, registered=(), pending=()):
     from .capacity import MAX_SLOTS
     from .fleet_registry import label
     if not isinstance(body, dict): raise InstallError('The install request must be an object')
-    unknown = set(body) - {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server'}
+    unknown = set(body) - {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart'}
     if unknown: raise InstallError(f'Unknown fields: {", ".join(sorted(unknown))}')
     name = body.get('id')
     if not isinstance(name, str) or not NAME.match(name): raise InstallError('The name is 1 to 64 letters, digits, dashes or underscores, starting with a letter or digit')
@@ -96,7 +99,11 @@ def validate_form(body, registered=(), pending=()):
     except ValueError as exc: raise InstallError(str(exc))
     slots = body.get('slots', 1)
     if isinstance(slots, bool) or not isinstance(slots, int) or not 1 <= slots <= MAX_SLOTS: raise InstallError(f'Slots must be a whole number from 1 to {MAX_SLOTS}')
-    return {'id': name, 'os': body['os'], 'engines': [e for e in ENGINES if e in engines], 'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
+    autostart = body.get('autostart', 'logon')
+    if autostart not in AUTOSTARTS: raise InstallError('Choose when the worker starts: when you log in, when the PC starts, or never automatically')
+    auto_restart = body.get('auto_restart', True)
+    if not isinstance(auto_restart, bool): raise InstallError('Auto restart is on or off')
+    return {'id': name, 'os': body['os'], 'autostart': autostart, 'auto_restart': auto_restart, 'engines': [e for e in ENGINES if e in engines], 'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
             'cpu_limit': percent(body.get('cpu_limit', 90), 'The CPU limit'), 'ram_limit': percent(body.get('ram_limit', 90), 'The RAM limit'),
             'server': server_address(body.get('server'))}
 
@@ -124,8 +131,8 @@ def view(record):
     """What the Fleet tab may see: never the code's secret parts beyond the code itself, no token."""
     state = record['state']
     if state == 'pending' and record['expires_at'] <= now(): state = 'expired'
-    return {'code': record['code'], 'id': record['id'], 'os': record['os'], 'state': state, 'created_at': record['created_at'], 'expires_at': record['expires_at'],
-            'step': record.get('step'), 'error': record.get('error'), 'hostname': record.get('hostname'), 'registered_at': record.get('registered_at')}
+    return {'code': record['code'], 'id': record['id'], 'uuid': record['code'], 'claimed_host': record.get('claimed_host'), 'os': record['os'], 'state': state, 'created_at': record['created_at'], 'expires_at': record['expires_at'],
+            'autostart': record.get('autostart', 'logon'), 'auto_restart': record.get('auto_restart', True), 'step': record.get('step'), 'error': record.get('error'), 'hostname': record.get('hostname'), 'registered_at': record.get('registered_at')}
 
 
 def all_records():
@@ -146,7 +153,9 @@ def pending_names():
 
 def create(body, registered=()):
     form = validate_form(body, registered, pending_names())
-    record = {'code': secrets.token_urlsafe(32), 'state': 'pending', 'created_at': now(), 'expires_at': now() + VALID_SECONDS, **form}
+    if binary_path(form['os']) is None:
+        raise InstallError(f"This server has no worker program for {form['os']} yet. Build it (worker/ci/build.sh) or download the release into {binaries_dir()} (worker/ci/fetch-release.sh), then try again.")
+    record = {'code': str(uuid.uuid4()), 'state': 'pending', 'created_at': now(), 'expires_at': now() + VALID_SECONDS, **form}
     write_record(record)
     return record
 
@@ -159,18 +168,22 @@ def cancel(code):
 
 
 def commands(record, server=None):
-    """The one command per shell. The link carries only the code; settings stay on the server."""
-    base = f'{(server or record["server"]).rstrip("/")}/install/{record["code"]}'
-    return {'powershell': f"irm '{base}/install.ps1' | iex",
-            'cmd': f"powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm '{base}/install.ps1' | iex\"",
-            'bash': f"curl -fsSL '{base}/install.sh' | bash",
+    """The one command per shell: download the worker program and run `agent-worker install <uuid> --server <address>`.
+    The uuid is this install's id (and becomes the worker's id); the program fetches everything else the form saved from the
+    server, which also proves the PC can reach it. No script is served."""
+    origin = (server or record["server"]).rstrip("/")
+    uid = record['code']
+    link = f'{origin}/install/{uid}/agent-worker'
+    return {'powershell': f"$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing '{link}' -OutFile $f; & $f install {uid} --server '{origin}'",
+            'cmd': f'curl.exe -fsSL "{link}" -o "%TEMP%\\agent-worker.exe" && "%TEMP%\\agent-worker.exe" install {uid} --server "{origin}"',
+            'bash': f"f=$(mktemp) && curl -fsSL '{link}' -o \"$f\" && chmod +x \"$f\" && \"$f\" install {uid} --server '{origin}'",
             'elevation': 'Run as a normal user. Do not use Administrator or sudo: everything installs for this user and nothing on the PC needs to be opened.'}
 
 
 # --------------------------------------------------------------------------- the worker bundle
-BUNDLE_FILES = ('flow_execution_worker.py', 'relay_connector.py', 'worker_runner.py', 'requirements-worker.txt', 'package.json', 'package-lock.json')
+BUNDLE_FILES = ('flow_execution_worker.py', 'relay_connector.py', 'worker_runner.py', 'worker_ctl.py', 'requirements-worker.txt', 'package.json', 'package-lock.json')
 BUNDLE_DIRS = ('flowkit', 'agentdriver')
-_bundle = {'stamp': None, 'data': b''}
+_bundle = {'stamp': None, 'data': b'', 'version': ''}
 
 
 def bundle_members():
@@ -192,30 +205,48 @@ def build_bundle():
             info = archive.gettarinfo(str(path), arcname=f'agents/{path.relative_to(ROOT / "agents").as_posix()}')
             info.uid = info.gid = 0; info.uname = info.gname = ''
             with path.open('rb') as handle: archive.addfile(info, handle)
-    _bundle.update(stamp=stamp, data=buffer.getvalue())
+    digest = hashlib.sha256()
+    for path in sorted(members, key=lambda p: p.relative_to(ROOT / 'agents').as_posix()):  # paths and contents only, never timestamps (worker_ctl.hash_tree does the same)
+        digest.update(path.relative_to(ROOT / 'agents').as_posix().encode() + b'\x00' + hashlib.sha256(path.read_bytes()).digest())
+    _bundle.update(stamp=stamp, data=buffer.getvalue(), version=digest.hexdigest()[:16])
     return _bundle['data']
 
 
+def bundle_version():
+    """The worker version: a short hash of what the bundle contains. A PC reports the one it installed."""
+    build_bundle()
+    return _bundle['version']
+
+
+# --------------------------------------------------------------------------- the Rust worker binaries
+TARGETS = {'windows': 'agent-worker-x86_64-pc-windows-msvc.exe', 'linux': 'agent-worker-x86_64-unknown-linux-musl'}
+_binary_versions = {}
+
+
+def binaries_dir():
+    """Where the worker binaries live: FLOW_WORKER_BINARIES, else dist/worker (filled by worker/ci/fetch-release.sh or a local build)."""
+    return Path(os.environ.get('FLOW_WORKER_BINARIES') or ROOT / 'dist' / 'worker')
+
+
+def binary_path(os_name):
+    name = TARGETS.get(os_name)
+    path = binaries_dir() / name if name else None
+    return path if path is not None and path.is_file() else None
+
+
+def binary_version(os_name):
+    """The worker version for an OS: the first 16 hex digits of the SHA-256 of its binary (the worker computes the same of itself)."""
+    path = binary_path(os_name)
+    if path is None: return None
+    stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    cached = _binary_versions.get(os_name)
+    if cached and cached[0] == stamp: return cached[1]
+    version = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    _binary_versions[os_name] = (stamp, version)
+    return version
+
+
 # --------------------------------------------------------------------------- scripts
-def sh_quote(value):
-    return "'" + str(value).replace("'", "'\\''") + "'"
-
-
-def ps_quote(value):
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def render(kind, record):
-    """The installer script for a record: the template with this install's values filled in."""
-    template = (TEMPLATES / ('install.ps1' if kind == 'ps1' else 'install.sh')).read_text(encoding='utf-8')
-    quote = ps_quote if kind == 'ps1' else sh_quote
-    values = {'SERVER': record['server'], 'CODE': record['code'], 'NAME': record['id'], 'SLOTS': str(record['slots']), 'OS': record['os']}
-    template = template.replace('@@NAME_RAW@@', record['id'])  # validated to letters, digits, dash and underscore
-    for key, value in values.items(): template = template.replace(f'@@{key}@@', quote(value))
-    text = template.replace('\r\n', '\n')
-    return text.replace('\n', '\r\n') if kind == 'ps1' else text
-
-
 # --------------------------------------------------------------------------- registration
 def set_env_value(key, value, path=None):
     """Write NAME=value to the coordinator's workers.local.env (git-ignored, readable by its owner only)."""
@@ -239,9 +270,10 @@ def register(record, token, hostname=None):
     taken = {w.get('token_env') for w in _read() if w.get('token_env')}
     env = token_env_for(record['id'], taken)
     set_env_value(env, token)
+    pc = record['code']  # the install's uuid is the worker's uuid and keys the relay
     try:
-        save_worker({'id': record['id'], 'pools': record['pools'], 'tags': record['tags'], 'engines': record['engines'], 'slots': record['slots'],
-                     'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'url': worker_url(record['id']), 'token_env': env}, create=True)
+        save_worker({'id': record['id'], 'uuid': pc, 'pools': record['pools'], 'tags': record['tags'], 'engines': record['engines'], 'slots': record['slots'],
+                     'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'url': worker_url(pc), 'token_env': env}, create=True)
     except AlreadyRegistered as exc: raise InstallError(str(exc))
     return env
 
@@ -265,11 +297,42 @@ async def usable(request, require_pending=True):
     raise web.HTTPNotFound(text=json.dumps({'error': 'This install link is unknown, expired or already used. Create a new one in the Fleet tab.'}), content_type='application/json')
 
 
-async def script(request):
+def claim_hash(secret):
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+async def claim(request):
+    """The PC checks in with the install's uuid: it proves it can reach the server, takes the link with a secret only it knows
+    and receives what the form saved. A second PC with the same command is refused, naming the first."""
     record = await usable(request)
-    kind = request.match_info['kind']
-    body = render('ps1' if kind == 'ps1' else 'sh', record)
-    return web.Response(text=body, content_type='text/plain', charset='utf-8', headers={'Cache-Control': 'no-store'})
+    try: body = await request.json()
+    except ValueError: return json_error(400, 'Invalid JSON')
+    secret = body.get('claim') if isinstance(body, dict) else None
+    if not isinstance(secret, str) or not 20 <= len(secret) <= 200: return json_error(400, 'The PC did not send a claim secret')
+    host = str(body.get('hostname') or '')[:100]
+    taken = record.get('claim_hash')
+    if taken and taken != claim_hash(secret):
+        when = time.strftime('%Y-%m-%d %H:%M', time.localtime(record.get('claimed_at', 0)))
+        return web.json_response({'ok': False, 'error': f"This install command was already used by another PC ({record.get('claimed_host') or 'unknown host'}, {when}). Each command installs one PC: create a new link in the Fleet tab for this one."}, status=409)
+    host_os = body.get('host_os')
+    if host_os and host_os != record['os']:
+        return web.json_response({'ok': False, 'error': f"The form says this PC runs {record['os']} but it runs {host_os}. Create a new link for this PC in the Fleet tab and choose {host_os}."}, status=409)
+    from .fleet_registry import _read
+    if not taken:
+        record.update(claim_hash=claim_hash(secret), claimed_host=host, claimed_at=now())
+        write_record(record)
+    clash = next((w['id'] for w in _read() if w.get('uuid') == record['code']), None)
+    if clash: return web.json_response({'ok': False, 'error': f'This install is already registered as {clash}.'}, status=409)
+    return web.json_response({'ok': True, 'uuid': record['code'], 'name': record['id'], 'os': record['os'], 'engines': record['engines'], 'pool': record['pools'][0],
+                              'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'autostart': record.get('autostart', 'logon'), 'auto_restart': record.get('auto_restart', True)})
+
+
+async def agent_binary(request):
+    record = await usable(request)
+    path = binary_path(record['os'])
+    if path is None:
+        return json_error(404, f"This server has no worker program for {record['os']} yet")
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': binary_version(record['os']) or '', 'Cache-Control': 'no-store'})
 
 
 async def bundle(request):
@@ -297,6 +360,9 @@ async def complete(request):
     try: body = await request.json()
     except ValueError: return json_error(400, 'Invalid JSON')
     if not isinstance(body, dict): return json_error(400, 'Invalid request')
+    secret = body.get('claim')
+    if not record.get('claim_hash') or not isinstance(secret, str) or claim_hash(secret) != record['claim_hash']:
+        return json_error(409, 'This install link was claimed by a different PC, or not claimed yet; the registration is refused')
     try: await asyncio.to_thread(register, record, body.get('token'), body.get('hostname'))
     except InstallError as exc:
         record.update(error=str(exc)); write_record(record)
@@ -310,12 +376,13 @@ async def state(request):
     """The PC (and the Fleet tab, through the flow host) asks whether the relay connection is up."""
     record = await usable(request, require_pending=False)
     relay = request.app['relay']
-    peer = relay.peers.get(record['id'])
+    peer = relay.peers.get(record['code'])
     return web.json_response({**view(record), 'connected': bool(peer and peer.online())})
 
 
 def add_routes(app):
-    app.router.add_get('/install/{code}/install.{kind:ps1|sh}', script)
+    app.router.add_post('/install/{code}/claim', claim)
+    app.router.add_get('/install/{code}/agent-worker', agent_binary)
     app.router.add_get('/install/{code}/bundle.tgz', bundle)
     app.router.add_post('/install/{code}/progress', progress)
     app.router.add_post('/install/{code}/complete', complete)
