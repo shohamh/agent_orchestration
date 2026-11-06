@@ -5,6 +5,7 @@ A small kanban board over **Hatchet**, **Trigger.dev** and **Prefect** runs. Eac
 - see how many runs are ahead of a queued card
 - watch intermediate results while a card runs
 - **steer**, **stop gracefully**, **cancel** or **replay** a card
+- jump straight to the sessions waiting on you: they're amber on the board, and **N need you** in the toolbar opens each in turn, oldest first
 
 http://localhost:8090. There's one UI, with a tab per backend. It has no external assets, so it works offline.
 
@@ -69,6 +70,51 @@ instead (tailnet only; the phone needs the Tailscale app).
 | Cancel | `runs.cancel` | `POST /api/v2/runs/{id}/cancel` | Set state `CANCELLING` |
 | Replay | Re-runs **the same run**. A durable task replays from its recorded event history, so it can finish again almost instantly. | Creates **a new run** on the same board | Creates **a new run** with the same parameters and tags |
 | Pause a queue | Not available. Hold work with concurrency limits or by stopping the worker. | **Pause / Resume queue** button | Not for served deployments (work-pool queues can be paused in Prefect's UI) |
+
+## Hover and right click
+
+Cards keep to a title, an agent and a time. Hover a card for its full story: the latest update, workers, queue and times.
+Explanations elsewhere sit behind tooltips, and touch screens, which have no hover, keep them inline.
+
+Right-click for what you can do with the thing under the pointer. On a card that's open, the same moves as dragging it,
+filter by its agent or worker, and copy its title or run ID. Fleet PCs and flows in the list have menus too. In the graph:
+
+- **A step:** edit, add a step after it, duplicate, copy its ID, delete.
+- **A dependency:** edit either end, remove it.
+- **The canvas:** add a step at the pointer, undo, redo, fit, auto-layout, flow settings.
+
+A run's graph in the drawer is the same viewer as the flow editor's (`static/flow-graph.js`): same layout, including where the
+flow's author placed its steps, and the same pan, zoom, fit and hover. Only the actions differ. A run offers its output and
+logs, restarting a step, opening it in the engine, and **Edit this flow**; nothing in it changes the flow.
+
+Scroll to pan, Shift+scroll to pan sideways, Ctrl+scroll to zoom. The **?** shows how the graph works on hover, and stays open on click.
+
+Dragging a step's handle onto empty space offers to add the next step there. Hovering a step or dependency lights up what
+it connects to. Undo and redo (Ctrl+Z, Ctrl+Y) cover the flow's content, not where steps sit on the canvas. Keyboard:
+the menu key or Shift+F10 opens the same menus.
+
+## Which PC work is on
+
+A card's status comes from its engine, which can't tell that the PC doing the work has gone away. So the board checks the fleet too.
+Work on an offline PC shows **Worker offline**, stops pulsing and leaves the **need you** count, and its session and steering controls
+are disabled until the PC reconnects. **Cancel now** still works, since the engine handles it. A PC the board can't check shows **Connection unknown**. Work on no
+worker runs on the coordinator and isn't affected. A worker that a finished step ran on doesn't count.
+
+Cards, the drawer and each step in a run's graph name their worker. Click a worker for its details, what it runs now and what it has
+run, from the records the flow host keeps (`GET /api/fleet/workers/{id}/jobs`). A run on a board nobody has open appears by run id and can't be opened from there.
+
+## Finding flows and PCs
+
+The Flows sidebar and the Fleet tab filter with the same words as the board's cards: plain words, `field:value`, `"a phrase"` and
+`-word`. Flows have `name:`, `state:`, `step:` and `agent:`. PCs have `id:`, `pool:`, `tag:`, `engine:`, `status:`, `agent:` and `command:`, where
+the last two match only what's installed. Clicking a pool or tag on a PC filters by it.
+
+Under **Where each step can run**, the number beside a step is how many workers can take it now. Clicking it opens the Fleet tab
+filtered to what that step needs.
+
+The switch beside each flow turns it on or off. Either way you see what it affects first, as with **Activate**. Turning a flow off
+stops new runs from starting it and keeps its draft; `POST /api/flow-documents/{name}/deactivate` checks the impact the same way
+activation does.
 
 ## Drag and drop
 

@@ -56,6 +56,28 @@ test('renaming an input updates {{ input.x }} references and keeps input order',
   assert.equal(fb.renameInput(doc, 'feature', 'other').ok, false);
 });
 
+test('the list of flows filters by name, state, steps and agents', () => {
+  const entry = { name: 'nightly', state: 'inactive', document: { description: 'Audit', steps: { scan: { kind: 'agent', agent: 'codex' } } } };
+  assert.equal(fb.flowMatches(entry, ''), true);
+  assert.equal(fb.flowMatches(entry, 'night'), true);
+  assert.equal(fb.flowMatches(entry, 'state:inactive'), true);
+  assert.equal(fb.flowMatches(entry, 'agent:codex step:scan'), true);
+  assert.equal(fb.flowMatches(entry, '-agent:codex'), false);
+  assert.equal(fb.flowMatches(entry, 'agent:claude'), false);
+});
+
+test('duplicating a step copies its settings and what it waits for; nothing waits for the copy', () => {
+  const doc = { name: 'f', steps: { a: { kind: 'program', run: 'x', needs: [] }, b: { kind: 'agent', agent: 'codex', prompt: 'p', needs: ['a'] }, c: { kind: 'program', run: 'y', needs: ['b'] } } };
+  const first = fb.duplicateStep(doc, 'b');
+  assert.equal(first.ok, true);
+  assert.equal(first.id, 'b_copy');
+  assert.deepEqual(first.doc.steps.b_copy, doc.steps.b);
+  assert.deepEqual(first.doc.steps.c.needs, ['b'], 'dependents keep the original');
+  assert.equal(doc.steps.b_copy, undefined, 'the document it was given is untouched');
+  assert.equal(fb.duplicateStep(first.doc, 'b').id, 'b_copy_1', 'a second copy gets its own ID');
+  assert.equal(fb.duplicateStep(doc, 'nope').ok, false);
+});
+
 test('dependencies: add, duplicate, remove, and cycle prevention', () => {
   let doc = design();
   assert.equal(fb.addDependency(doc, 'architecture', 'architecture').ok, false, 'self-dependency');

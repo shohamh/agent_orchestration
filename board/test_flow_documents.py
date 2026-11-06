@@ -20,11 +20,15 @@ PREVIEW = {"name": "hello-flow", "revision": "sha256:new", "activeRevision": "sh
 
 class FakeHost:
     def __init__(self):
-        self.preview, self.activated = copy.deepcopy(PREVIEW), []
+        self.preview, self.activated, self.deactivated = copy.deepcopy(PREVIEW), [], []
         self.result = {"name": "hello-flow", "activeRevision": "sha256:new",
                        "engines": [{"engine": e, "state": "active", "error": None} for e in ("hatchet", "prefect", "trigger")]}
 
-    async def activation(self, name):
+    async def deactivate(self, name, revision):
+        self.deactivated.append((name, revision))
+        return 200, {"name": name, "activeRevision": None, "engines": []}
+
+    async def activation(self, name, disable=False):
         return (200, copy.deepcopy(self.preview)) if name == "hello-flow" else (404, {"error": "no such flow"})
 
     async def activate(self, name, revision):
@@ -77,6 +81,17 @@ class ActivationAPI(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post("/api/flow-documents/hello-flow/activate",
                                           json={"revision": preview["revision"], "impact": preview["impact"], **extra})
         return response.status, await response.json()
+
+    async def test_disabling_rechecks_the_impact_and_keeps_to_the_active_revision(self):
+        self.host.preview["activeRevision"] = "sha256:old"
+        preview = await (await self.client.get("/api/flow-documents/hello-flow/activation?disable=1")).json()
+        post = lambda **body: self.client.post("/api/flow-documents/hello-flow/deactivate", json=body)
+        self.assertEqual((await post(revision="sha256:stale", impact=preview["impact"], confirm=True)).status, 409)
+        self.assertEqual((await post(revision="sha256:old", impact="sha256:stale", confirm=True)).status, 409)
+        self.assertEqual(self.host.deactivated, [])
+        response = await post(revision="sha256:old", impact=preview["impact"], confirm=True)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.host.deactivated, [("hello-flow", "sha256:old")])
 
     async def test_quiet_engines_activate_without_confirmation(self):
         preview = await self.preview()

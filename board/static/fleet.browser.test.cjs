@@ -135,7 +135,7 @@ const installCommands = (record, origin) => {
     bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
 const installView = (r) => { const { commands, ...rest } = r; return rest; };
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -144,6 +144,10 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname.startsWith('/api/fleet')) calls.push({ method: request.method, path: url.pathname, body });
   try {
     if (url.pathname === '/api/fleet' && request.method === 'GET') return json(200, listing());
+    if (/^\/api\/fleet\/workers\/[^/]+\/jobs$/.test(url.pathname)) return json(200, { jobs: [
+      { run: 'run-live', step: 'card', state: 'running', at: Date.now() / 1000, title: 'Live job', system: 'hatchet', board: 'research', column: 'running' },
+      { run: 'run-old', step: 'build', state: 'done', at: Date.now() / 1000 - 90, title: 'Old job', system: 'hatchet', board: 'research', column: 'done' },
+      { run: 'run-gone', step: 'card', state: 'running', at: Date.now() / 1000 - 900 }] });
     if (url.pathname === '/api/fleet/metrics') {
       if (fault.metrics) return json(502, { error: 'The flow host is not reachable' });
       return json(200, { workers: listing().workers.map(({ inventory, ...w }) => w), engines: ENGINES });
@@ -343,7 +347,7 @@ test('fleet tab lists every PC with state, pools, tags, slots, per-engine status
   assert.match(b, /Warning: slots 500 in the registry is above the maximum of 100/);
   const c = await text(worker('pc-c'));
   assert.match(c, /Awaiting connection/);
-  assert.match(c, /CPU limit 90%/); assert.match(c, /RAM limit 90%/); assert.match(c, /0 of 1 slot in use|1 slot/);
+  assert.match(c, /CPU 90%/); assert.match(c, /RAM 90%/); assert.match(c, /0 of 1 slot in use|1 slot/);
   assert.match(c, /Limits apply when the PC connects/);
   assert.equal(await evaluate(`${q(`${worker('pc-c')} [data-action="refresh"]`)}.disabled`), true, 'refresh needs a connected PC');
   await noSecrets();
@@ -518,14 +522,48 @@ test('settings edits: limits and slots, validated, with the sync state', async (
   const sent = lastCall('PUT', '/api/fleet/workers/pc-c').body;
   assert.deepEqual([sent.cpu_limit, sent.ram_limit, sent.slots], [75, 80, 3]);
   await waitFor(`/Saved pc-c.*Limits apply when the PC connects/.test(document.querySelector('.fl-status').textContent)`, 'pending sync shown');
-  await waitFor(`/CPU limit 75%/.test(document.querySelector('${worker('pc-c')}').textContent)`);
-  assert.match(await text(worker('pc-c')), /RAM limit 80%/);
+  await waitFor(`/CPU 75%/.test(document.querySelector('${worker('pc-c')}').textContent)`);
+  assert.match(await text(worker('pc-c')), /RAM 80%/);
   await click(`${worker('pc-a')} button`, 'Edit settings');
   await type('.fl-form input[name="cpu_limit"]', '60');
   await click('.fl-form button', 'Save');
   await waitFor(`document.querySelector('.fl-form').hidden`);
   await waitFor(`/applied on pc-a for new work; running work continues/.test(document.querySelector('.fl-status').textContent)`, 'sync state shown');
   await waitFor(`/limit 60%/.test(document.querySelector('${worker('pc-a')} [data-metric="cpu"]').textContent)`);
+});
+
+test('the list filters by words and fields; clicking a pool or tag filters by it', async () => {
+  await openFleet();
+  const shown = () => evaluate(`[...document.querySelectorAll('.fl-worker')].map((n) => n.dataset.worker)`);
+  const filter = (query) => evaluate(`(() => { const n = document.querySelector('.fl-filter-input'); n.value = ${JSON.stringify(query)}; n.dispatchEvent(new Event('input')); })()`);
+  const all = await shown();
+  try {
+    await filter('tag:cuda');
+    assert.ok((await shown()).includes('pc-a'));
+    assert.ok(!(await shown()).includes('pc-b'), 'pc-b has no such tag');
+    assert.match(await text('.fl-filter-count'), /\d+ of \d+ PCs/);
+    await click('.fl-filter button', 'Clear');
+    assert.deepEqual(await shown(), all);
+    await click(`${worker('pc-b')} button.fl-chip`, 'build');
+    assert.equal(await evaluate(`document.querySelector('.fl-filter-input').value`), 'pool:build');
+    assert.ok((await shown()).includes('pc-b') && !(await shown()).includes('pc-c'));
+    await filter('nothing-like-this');
+    assert.match(await text('.fl-list'), /No PCs match/);
+  } finally { await filter(''); }
+  assert.deepEqual(await shown(), all);
+});
+
+test('a PC shows what it runs now and has run; a run the board can\'t place can\'t be opened', async () => {
+  await openFleet();
+  await click(`${worker('pc-a')} [data-action="jobs"]`);
+  await waitFor(`document.querySelector('[data-job="run-live"]')`, 'its jobs');
+  assert.match(await text('[data-jobs="current"]'), /Live job/);
+  assert.doesNotMatch(await text('[data-jobs="current"]'), /Old job/);
+  assert.match(await text('[data-jobs="past"]'), /Old job.*build.*done/);
+  assert.match(await text('[data-jobs="current"]'), /Run run-gone/);
+  assert.equal(await evaluate(`document.querySelector('[data-job="run-gone"]').disabled`), true);
+  await click('.fl-back');
+  await waitFor(`document.querySelector('.fl-list').children.length > 0 && !document.querySelector('.fl-worker-detail')`, 'back to the list');
 });
 
 test('manual capability refresh updates results and timestamps; offline PCs explain why they cannot', async () => {
@@ -536,7 +574,7 @@ test('manual capability refresh updates results and timestamps; offline PCs expl
   await waitFor(`/Installed/.test(document.querySelector('${worker('pc-a')} [data-agent="claude"]').textContent)`, 'refreshed results');
   assert.equal(lastCall('POST', '/api/fleet/workers/pc-a/refresh').method, 'POST');
   assert.notEqual(await text(`${worker('pc-a')} .fl-refreshed`), stamp);
-  assert.match(await text('.fl-live'), /Capabilities of pc-a refreshed/);
+  await waitFor(`/Capabilities of pc-a refreshed/.test(document.querySelector('.fl-live').textContent)`, 'the announcement');
   assert.match(await text(worker('pc-b')), /checked when it connects/);
   assert.equal(await evaluate(`${q(`${worker('pc-b')} [data-action="refresh"]`)}.disabled`), true);
 });
@@ -699,7 +737,7 @@ test('a valid form creates the install link and shows the Windows commands with 
   assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
   await click('[data-action="copy-powershell"]');
   await waitFor('/Copied|Select the command/.test(document.querySelector(\'[data-action="copy-powershell"]\').textContent)', 'copy gives feedback');
-  assert.match(await text('.fl-live'), /command copied|Copy failed/);
+  await waitFor(`/command copied|Copy failed/.test(document.querySelector('.fl-live').textContent)`, 'the announcement');
   await shot('install-command-windows');
 });
 
