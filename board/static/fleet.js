@@ -291,19 +291,34 @@
     const live = h('p', { class: 'fl-live fl-sr', 'aria-live': 'polite' });
     const stale = h('p', { class: 'fl-stale', hidden: true });
     const list = h('div', { class: 'fl-list', role: 'list', 'aria-label': 'Registered PCs' });
+    const filterInput = h('input', { type: 'search', class: 'fl-filter-input', placeholder: 'Filter PCs', 'aria-label': 'Filter PCs', autocomplete: 'off', spellcheck: 'false',
+      title: 'Words match a PC\'s name, pools, tags, engines, state and installed software.\nid: pool: tag: engine: status: agent: command: narrow to one, for example tag:gpu or agent:codex.\n-word excludes.',
+      oninput: (e) => { S.filter = e.target.value; render(); } });
+    const filterCount = h('span', { class: 'fl-filter-count', role: 'status' });
+    const filterClear = h('button', { type: 'button', class: 'secondary', hidden: true, onclick: () => { setFilter(''); filterInput.focus(); } }, 'Clear');
+    const filterBar = h('div', { class: 'fl-filter', role: 'search' }, filterInput, filterCount, filterClear);
     const pending = h('section', { class: 'fl-installs', 'aria-label': 'PCs being installed', hidden: true });
     const formPanel = h('section', { class: 'fl-form', hidden: true, 'aria-labelledby': 'fl-form-title' });
+    // Icons say more on hover; their words stay for screen readers. Field help sits behind an "i".
+    const FL_ICONS = { link: 'M6.500 9.500 9.500 6.500M7 4.500l1-1a3 3 0 0 1 4.500 4.500l-1 1M9 11.500l-1 1A3 3 0 0 1 3.500 8l1-1', update: 'M8 2v8M4.500 6.500 8 10l3.500-3.500M2.500 13.500h11', reload: 'M13 8a5 5 0 1 1-1.500-3.500M13 2v3h-3', edit: 'M10.500 3 13 5.500 6 12.500H3.500V10z', refresh: 'M3 8a5 5 0 0 1 8.500-3.500L13 6M13 2.500V6H9.500M13 8a5 5 0 0 1-8.500 3.500L3 10M3 13.500V10h3.500' };
+    const flIcon = (name) => {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      for (const [k, v] of Object.entries({ width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(k, v);
+      path.setAttribute('d', FL_ICONS[name]); svg.append(path);
+      return svg;
+    };
+    const iconButton = (name, label, attrs = {}) => h('button', { type: 'button', class: 'secondary fl-icon', title: label, ...attrs }, flIcon(name), h('span', { class: 'fl-sr' }, label));
+    const info = (text) => h('span', { class: 'fl-info', title: text });
     const top = h('div', { class: 'fl-top' },
-      h('div', { class: 'fl-heading' }, h('h2', { class: 'fl-title', id: 'fl-title' }, 'Fleet'),
-        h('p', { class: 'fl-hint' }, 'One entry per PC. A PC serves every engine selected for it through its execution service.')),
+      h('div', { class: 'fl-heading', title: 'One entry per PC. A PC serves every engine selected for it through its execution service.' }, h('h2', { class: 'fl-title', id: 'fl-title' }, 'Fleet'),
+        h('p', { class: 'fl-hint fl-intro' }, 'One entry per PC. A PC serves every engine selected for it through its execution service.'), status),
       h('div', { class: 'fl-actions' },
         h('button', { type: 'button', class: 'primary', onclick: () => openInstall() }, 'Register PC'),
-        h('button', { type: 'button', class: 'secondary', 'data-action': 'advanced', onclick: () => openForm(null) }, 'Register by URL (advanced)'),
-        h('button', { type: 'button', class: 'secondary', 'data-action': 'updates', onclick: () => openUpdates() }, 'Update workers'),
-        h('button', { type: 'button', class: 'secondary', onclick: () => load(true) }, 'Reload'),
-        h('button', { type: 'button', class: 'secondary', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')),
-      status);
-    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, pending, list), live));
+        iconButton('link', 'Register by URL (advanced)', { 'data-action': 'advanced', onclick: () => openForm(null) }),
+        iconButton('update', 'Update workers', { 'data-action': 'updates', onclick: () => openUpdates() }),
+        iconButton('reload', 'Reload', { onclick: () => load(true) }),
+        h('button', { type: 'button', class: 'close', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')));
+    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, pending, filterBar, list), live));
 
     const say = (text, error = false) => { status.textContent = text; status.classList.toggle('error', error); };
     const announce = (text) => { live.textContent = ''; setTimeout(() => { live.textContent = text; }, 30); };
@@ -312,7 +327,7 @@
     function resultRow(kind, name, entry) {
       const [glyph, word] = RESULT[entry?.status] || RESULT.unknown;
       const label = kind === 'agent' ? AGENT_LABELS[name] || name : name;
-      return h('li', { class: `fl-result fl-${entry?.status || 'unknown'}`, [`data-${kind}`]: name },
+      return h('li', { class: `fl-result fl-${entry?.status || 'unknown'}`, [`data-${kind}`]: name, title: entry?.checked_at ? `Checked ${formatTime(entry.checked_at)}` : word },
         h('span', { class: 'fl-glyph', 'aria-hidden': 'true' }, glyph), ' ',
         h('span', { class: 'fl-result-name' }, label), ' ',
         h('span', { class: 'fl-result-word' }, word),
@@ -322,8 +337,9 @@
     function metricNode(worker, kind) {
       const limit = kind === 'cpu' ? worker.cpu_limit : worker.ram_limit;
       const view = metricView(worker.capacity, kind, limit, { online: worker.online, staleSince: S.staleSince });
+      const ramNote = `${kind === 'ram' ? '\nPhysical memory in use (total minus available).' : ''}\nNew work waits at or above the limit; running work is never stopped.`;
       const pct = worker.capacity?.state === 'known' && worker.online ? Math.max(0, Math.min(100, worker.capacity[kind === 'cpu' ? 'cpu_percent' : 'ram_percent'])) : 0;
-      return h('div', { class: `fl-metric ${view.level.split(' ').map((l) => `fl-${l}`).join(' ')}`, 'data-metric': kind, role: 'group', 'aria-label': view.label },
+      return h('div', { class: `fl-metric ${view.level.split(' ').map((l) => `fl-${l}`).join(' ')}`, 'data-metric': kind, role: 'group', 'aria-label': view.label, title: `${view.detail}${ramNote}` },
         h('span', { class: 'fl-metric-name' }, kind === 'cpu' ? 'CPU' : 'RAM'), ' ',
         h('span', { class: 'fl-metric-value' }, view.value), ' ',
         h('span', { class: 'fl-bar', 'aria-hidden': 'true' }, h('span', { class: 'fl-fill', style: `width:${pct}%` }), h('span', { class: 'fl-mark', style: `left:${limit}%` })),
@@ -340,11 +356,13 @@
         h('p', { class: 'fl-state', 'data-status': worker.status }, STATUS[worker.status] || worker.status || 'Unknown',
           worker.hostname ? h('span', { class: 'fl-host' }, ` · ${worker.hostname}`) : null),
         h('div', { class: 'fl-metrics' }, metricNode(worker, 'cpu'), metricNode(worker, 'ram'),
-          h('p', { class: 'fl-basis' }, 'RAM is physical memory in use (total minus available). New work waits while either average is at or above its limit; running work is never stopped.')),
+          h('details', { class: 'fl-basis' }, h('summary', {}, 'How limits work'), 'RAM is physical memory in use (total minus available). New work waits while either average is at or above its limit; running work is never stopped.')),
         h('p', { class: 'fl-slots' }, slotsText(worker)),
         h('ul', { class: 'fl-engines', 'aria-label': 'Engines' }, worker.engines.map((e) => {
           const st = worker.engine_status?.[e], state = st?.state || (st?.connected ? 'connected' : 'not_connected');
-          return h('li', { 'data-engine': e, class: `fl-${state.replace('_', '-')}` }, engineText(e, st, worker));
+          const words = engineText(e, st, worker), split = words.indexOf(': ');
+          // The engine's name and a coloured dot; the explanation shows on hover.
+          return h('li', { 'data-engine': e, class: `fl-${state.replace('_', '-')}`, title: words.slice(split + 2) }, h('span', { class: 'fl-engine-name' }, words.slice(0, split)), h('span', { class: 'fl-engine-why' }, words.slice(split)));
         })),
       ];
     }
@@ -356,23 +374,34 @@
       return h('p', { class: `fl-version fl-${words.level}`, 'data-version': item.version || '' }, `Worker version ${shortVersion(item.version)} · ${words.text}`);
     }
 
+    function workerMenu(e, worker) {
+      if (!window.Overlays || e.pointerType === 'touch' || e.target.closest('a, input, textarea, select')) return;
+      e.preventDefault();
+      const act = (name) => () => list.querySelector(`.fl-worker[data-worker="${CSS.escape(worker.id)}"] [data-action="${name}"]`)?.click();
+      window.Overlays.menu(e, [{ label: 'Edit settings', onSelect: act('edit') },
+        { label: 'Refresh capabilities', disabled: !worker.online, title: worker.online ? '' : 'The PC must be connected', onSelect: act('refresh') }, null,
+        { label: 'Copy name', disabled: !navigator.clipboard, onSelect: () => navigator.clipboard.writeText(worker.id) }]);
+    }
+
+    const filterChip = (field, value) => h('button', { type: 'button', class: 'fl-chip', title: `Show every PC with ${field} ${value}`, onclick: () => setFilter(searchTerm(field, value)) }, value);
+
     function workerNode(worker) {
       const inv = worker.inventory;
       const agents = Object.entries(inv?.agents || {}), commands = Object.entries(inv?.commands || {});
       const offlineNote = !worker.online ? h('p', { class: 'fl-hint' }, 'Capabilities are checked when it connects.') : null;
-      return h('article', { class: 'fl-worker', role: 'listitem', 'data-worker': worker.id, 'aria-labelledby': `fl-w-${worker.id}` },
+      return h('article', { class: 'fl-worker', role: 'listitem', 'data-worker': worker.id, 'aria-labelledby': `fl-w-${worker.id}`, oncontextmenu: (e) => workerMenu(e, worker) },
         h('header', { class: 'fl-worker-head' }, h('h3', { id: `fl-w-${worker.id}` }, worker.id), worker.uuid ? h('small', { class: 'fl-uuid', 'data-uuid': worker.uuid, title: 'Unique id (generated for this PC)' }, worker.uuid) : null,
           h('div', { class: 'fl-worker-actions' },
-            h('button', { type: 'button', class: 'secondary', 'data-action': 'edit', onclick: () => openForm(worker) }, 'Edit settings'),
-            h('button', { type: 'button', class: 'secondary', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Check installed agents and commands now' : 'The PC must be connected',
-              onclick: (e) => refresh(worker.id, e.currentTarget) }, 'Refresh capabilities'))),
+            iconButton('edit', 'Edit settings', { 'data-action': 'edit', onclick: () => openForm(worker) }),
+            h('button', { type: 'button', class: 'secondary fl-icon', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Refresh capabilities: check installed agents and commands now' : 'Refresh capabilities: the PC must be connected',
+              onclick: (e) => refresh(worker.id, e.currentTarget) }, flIcon('refresh'), h('span', { class: 'fl-sr' }, 'Refresh capabilities')))),
         (worker.warnings || []).map((w) => h('p', { class: 'fl-warning' }, `Warning: ${w}`)),
         h('div', { class: 'fl-live-parts' }, liveParts(worker)),
         versionLine(worker),
         h('dl', { class: 'fl-facts' },
-          h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => h('span', { class: 'fl-chip' }, p))),
-          h('dt', {}, 'Tags'), h('dd', {}, worker.tags.length ? worker.tags.map((t) => h('span', { class: 'fl-chip' }, t)) : h('span', { class: 'fl-hint' }, 'none')),
-          h('dt', {}, 'Limits'), h('dd', { class: 'fl-limits' }, `CPU limit ${worker.cpu_limit}% · RAM limit ${worker.ram_limit}% · ${plural(worker.slots, 'slot')}`,
+          h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => filterChip('pool', p))),
+          h('dt', {}, 'Tags'), h('dd', {}, worker.tags.length ? worker.tags.map((t) => filterChip('tag', t)) : h('span', { class: 'fl-hint' }, 'none')),
+          h('dt', {}, 'Limits'), h('dd', { class: 'fl-limits', title: syncText(worker.settings_sync, worker.id) }, `CPU ${worker.cpu_limit}% · RAM ${worker.ram_limit}% · ${plural(worker.slots, 'slot')}`,
             h('span', { class: 'fl-sync' }, ` · ${syncText(worker.settings_sync, worker.id)}`))),
         h('section', { class: 'fl-capabilities', 'aria-label': `Capabilities of ${worker.id}` },
           h('p', { class: 'fl-refreshed' }, inv ? `Last refreshed ${formatTime(inv.refreshed_at)}` : 'Capabilities unknown',
@@ -382,10 +411,15 @@
           commands.length ? h('ul', { class: 'fl-results', 'aria-label': 'Commands' }, commands.map(([n, r]) => resultRow('command', n, r))) : null));
     }
 
+    function setFilter(query) { S.filter = query || ''; filterInput.value = S.filter; render(); }
     function render() {
       const focused = document.activeElement?.closest?.('.fl-worker') && document.activeElement.dataset.action
         ? [document.activeElement.closest('.fl-worker').dataset.worker, document.activeElement.dataset.action] : null;
-      list.replaceChildren(...(S.workers.length ? S.workers.map(workerNode) : [h('p', { class: 'fl-empty' }, 'No PCs are registered yet.')]));
+      const shown = S.workers.filter((w) => workerMatches(w, S.filter));
+      filterCount.textContent = S.filter?.trim() ? `${shown.length} of ${plural(S.workers.length, 'PC')}` : '';
+      filterClear.hidden = !S.filter?.trim();
+      list.replaceChildren(...(!S.workers.length ? [h('p', { class: 'fl-empty' }, 'No PCs are registered yet.')]
+        : shown.length ? shown.map(workerNode) : [h('p', { class: 'fl-empty' }, 'No PCs match this filter.')]));
       if (focused) list.querySelector(`.fl-worker[data-worker="${CSS.escape(focused[0])}"] [data-action="${focused[1]}"]`)?.focus();
     }
 
@@ -557,20 +591,20 @@
         slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart'), auto_restart: fieldError('auto_restart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
-      const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
-        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); drawRestart(); } }), ` ${label}`)), errors.os);
-      const autostartBox = h('fieldset', { class: 'fl-autostart-choice' }, h('legend', {}, 'When should the worker start on the PC?'));
-      const drawAutostart = () => autostartBox.replaceChildren(h('legend', {}, 'When should the worker start on the PC?'),
-        ...autostartChoices(state.os).map((c) => h('label', { class: 'fl-check fl-autostart', 'data-autostart': c.value },
+      const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system'),
+        h('div', { class: 'fl-choices' }, Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); drawRestart(); } }), ` ${label}`))), errors.os);
+      const autostartBox = h('fieldset', { class: 'fl-autostart-choice' }, h('legend', {}, 'Starts'));
+      const drawAutostart = () => autostartBox.replaceChildren(h('legend', {}, 'Starts'),
+        h('div', { class: 'fl-choices' }, autostartChoices(state.os).map((c) => h('label', { class: 'fl-check fl-autostart', 'data-autostart': c.value, title: c.text },
           h('input', { type: 'radio', name: 'autostart', value: c.value, checked: c.value === state.autostart, onchange: () => { state.autostart = c.value; drawRestart(); } }),
-          h('span', {}, ` ${c.label}`, h('small', { class: 'fl-hint' }, c.text)))), errors.autostart);
+          h('span', {}, ` ${c.label}`, h('small', { class: 'fl-hint' }, c.text))))), errors.autostart);
       const restartHelp = h('small', { class: 'fl-hint' });
       const restartBox = h('input', { type: 'checkbox', name: 'auto_restart', checked: state.autoRestart, onchange: (ev) => { state.autoRestart = ev.target.checked; } });
       const restartLabel = h('label', { class: 'fl-check fl-auto-restart' }, restartBox, h('span', {}, ' Restart automatically if the worker crashes or is killed', restartHelp), errors.auto_restart);
-      const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartBox.disabled = state.autostart === 'none'; };
-      const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
-        ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
-          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`)), errors.engines);
+      const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartLabel.title = restartHelp.textContent; restartBox.disabled = state.autostart === 'none'; };
+      const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines'),
+        h('div', { class: 'fl-choices' }, ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
+          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`))), errors.engines);
 
       const poolSelect = h('select', { name: 'pool', 'aria-describedby': 'fl-err-pool' });
       const newPoolInput = h('input', { name: 'new_pool', maxlength: 100, autocomplete: 'off', 'aria-label': 'New pool name', placeholder: 'New pool name', hidden: true });
@@ -611,19 +645,19 @@
       };
       serverInput.addEventListener('input', drawServerWarning);
 
-      const field = (label, input, helpText, helpId, name) => h('label', { class: 'fl-field' }, h('span', {}, label), input, helpText ? h('small', { id: helpId }, helpText) : null, name ? errors[name] : null);
+      const field = (label, input, helpText, helpId, name) => h('label', { class: 'fl-field' }, h('span', { class: 'fl-label' }, label, helpText ? info(helpText) : null), input, helpText ? h('small', { id: helpId, class: 'fl-help' }, helpText) : null, name ? errors[name] : null);
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Create install command');
       const form = h('form', { class: 'fl-form-body', novalidate: true },
-        h('h3', { id: 'fl-form-title' }, 'Register a PC'),
-        h('p', { class: 'fl-hint' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
+        h('div', { class: 'fl-form-head' }, h('h3', { id: 'fl-form-title' }, 'Register a PC'), info('Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.')),
+        h('p', { class: 'fl-hint fl-help' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
         osBoxes, autostartBox, restartLabel, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
-        h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags (optional)'), chosen, tagInput, tagList, errors.tags),
-        h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
-          field('Slots (jobs at once, all engines)', slots, null, null, 'slots'), field('CPU limit (%)', cpu, null, null, 'cpu_limit'), field('RAM limit (%)', ram, null, null, 'ram_limit'),
-          h('small', {}, 'New work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
-        field('Address the PC uses to reach this server', serverInput, 'Name or IP and port the PC can open, for example http://192.168.1.10:8090. Not localhost.', 'fl-server-help', 'server'),
+        h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags'), chosen, tagInput, tagList, errors.tags),
+        h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity', info('Slots: jobs at once, across all engines.\nNew work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
+          field('Slots', slots, null, null, 'slots'), field('CPU limit %', cpu, null, null, 'cpu_limit'), field('RAM limit %', ram, null, null, 'ram_limit'),
+          h('small', { class: 'fl-help' }, 'New work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
+        field('Server address', serverInput, 'The address this PC uses to reach this server: a name or IP and port it can open, for example http://192.168.1.10:8090. Not localhost.', 'fl-server-help', 'server'),
         serverWarning, errorBox,
         h('div', { class: 'fl-row fl-form-actions' }, h('button', { type: 'button', class: 'secondary', onclick: closeForm }, 'Cancel'), submit));
 
@@ -639,7 +673,8 @@
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
-          errorBox.textContent = `Fix ${names.length === 1 ? 'this' : 'these'} first: ${names.map((n) => result.errors[n]).join('; ')}.`;
+          errorBox.replaceChildren(...(names.length === 1 ? [h('p', {}, `Fix this first: ${result.errors[names[0]]}.`)]
+            : [h('p', {}, 'Fix these first:'), h('ul', {}, names.map((n) => h('li', {}, `${result.errors[n]}.`)))]));
           form.querySelector('[aria-invalid="true"]')?.focus?.();
           return;
         }
@@ -760,12 +795,12 @@
             ...s.steps.map((x) => [x.text ? h('p', x.engine ? { 'data-engine-note': x.engine } : {}, x.text) : null, x.code ? h('pre', { class: 'fl-code' }, h('code', {}, x.code)) : null]))));
       };
 
-      const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
-        ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
-          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); drawSteps(); } }), ` ${ENGINE_LABELS[e]}`)));
-      const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
-        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === f.os,
-          onchange: () => { f.os = value; drawSteps(); } }), ` ${label}`)));
+      const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines'),
+        h('div', { class: 'fl-choices' }, ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
+          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); drawSteps(); } }), ` ${ENGINE_LABELS[e]}`))));
+      const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system'),
+        h('div', { class: 'fl-choices' }, Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === f.os,
+          onchange: () => { f.os = value; drawSteps(); } }), ` ${label}`))));
 
       // Pools: several may be chosen; a new pool is added inline and saved with the PC.
       const poolList = h('div', { class: 'fl-pool-list' });
@@ -831,27 +866,33 @@
       tokenInput.addEventListener('input', () => { tokenTouched = true; drawSteps(); });
       slots.addEventListener('input', drawSteps);
 
-      const field = (label, input, help, helpId) => h('label', { class: 'fl-field' }, h('span', {}, label), input, help ? h('small', { id: helpId }, help) : null);
+      const field = (label, input, help, helpId) => h('label', { class: 'fl-field' }, h('span', { class: 'fl-label' }, label, help ? info(help) : null), input, help ? h('small', { id: helpId, class: 'fl-help' }, help) : null);
+      const intro = editing ? 'Pools, tags, engines and limits are stored in the fleet registry on the coordinator. Limit changes affect new work only.'
+        : 'Choose the engines and the PC\'s operating system for setup steps, then enter its details. You can save it before it is reachable.';
+      // Setup steps matter when adding a PC. An existing PC needs nothing new, so they fold away.
+      const setup = h('details', { class: 'fl-setup' }, h('summary', {}, editing ? 'Setup notes' : 'Setup steps'), osBoxes, steps);
+      setup.open = !editing;
+      const idField = field('Worker ID', idInput, editing ? 'The ID cannot change. Register a new PC instead.' : 'Letters, digits, dots, dashes and underscores. The PC\'s FLOW_WORKER_ID must be the same.', 'fl-id-help');
+      idField.hidden = editing;
+      const connection = [field('Endpoint', urlInput, editing && worker.connection === 'configured' ? 'An endpoint is configured; it is never shown. Leave blank to keep it.'
+        : 'Optional. Leave blank to save as awaiting connection.', 'fl-url-help'),
+      field('Token variable', tokenInput, editing ? 'The name of the variable on the coordinator. Leave blank to keep the current one. The token value itself is never entered here.'
+        : 'The name of the workers.local.env entry that holds this PC\'s token. The token value itself is never entered here.', 'fl-token-help')];
+      const connectionFold = h('details', { class: 'fl-setup' }, h('summary', {}, 'Connection'), h('div', { class: 'fl-details' }, connection));
+      connectionFold.open = !editing || worker.connection !== 'configured';
       const form = h('form', { class: 'fl-form-body', novalidate: true },
-        h('h3', { id: 'fl-form-title' }, editing ? `Edit ${worker.id}` : 'Register a PC'),
-        h('p', { class: 'fl-hint' }, editing ? 'Pools, tags, engines and limits are stored in the fleet registry on the coordinator. Limit changes affect new work only.'
-          : 'Choose the engines and the PC\'s operating system for setup steps, then enter its details. You can save it before it is reachable.'),
-        engineBoxes, osBoxes, steps,
-        h('fieldset', { class: 'fl-details' }, h('legend', {}, 'Worker details'),
-          field('Worker ID', idInput, editing ? 'The ID cannot change. Register a new PC instead.' : 'Letters, digits, dots, dashes and underscores. The PC\'s FLOW_WORKER_ID must be the same.', 'fl-id-help'),
-          field('Endpoint (write-only)', urlInput, editing && worker.connection === 'configured' ? 'An endpoint is configured; it is never shown. Leave blank to keep it.'
-            : 'Optional. Leave blank to save as awaiting connection.', 'fl-url-help'),
-          field('Token variable on the coordinator', tokenInput, editing ? 'Leave blank to keep the current variable. The token value itself is never entered here.'
-            : 'The name of the workers.local.env entry that holds this PC\'s token. The token value itself is never entered here.', 'fl-token-help')),
+        h('div', { class: 'fl-form-head' }, h('h3', { id: 'fl-form-title' }, editing ? `Edit ${worker.id}` : 'Register a PC'), info(intro)),
+        h('p', { class: 'fl-hint fl-help' }, intro),
+        idField, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pools'), poolList,
           h('div', { class: 'fl-row' }, newPool, h('button', { type: 'button', class: 'secondary', onclick: addPool }, 'Add pool'))),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags'), chosen,
           h('div', { class: 'fl-combo' }, tagInput, listbox),
-          h('small', { id: 'fl-tag-help' }, 'Existing tags are suggested as you type; a new one is created when you choose “Create tag”.')),
-        h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
-          field('Slots (jobs at once, all engines)', slots), field('CPU limit (%)', cpu), field('RAM limit (%)', ram),
-          h('small', {}, 'Admission thresholds for new work, defaults 90% and 90%: a 10-second average at or above a limit holds new work. Running work is never stopped.')),
-        errorBox,
+          h('small', { id: 'fl-tag-help', class: 'fl-help' }, 'Existing tags are suggested as you type; a new one is created when you choose “Create tag”.')),
+        h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity', info('Slots: jobs at once, across all engines.\nAdmission thresholds for new work, defaults 90% and 90%: a 10-second average at or above a limit holds new work. Running work is never stopped.')),
+          field('Slots', slots), field('CPU limit %', cpu), field('RAM limit %', ram),
+          h('small', { class: 'fl-help' }, 'Admission thresholds for new work, defaults 90% and 90%: a 10-second average at or above a limit holds new work. Running work is never stopped.')),
+        connectionFold, setup, errorBox,
         h('div', { class: 'fl-row fl-form-actions' },
           h('button', { type: 'button', class: 'secondary', onclick: closeForm }, 'Cancel'),
           h('button', { type: 'submit', class: 'primary' }, 'Save')));
@@ -915,9 +956,11 @@
     }
 
     return {
-      async open() {
+      // filter: a query to start from, as when a flow step shows the PCs that can run it.
+      async open({ filter = '' } = {}) {
         S.open = true;
         closeForm();
+        S.filter = filter; filterInput.value = filter;
         say('Loading the fleet…');
         if (await load()) say(`${plural(S.workers.length, 'PC')} registered.`);
         schedule();
@@ -928,7 +971,18 @@
     };
   }
 
-  const api = { autoRestartText, autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  // What the fleet can be filtered by. Same query language as the board's cards. Agents and commands
+  // count only where they're installed: "agent:codex" finds PCs that can run Codex.
+  const Search = () => (typeof module !== 'undefined' && module.exports ? require('./card-search.js') : root.CardSearch);
+  const searchTerm = (field, value) => Search().term(field, value);
+  function workerMatches(worker, query) {
+    if (!query?.trim()) return true;
+    const installed = (found) => Object.entries(found || {}).filter(([, r]) => r?.status === 'installed').map(([name]) => name);
+    return Search().matchFields(query, { id: [worker.id, worker.hostname], pool: worker.pools, tag: worker.tags, engine: [...(worker.engines || []), ...(worker.engines || []).map((e) => ENGINE_LABELS[e])],
+      status: [worker.status, worker.online ? 'online' : 'offline'], agent: installed(worker.inventory?.agents), command: installed(worker.inventory?.commands) });
+  }
+
+  const api = { workerMatches, autoRestartText, autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

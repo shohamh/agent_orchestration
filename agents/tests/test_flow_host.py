@@ -275,6 +275,24 @@ class ActivationTests(HostCase):
         self.assertEqual(self.call("GET", "/documents/new-flow")[0], 404)
         self.assertNotIn("new-flow", self.target.read_text(encoding="utf-8"))
 
+    def test_disable_stops_serving_but_keeps_the_draft(self):
+        self.save(NEW, None, name="new-flow")
+        self.assertEqual(self.activate("new-flow")[0], 200)
+        preview = self.call("GET", "/documents/new-flow/activation?disable=1")[1]
+        self.assertEqual((preview["change"], preview["revision"], preview["activeRevision"]), ("remove", None, revision(NEW)))
+        self.assertEqual(self.call("POST", "/documents/new-flow/deactivate", {"revision": "sha256:stale"})[0], 409)
+        self.assertEqual(self.active_yaml("new-flow"), NEW)
+        status, result = self.call("POST", "/documents/new-flow/deactivate", {"revision": revision(NEW)})
+        self.assertEqual((status, result["activeRevision"]), (200, None))
+        self.assertIsNone(self.active_yaml("new-flow"))
+        doc = self.doc("new-flow")
+        self.assertEqual((doc["state"], doc["yaml"]), ("inactive", NEW))  # the draft is still there
+        self.assertNotIn("new-flow", self.target.read_text(encoding="utf-8"))
+        self.assertEqual(self.call("GET", "/documents/new-flow/activation?disable=1")[1]["change"], "none")
+        self.assertEqual(self.call("POST", "/documents/new-flow/deactivate", {"revision": revision(NEW)})[0], 409)  # already off
+        self.assertEqual(self.activate("new-flow")[0], 200)  # and it can be enabled again
+        self.assertEqual(self.active_yaml("new-flow"), NEW)
+
     def test_old_delete_is_draft_only(self):
         self.assertEqual(self.call("DELETE", "/flows/hello-flow"), (200, {"ok": True}))
         self.assertEqual(self.active_yaml(), HELLO)

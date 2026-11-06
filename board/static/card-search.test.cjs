@@ -9,6 +9,18 @@ const card = (over = {}) => ({ id: 'run-1', system: 'hatchet', title: 'Compare v
   workers: [{ step: 'fetch', id: 'gpu-02', hostname: 'gpu-02.lan', pool: 'gpu', tags: ['cuda', 'linux'] }], ...over });
 const ids = (cards, query) => search.filter(cards, query).map((c) => c.id);
 
+test('the same query language filters any list by its own fields', () => {
+  const fields = { pool: ['build', 'gpu'], tag: ['linux'], agent: ['codex'], status: ['online'] };
+  assert.equal(search.matchFields('', fields), true);
+  assert.equal(search.matchFields('GPU', fields), true, 'a word looks everywhere');
+  assert.equal(search.matchFields('pool:gpu tag:linux', fields), true);
+  assert.equal(search.matchFields('pool:linux', fields), false, 'a field looks only there');
+  assert.equal(search.matchFields('-agent:codex', fields), false);
+  assert.equal(search.matchFields('nosuch:thing', fields), false);
+  assert.equal(search.term('tag', 'large disk'), 'tag:"large disk"');
+  assert.equal(search.matchFields(search.term('tag', 'large disk'), { tag: ['large disk'] }), true);
+});
+
 test('plain words must all appear somewhere on the card, ignoring case', () => {
   const cards = [card(), card({ id: 'run-2', title: 'Audit sbom tooling', output: null, workers: [] })];
   assert.deepEqual(ids(cards, 'VECTOR'), ['run-1']);

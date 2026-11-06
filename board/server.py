@@ -765,8 +765,8 @@ async def engine_runs(app: web.Application, engine: str, flows: dict[str, dict])
         return None
 
 
-async def activation_preview(app: web.Application, name: str) -> tuple[int, dict]:
-    status, host = await app["flow_host"].activation(name)
+async def activation_preview(app: web.Application, name: str, disable: bool = False) -> tuple[int, dict]:
+    status, host = await app["flow_host"].activation(name, disable=disable)
     if status != 200:
         return status, host
     # Every flow an engine serves (a removal that failed somewhere included), with its definition.
@@ -784,7 +784,7 @@ async def activation_preview(app: web.Application, name: str) -> tuple[int, dict
 
 
 async def flow_document_activation(request: web.Request) -> web.Response:
-    return passed_through(await activation_preview(request.app, request.match_info["name"]))
+    return passed_through(await activation_preview(request.app, request.match_info["name"], request.query.get("disable") == "1"))
 
 
 async def flow_document_activate(request: web.Request) -> web.Response:
@@ -802,6 +802,24 @@ async def flow_document_activate(request: web.Request) -> web.Response:
     status, result = await request.app["flow_host"].activate(name, preview["revision"])
     if status == 409:  # the draft changed in between: show the board's view of the new draft
         result = {"error": "conflict", "preview": (await activation_preview(request.app, name))[1]}
+    return web.json_response(result, status=status)
+
+
+async def flow_document_deactivate(request: web.Request) -> web.Response:
+    """Stop serving a flow's active version; its draft stays. The same recheck as activating."""
+    body, name = await json_object(request), request.match_info["name"]
+    status, preview = await activation_preview(request.app, name, disable=True)
+    if status != 200:
+        return web.json_response(preview, status=status)
+    if body.get("revision") != preview["activeRevision"]:
+        return web.json_response({"error": "conflict", "preview": preview}, status=409)
+    if body.get("impact") != preview["impact"]:
+        return web.json_response({"error": "impact changed", "preview": preview}, status=409)
+    if preview["disruptive"] and body.get("confirm") is not True:
+        return web.json_response({"error": "confirmation required", "preview": preview}, status=409)
+    status, result = await request.app["flow_host"].deactivate(name, preview["activeRevision"])
+    if status == 409:
+        result = {"error": "conflict", "preview": (await activation_preview(request.app, name, disable=True))[1]}
     return web.json_response(result, status=status)
 
 
@@ -906,6 +924,7 @@ def make_app() -> web.Application:
     app.router.add_put("/api/flow-documents/{name}/layout", flow_document_layout)
     app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
     app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
+    app.router.add_post("/api/flow-documents/{name}/deactivate", flow_document_deactivate)
     app.router.add_get('/api/workers', workers_list)
     app.router.add_get('/api/fleet', fleet_list)
     app.router.add_get('/api/fleet/metrics', fleet_metrics)

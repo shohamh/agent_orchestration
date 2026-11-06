@@ -5,101 +5,237 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>Agent Board</title>
 <style>
+  /* Design tokens. Every stylesheet (chat, flows, fleet) draws from these, so light and dark stay in step. */
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #677085; --line: #e2e5ec;
-    --accent: #3b5bdb; --accent-ink: #ffffff; --danger: #c92a2a; --warn: #e67700; --ok: #2b8a3e;
-    --chip: #eef1f6; --shadow: 0 1px 2px rgba(20, 30, 50, .08);
+    color-scheme: light dark;
+    --bg: #f2f3f6; --lane: #e9ebf0; --panel: #ffffff; --ink: #191e29; --muted: #5a6375; --line: #dfe2e9; --line-strong: #c6cbd6;
+    --accent: #3b55d4; --accent-hover: #2f47bd; --accent-ink: #ffffff; --danger: #c1272d; --warn: #a85600; --ok: #1c7a3c;
+    --violet: #6d4fc4; --slate: #5f6b80;
+    --chip: #eef0f5; --hover: #f4f5f8;
+    --shadow: 0 1px 2px rgba(20, 28, 48, .07);
+    --shadow-hover: 0 2px 4px rgba(20, 28, 48, .07), 0 6px 16px rgba(20, 28, 48, .08);
+    --shadow-float: 0 12px 40px rgba(20, 28, 48, .18), 0 2px 8px rgba(20, 28, 48, .08);
+    --r-sm: 6px; --r: 8px; --r-lg: 12px;
+    --sans: "Segoe UI Variable Text", "Segoe UI Variable", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", SFMono-Regular, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #12151b; --panel: #1b2029; --ink: #e6e9f0; --muted: #98a1b3; --line: #2b313d;
-      --accent: #7c93f2; --accent-ink: #0f1320; --danger: #ff6b6b; --warn: #ffa94d; --ok: #69db7c;
-      --chip: #262c38; --shadow: none;
+      --bg: #0e1014; --lane: #14171c; --panel: #1b1f27; --ink: #e9ebf1; --muted: #9ca4b4; --line: #2a2f39; --line-strong: #3c424f;
+      --accent: #8fa3ff; --accent-hover: #a5b5ff; --accent-ink: #0c1020; --danger: #ff8080; --warn: #f4b352; --ok: #63d48d;
+      --violet: #b9a2f7; --slate: #98a3b7;
+      --chip: #262b35; --hover: #21252e;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+      --shadow-hover: 0 2px 4px rgba(0, 0, 0, .3), 0 8px 20px rgba(0, 0, 0, .28);
+      --shadow-float: 0 16px 48px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .3);
     }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
-  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
-  h1 { font-size: 16px; margin: 0 8px 0 0; }
-  .tabs { display: flex; gap: 4px; background: var(--chip); padding: 3px; border-radius: 8px; }
-  .tabs button { border: 0; background: transparent; color: var(--muted); padding: 5px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+  body { margin: 0; font: 14px/1.45 var(--sans); background: var(--bg); color: var(--ink); -webkit-font-smoothing: antialiased; }
+  * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+
+  /* Header: navigation on top, tools for the current board underneath. */
+  body > header { display: flex; flex-direction: column; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; min-width: 0; }
+  .toolbar { padding: 0 16px 10px; }
+  h1 { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; letter-spacing: -.01em; margin: 0 4px 0 0; white-space: nowrap; }
+  .brand-mark { flex: none; color: var(--accent); }
+  .tabs { display: flex; gap: 2px; background: var(--chip); padding: 3px; border-radius: var(--r); }
+  .tabs button { border: 0; background: transparent; color: var(--muted); padding: 4px 11px; border-radius: var(--r-sm); cursor: pointer; font: inherit; font-size: 13px; white-space: nowrap; transition: color .12s ease, background-color .12s ease; }
+  .tabs button:hover { color: var(--ink); }
   .tabs button[aria-pressed="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); font-weight: 600; }
-  select, input, textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
-  button.primary, button.secondary, button.danger { font: inherit; border-radius: 6px; padding: 6px 12px; cursor: pointer; border: 1px solid transparent; }
+  .board-picker { display: flex; align-items: center; gap: 6px; }
+  .board-picker select { max-width: 180px; }
+  select, input, textarea { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 6px 8px; transition: border-color .12s ease, box-shadow .12s ease; }
+  select:hover, input:hover, textarea:hover { border-color: var(--muted); }
+  ::placeholder { color: var(--muted); opacity: .85; }
+  button.primary, button.secondary, button.danger, button.quiet { font: inherit; font-size: 13px; font-weight: 550; border-radius: var(--r-sm); padding: 6px 12px; cursor: pointer; border: 1px solid transparent; transition: background-color .12s ease, border-color .12s ease, color .12s ease; }
   button.primary { background: var(--accent); color: var(--accent-ink); }
-  button.secondary { background: var(--panel); color: var(--ink); border-color: var(--line); }
-  button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  button.secondary { background: var(--panel); color: var(--ink); border-color: var(--line-strong); }
+  button.secondary:hover:not(:disabled) { background: var(--hover); border-color: var(--muted); }
+  button.quiet { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--muted); }
+  button.quiet:hover { background: var(--chip); color: var(--ink); }
+  button.danger { background: transparent; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+  button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: var(--danger); }
   button:disabled { opacity: .5; cursor: default; }
+  #new-card { display: inline-flex; align-items: center; gap: 6px; }
   .spacer { flex: 1; }
-  .status { color: var(--muted); font-size: 12px; }
+  .status { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .status.error { color: var(--danger); }
-  main { display: grid; grid-template-columns: repeat(6, minmax(220px, 1fr)); gap: 12px; padding: 16px; overflow-x: auto; min-height: calc(100vh - 60px); align-items: start; }
-  .column { background: var(--chip); border-radius: 10px; padding: 8px; min-height: 120px; }
-  .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 4px 6px 8px; display: flex; justify-content: space-between; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); }
-  /* Off-screen cards skip layout and paint: long columns cost about as much as short ones. */
-  #columns .card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-  .card:hover, .card:focus-visible { border-color: var(--accent); outline: none; }
-  .card .title { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
-  .card .meta { color: var(--muted); font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  #status { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: min(52vw, 640px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #status[data-feed]::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  #status[data-feed="live"]::before { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+
+  /* Toolbar */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; flex: 0 1 620px; min-width: 0; }
+  .search-field { position: relative; flex: 1 1 280px; min-width: min(260px, 100%); display: flex; align-items: center; }
+  .search-field svg { position: absolute; left: 9px; color: var(--muted); pointer-events: none; }
+  #search { width: 100%; padding: 5px 30px; background: var(--bg); border-color: var(--line); font-size: 13px; }
+  #search:hover { border-color: var(--line-strong); }
+  #search:focus { background: var(--panel); }
+  #search::-webkit-search-cancel-button { display: none; }
+  .search-field kbd { position: absolute; right: 7px; font: 11px/16px var(--mono); padding: 0 5px; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 4px; pointer-events: none; }
+  #search:focus ~ kbd, #search:not(:placeholder-shown) ~ kbd { display: none; }
+  .filters label { display: inline-flex; gap: 7px; align-items: center; font-size: 13px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+  .filters label:hover { color: var(--ink); }
+  /* The checkbox, drawn as a switch. */
+  .filters label input { appearance: none; -webkit-appearance: none; flex: none; position: relative; width: 28px; height: 16px; margin: 0; padding: 0; border: 0; border-radius: 999px; background: var(--line-strong); cursor: pointer; transition: background-color .15s ease; }
+  .filters label input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s ease; }
+  .filters label input:checked { background: var(--accent); }
+  .filters label input:checked::after { transform: translateX(12px); }
+  #needs-you { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+    color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); transition: background-color .12s ease; }
+  #needs-you:hover { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+  #needs-you::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+
+  /* Lanes */
+  main { display: grid; grid-template-columns: repeat(6, minmax(200px, 1fr)); gap: 10px; padding: 12px 16px 16px; overflow-x: auto; min-height: calc(100vh - 60px); align-items: start; }
+  .column { --col: var(--muted); background: var(--lane); border-radius: var(--r-lg); padding: 0 8px 8px; min-height: 120px; }
+  .column[data-col="scheduled"] { --col: var(--violet); }
+  .column[data-col="queued"] { --col: var(--slate); }
+  .column[data-col="running"] { --col: var(--accent); }
+  .column[data-col="waiting"] { --col: var(--warn); }
+  .column[data-col="done"] { --col: var(--ok); }
+  .column[data-col="stopped"] { --col: var(--danger); }
+  .column h2 { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0 -8px 2px; padding: 11px 13px 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; background: var(--lane); border-radius: var(--r-lg) var(--r-lg) 0 0; }
+  .column h2::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--col); }
+  .column h2 span:first-of-type { flex: 1; min-width: 0; }
+  .column h2 .col-count { font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .column h2 .col-count { order: 2; }
+  .drop-action { order: 1; font-size: 11px; color: var(--accent); font-weight: 600; }
+  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 18px 8px; }
+  /* A board with no cards at all: one invitation in place of six empty lanes. */
+  #columns.board-empty .empty { visibility: hidden; }
+  #board-empty { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1; width: min(380px, 86vw); padding: 26px 28px 24px; text-align: center; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-hover); }
+  #board-empty h2 { margin: 0 0 6px; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  #board-empty p { margin: 0 0 16px; font-size: 13px; color: var(--muted); }
+  .show-more { width: 100%; font-size: 12px; }
+  /* Floating layer: overlays.js */
+  .tip, .hover-card, .ctx-menu { position: fixed; z-index: 30; margin: 0; }
+  .tip { max-width: 300px; padding: 5px 9px; border-radius: var(--r-sm); background: var(--ink); color: var(--bg); font-size: 12px; line-height: 1.4; white-space: pre-line; pointer-events: none; box-shadow: var(--shadow-hover); opacity: 0; transition: opacity .1s ease; }
+  .hover-card { width: 300px; padding: 12px 14px; font-size: 12.5px; line-height: 1.45; color: var(--ink); background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r); box-shadow: var(--shadow-float); pointer-events: none; opacity: 0; transition: opacity .12s ease; overflow-wrap: anywhere; }
+  .tip.on, .hover-card.on { opacity: 1; }
+  .tip.pinned { z-index: 31; pointer-events: auto; user-select: text; box-shadow: var(--shadow-float); }
+  .hover-card strong { font-weight: 650; }
+  .hover-card p { margin: 6px 0 0; }
+  .hover-card > div > :first-child { margin-top: 0; }
+  .hover-card pre { margin-top: 8px; max-height: 96px; overflow: hidden; white-space: pre-wrap; font-size: 11px; }
+  .hover-card dl { margin-top: 8px; font-size: 12px; gap: 3px 12px; }
+  .hover-card dl:empty { display: none; }
+  .hover-card .hover-error { color: var(--danger); white-space: pre-line; }
+  .hover-card .hover-note { color: var(--muted); }
+  .hover-card .chip { margin-top: 6px; }
+  .hover-card code { font: 11px var(--mono); }
+  .ctx-menu { min-width: 190px; max-width: 320px; padding: 4px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r); box-shadow: var(--shadow-float); }
+  .ctx-item { display: flex; align-items: center; justify-content: space-between; gap: 24px; width: 100%; padding: 6px 9px; font: inherit; font-size: 13px; text-align: left; color: var(--ink); background: transparent; border: 0; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+  .ctx-item:focus { outline: none; background: var(--chip); }
+  .ctx-item.is-danger { color: var(--danger); }
+  .ctx-item.is-danger:focus { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .ctx-item:disabled { color: var(--muted); opacity: .55; cursor: default; }
+  .ctx-item kbd { font: 11px var(--sans); color: var(--muted); }
+  .ctx-line { height: 1px; margin: 4px 2px; background: var(--line); }
+  /* Drawer: reference details fold away. */
+  .drawer-fold > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); }
+  .drawer-fold > summary:hover { color: var(--ink); }
+  .drawer-fold[open] > summary { margin-bottom: 8px; }
+  .hidden-note { color: var(--muted); font-size: 12px; text-align: center; padding: 22px 8px; border: 1px dashed var(--line-strong); border-radius: var(--r); }
+
+  /* Cards */
+  .card { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 11px; margin-bottom: 7px; cursor: pointer; box-shadow: var(--shadow); transition: border-color .12s ease, box-shadow .12s ease; }
+  /* Big boards: off-screen cards skip layout and paint, so long columns cost about as much as short ones.
+     Not on small boards, where cards glide (flip): a card that skips layout measures as its placeholder size. */
+  #columns.many .card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+  .card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-hover); }
+  .card:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+  .card.is-open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card .title { font-size: 13px; font-weight: 600; line-height: 1.35; letter-spacing: -.003em; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  .card .last { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+  .card .last.is-error { color: var(--danger); }
+  /* The card's hover card has the full story; faces keep one line, or two when it's your move or an error. */
+  @media (hover: hover) {
+    .card:not(.needs-you) .last:not(.is-error) { -webkit-line-clamp: 1; }
+    .column[data-col="done"] .card .last { display: none; }
+  }
+  .card .meta { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.35; display: flex; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+  .card .meta .source { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* On a card the engine link is a corner icon on hover: the card itself already opens on click. */
+  .card .backend-link { position: absolute; top: 6px; right: 6px; margin: 0; width: 24px; height: 24px; justify-content: center; gap: 0; font-size: 0; border-radius: var(--r-sm); background: var(--panel); border: 1px solid var(--line); opacity: 0; transition: opacity .12s ease; }
+  .card:hover .backend-link, .card:focus-within .backend-link { opacity: 1; }
+  @media (hover: none) { .card .backend-link { position: static; width: auto; height: auto; gap: 4px; margin-top: 6px; font-size: 12px; background: none; border: 0; opacity: 1; } }
+  .card .meta .when { flex: none; white-space: nowrap; }
+  .card .states { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
   .card.movable { cursor: grab; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
   .card.moving { opacity: .6; }
-  .drag-ghost { position: fixed; z-index: 10; margin: 0; pointer-events: none; cursor: grabbing; box-shadow: 0 12px 28px rgba(0,0,0,.28); border-color: var(--accent); will-change: transform; }
-  .drop-placeholder { border: 2px dashed var(--accent); border-radius: 8px; margin-bottom: 8px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  /* An agent is blocked until a person answers. */
+  .card.needs-you { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+  .card.needs-you:hover { border-color: var(--warn); }
+  .card.needs-you::before { content: ""; position: absolute; left: -1px; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; background: var(--warn); }
+  .live-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: live-pulse 1.8s ease-in-out infinite; }
+  @keyframes live-pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+  .chip { display: inline-block; font-size: 11px; font-weight: 550; line-height: 16px; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .chip.running { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
+  .chip.waiting, .chip.attention { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .chip.done { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .chip.stopped { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.scheduled { color: var(--violet); background: color-mix(in srgb, var(--violet) 13%, transparent); }
+  .title .chip { margin-left: 2px; vertical-align: 1px; }
+
+  /* Drag and drop */
+  .drag-ghost { position: fixed; z-index: 10; margin: 0; pointer-events: none; cursor: grabbing; box-shadow: var(--shadow-float); border-color: var(--accent); will-change: transform; }
+  .drop-placeholder { border: 2px dashed var(--accent); border-radius: var(--r); margin-bottom: 7px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
   body.dragging, body.dragging * { cursor: grabbing !important; }
   body.dragging .column { transition: opacity .15s ease, outline-color .15s ease; outline: 2px solid transparent; outline-offset: -2px; }
   body.dragging .column.drop-allowed { outline-color: color-mix(in srgb, var(--accent) 45%, transparent); }
   body.dragging .column.drop-disabled { opacity: .35; }
   body.dragging .card.drop-dim { opacity: .3; filter: grayscale(1); transition: opacity .15s ease; }
-  .drop-action { font-size: 10px; text-transform: none; letter-spacing: 0; color: var(--accent); font-weight: 600; }
   .drop-note { font-size: 11px; color: var(--muted); margin: 6px 4px 0; line-height: 1.35; }
   @media (prefers-reduced-motion: reduce) { body.dragging .column, body.dragging .card.drop-dim { transition: none; } }
-  .card .last { margin-top: 6px; font-size: 12px; color: var(--ink); background: var(--chip); border-radius: 4px; padding: 4px 6px; overflow-wrap: anywhere; }
-  .chip { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--chip); color: var(--muted); }
-  .chip.running { color: var(--accent); } .chip.waiting { color: var(--warn); } .chip.done { color: var(--ok); } .chip.stopped { color: var(--danger); }
-  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 0; }
-  .filters { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; flex: 1 1 320px; max-width: 640px; }
-  #search { flex: 1 1 220px; min-width: min(260px, 100%); }
-  .filters label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); white-space: nowrap; cursor: pointer; }
-  .filters label input { margin: 0; }
-  .show-more { width: 100%; font-size: 12px; }
-  .hidden-note { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0; }
-  aside { position: fixed; top: 0; right: 0; width: min(520px, 100vw); height: 100vh; height: 100dvh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.15); transform: translateX(100%); transition: transform .15s ease; z-index: 3; display: flex; flex-direction: column; }
-  aside.open { transform: none; }
-  aside .head { padding: 16px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: start; }
-  aside .head h3 { margin: 0; font-size: 16px; flex: 1; overflow-wrap: anywhere; }
-  aside .body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
-  aside h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+
+  /* Card drawer */
+  aside { position: fixed; top: 0; right: 0; width: min(560px, 100vw); height: 100vh; height: 100dvh; background: var(--panel); border-left: 1px solid var(--line); box-shadow: none; transform: translateX(100%); visibility: hidden; transition: transform .2s cubic-bezier(.2, .8, .2, 1), visibility 0s linear .2s; z-index: 3; display: flex; flex-direction: column; }
+  aside.open { transform: none; visibility: visible; box-shadow: var(--shadow-float); transition: transform .2s cubic-bezier(.2, .8, .2, 1); }
+  @media (prefers-reduced-motion: reduce) { aside, aside.open { transition: none; } }
+  aside .head { padding: 14px 16px 14px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
+  aside .head .head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  aside .head h3 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; line-height: 1.3; overflow-wrap: anywhere; }
+  #d-state { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+  #d-state:empty { display: none; }
+  aside .body { padding: 18px 20px 24px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 20px; }
+  aside h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 13px; }
   dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
-  ol.progress { margin: 0; padding: 8px 8px 8px 32px; background: var(--chip); border-radius: 6px; font-size: 13px; max-height: 260px; overflow-y: auto; overflow-wrap: anywhere; }
+  ol.progress { margin: 0; padding: 10px 12px 10px 34px; background: var(--chip); border-radius: var(--r); font-size: 13px; max-height: 260px; overflow-y: auto; overflow-wrap: anywhere; }
   ol.progress li { padding: 2px 0; }
-  pre { margin: 0; background: var(--chip); border-radius: 6px; padding: 8px; font-size: 12px; overflow: auto; max-height: 200px; }
+  ol.progress li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+  pre { margin: 0; background: var(--chip); border-radius: var(--r); padding: 10px 12px; font: 12px/1.5 var(--mono); overflow: auto; max-height: 220px; }
+  pre.is-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .row input { flex: 1; min-width: 180px; }
-  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 20px; width: min(440px, 92vw); }
-  dialog form { display: flex; flex-direction: column; gap: 10px; }
-  dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
-  .close { border: 0; background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
-  .dag-wrap { overflow: auto; background: var(--chip); border-radius: 8px; padding: 8px; max-height: 420px; }
-  .dag-wrap svg { display: block; margin: 0 auto; }
-  .dag-node { cursor: pointer; }
-  .dag-node rect.box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
-  .dag-node:hover rect.box, .dag-node:focus rect.box { stroke: var(--muted); outline: none; }
-  .dag-node.selected rect.box { stroke: var(--accent); stroke-width: 2.5; }
-  .dag-node text { fill: var(--ink); font-size: 12px; }
-  .dag-node text.st { fill: var(--muted); font-size: 10px; }
-  .dag-edge { fill: none; stroke: var(--muted); stroke-width: 1.4; }
-  .dag-edge.calls { stroke: var(--line); stroke-width: 1.2; }
-  .dag-edge.then { stroke: var(--accent); stroke-dasharray: 5 4; }
-  .bar-pending { fill: var(--line); } .bar-scheduled, .bar-queued { fill: var(--muted); } .bar-running { fill: var(--accent); }
-  .bar-waiting { fill: var(--warn); } .bar-done { fill: var(--ok); } .bar-stopped { fill: var(--danger); }
-  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  /* Dialogs */
+  dialog { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); color: var(--ink); padding: 22px; width: min(480px, 92vw); box-shadow: var(--shadow-float); }
+  dialog::backdrop { background: rgba(10, 13, 20, .5); backdrop-filter: blur(2px); }
+  dialog form { display: flex; flex-direction: column; gap: 12px; }
+  dialog label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 500; color: var(--ink); }
+  dialog label small { font-weight: 400; color: var(--muted); line-height: 1.4; }
+  #new-dialog { padding: 0; width: min(520px, 92vw); max-height: min(860px, 92vh); }
+  #new-dialog[open] { display: flex; flex-direction: column; }
+  #new-form { min-height: 0; flex: 1; padding: 20px 22px 0; overflow-y: auto; scroll-padding-bottom: 72px; }
+  .dialog-title { font-size: 16px; font-weight: 650; letter-spacing: -.01em; }
+  .dialog-actions { position: sticky; bottom: 0; margin: 4px -22px 0; padding: 12px 22px; display: flex; justify-content: flex-end; gap: 8px; background: var(--panel); border-top: 1px solid var(--line); }
+  details.advanced > summary { cursor: pointer; font-size: 13px; font-weight: 500; color: var(--muted); padding: 2px 0; }
+  details.advanced > summary:hover { color: var(--ink); }
+  details.advanced[open] > summary { margin-bottom: 10px; }
+  details.advanced .advanced-body { display: flex; flex-direction: column; gap: 12px; }
+  .close { flex: none; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; transition: background-color .12s ease, color .12s ease; }
+  .close:hover { background: var(--chip); color: var(--ink); }
+
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 8px; }
   .legend svg { vertical-align: middle; margin-right: 4px; }
-  .node-panel { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .node-panel { border: 1px solid var(--line); border-radius: var(--r); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
   .node-panel h5 { margin: 0; font-size: 14px; }
-  .dag-node text.kind { fill: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
-  .dag-node.agent rect.box { stroke-dasharray: 4 3; }
   #n-flow-fields { display: flex; flex-direction: column; gap: 10px; }
   #n-placement { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; }
   #n-placement h5 { margin: 0 0 4px; font-size: 13px; }
@@ -107,54 +243,121 @@
   #n-card-worker .fb-note { margin: 0; font-size: 12px; }
   #d-placement ul.placement-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .session-drawer #d-placement { padding: 12px 24px; border-bottom: 1px solid var(--line); }
+
+  /* Desktop: the page itself doesn't scroll. Lanes fill the window and each scrolls on its own,
+     so column headers and the toolbar stay put however long a column gets. */
+  @media (min-width: 701px) {
+    body { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+    body > header { flex: none; position: static; }
+    main { flex: 1; min-height: 0; align-items: stretch; overflow-y: hidden; }
+    .column { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+    .column h2 { position: sticky; top: 0; z-index: 1; }
+  }
+  /* Narrower desktops: drop what the controls already say, then let the rows wrap. */
+  @media (min-width: 701px) and (max-width: 1200px) {
+    .bar { gap: 8px; }
+    .tabs button { padding: 4px 8px; }
+    .board-picker > label { display: none; }
+    button.quiet { padding: 6px 8px; }
+  }
+  @media (min-width: 701px) and (max-width: 1040px) {
+    .bar { flex-wrap: wrap; }
+    .toolbar { row-gap: 8px; }
+  }
   /* Phones: one scrollable row of backend tabs, and the columns stacked top to bottom with empty
      ones collapsed to their header, so cards that need you are visible without sideways swiping. */
   @media (max-width: 700px) {
-    header { gap: 8px; padding: 10px 12px; }
+    body > header { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; }
+    .bar, .toolbar { display: contents; }
+    .spacer { display: none; }
+    /* Title and New card, then backends, then the board and its tools. */
+    h1 { flex: 1 1 auto; }
+    #new-card { order: 1; }
+    .tabs { order: 2; }
+    .board-picker, #flows-btn, #fleet-btn { order: 3; }
+    .board-picker { flex: 1 1 auto; }
+    .board-picker > label { display: none; }
+    .board-picker select { flex: 1 1 auto; min-width: 0; }
+    button.quiet { padding: 6px 8px; }
+    button.quiet svg { display: none; }
+    .filters { order: 4; }
+    #needs-you { order: 5; }
+    #status { order: 6; margin-left: auto; }
     .tabs { flex: 1 1 100%; overflow-x: auto; scrollbar-width: none; }
     .tabs button { white-space: nowrap; flex: 0 0 auto; }
     main { display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 12px; min-height: 0; overflow-x: visible; }
     .column { min-height: 0; }
-    .column.is-empty { padding: 4px 8px; }
-    .column.is-empty h2 { margin: 4px 0; }
-    .column.is-empty .empty { display: none; }
+    .column.is-empty { padding: 0 8px 2px; }
+    .column.is-empty .empty, .column.is-empty .hidden-note { display: none; }
     .filters { flex: 1 1 100%; max-width: none; }
+    .search-field kbd { display: none; }
+    #status { max-width: 100%; }
   }
 </style>
 <link rel="stylesheet" href="/static/chat.css">
+<link rel="stylesheet" href="/static/flow-graph.css">
 <link rel="stylesheet" href="/static/flow-builder.css">
 <link rel="stylesheet" href="/static/fleet.css">
 </head>
 <body>
 <header>
-  <h1>Agent Board</h1>
-  <div class="tabs" id="systems" role="group" aria-label="Backend"></div>
-  <label class="status" for="board">Board</label>
-  <select id="board" aria-label="Board"></select>
-  <button class="secondary" id="add-board" type="button">+ Board</button>
-  <button class="secondary" id="flows-btn" type="button" title="Create and edit flows that run on every backend">Flows</button>
-  <button class="secondary" id="fleet-btn" type="button" title="Execution PCs: registration, capabilities, live CPU/RAM and limits">Fleet</button>
-  <button class="primary" id="new-card" type="button">New card</button>
-  <div class="filters" role="search">
-    <input type="search" id="search" placeholder="Filter cards  (/)" aria-label="Filter cards" autocomplete="off" spellcheck="false"
-      title="Words match anything on a card: title, status, agent, workers, input and output.&#10;field:value narrows to one field: title task status agent flow id last error worker pool tag step, or a key in the input/output (goal:, output.summary:, input:).&#10;&quot;a phrase&quot;, -word to exclude, pool: for cards that have the field.">
-    <label><input type="checkbox" id="hide-finished"> Hide done / failed</label>
+  <div class="bar">
+    <h1>
+      <svg class="brand-mark" width="18" height="18" viewBox="0 0 18 18" fill="currentColor" aria-hidden="true"><rect x="1" y="2" width="4.4" height="14" rx="1.4"/><rect x="6.8" y="2" width="4.4" height="9" rx="1.4"/><rect x="12.6" y="2" width="4.4" height="11.5" rx="1.4"/></svg>
+      Agent Board
+    </h1>
+    <div class="tabs" id="systems" role="group" aria-label="Backend"></div>
+    <div class="board-picker">
+      <label class="status" for="board">Board</label>
+      <select id="board" aria-label="Board"></select>
+      <button class="secondary" id="add-board" type="button">+ Board</button>
+    </div>
+    <span class="spacer"></span>
+    <button class="quiet" id="flows-btn" type="button" title="Create and edit flows that run on every backend">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="1.5" width="5" height="4" rx="1"/><rect x="9.5" y="10.5" width="5" height="4" rx="1"/><path d="M4 5.5V9a3.5 3.5 0 0 0 3.5 3.5h2"/></svg>
+      Flows</button>
+    <button class="quiet" id="fleet-btn" type="button" title="Execution PCs: registration, capabilities, live CPU/RAM and limits">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2" width="13" height="9" rx="1.2"/><path d="M5.5 14h5M8 11v3"/></svg>
+      Fleet</button>
+    <button class="primary" id="new-card" type="button">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9"/></svg>
+      New card</button>
   </div>
-  <span class="spacer"></span>
-  <span class="status" id="status" role="status">Loading…</span>
+  <div class="bar toolbar">
+    <div class="filters" role="search">
+      <div class="search-field">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
+        <input type="search" id="search" placeholder="Filter cards" aria-label="Filter cards" autocomplete="off" spellcheck="false"
+          title="Words match anything on a card: title, status, agent, workers, input and output.&#10;field:value narrows to one field: title task status agent flow id last error worker pool tag step, or a key in the input/output (goal:, output.summary:, input:).&#10;&quot;a phrase&quot;, -word to exclude, pool: for cards that have the field.">
+        <kbd aria-hidden="true">/</kbd>
+      </div>
+      <label><input type="checkbox" id="hide-finished"> Hide done / failed</label>
+    </div>
+    <button id="needs-you" type="button" hidden title="Open the next card waiting on you"></button>
+    <span class="spacer"></span>
+    <span class="status" id="status" role="status">Loading…</span>
+  </div>
 </header>
 
 <main id="columns" aria-live="polite"></main>
+<div id="board-empty" hidden>
+  <h2>No cards on this board yet</h2>
+  <p>Create a card to start an agent or run a flow. It shows up here as soon as the engine has it.</p>
+  <button class="primary" id="empty-new-card" type="button">New card</button>
+</div>
 
 <aside id="drawer" aria-hidden="true" aria-labelledby="d-title" inert>
   <div class="head">
-    <h3 id="d-title"></h3>
+    <div class="head-text">
+      <h3 id="d-title"></h3>
+      <div id="d-state"></div>
+    </div>
     <span id="d-backend"></span>
     <button class="close" id="d-close" type="button" aria-label="Close">×</button>
   </div>
   <div class="body">
     <section id="d-placement" hidden aria-live="polite" aria-label="Fleet placement"></section>
-    <section id="d-facts-section"><dl id="d-facts"></dl></section>
+    <section id="d-facts-section"><details class="drawer-fold"><summary>Details</summary><dl id="d-facts"></dl></details></section>
     <section id="d-chat" class="session-chat" hidden aria-label="Agent session"></section>
     <section id="d-steer-section">
       <h4>Steer</h4>
@@ -174,20 +377,20 @@
     </section>
     <section id="d-dag-section" hidden>
       <h4 id="d-dag-title">Graph</h4>
-      <div class="dag-wrap" id="d-dag"></div>
+      <div id="d-dag"></div>
       <div class="legend" id="d-legend"></div>
       <div class="node-panel" id="d-node" hidden style="margin-top:10px"></div>
     </section>
     <section id="d-progress-section"><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
-    <section id="d-input-section" hidden><h4>Input</h4><pre id="d-input"></pre></section>
-    <section id="d-output-section"><h4>Output</h4><pre id="d-output"></pre></section>
+    <section id="d-input-section" hidden><details class="drawer-fold"><summary>Input</summary><pre id="d-input"></pre></details></section>
+    <section id="d-output-section"><h4 id="d-output-title">Output</h4><pre id="d-output"></pre></section>
     <section id="d-replay-section"><button class="secondary" id="d-replay" type="button">Run again (replay)</button></section>
   </div>
 </aside>
 
 <dialog id="new-dialog">
   <form id="new-form" method="dialog">
-    <strong>New card</strong>
+    <strong class="dialog-title">New card</strong>
     <label>Type
       <select id="n-kind">
         <option value="agent-session">Coding agent session (chat)</option>
@@ -201,17 +404,22 @@
     <label id="n-goal-wrap"><span id="n-goal-label">Goal</span> <textarea id="n-goal" rows="3" required></textarea></label>
     <div class="session-fields" id="n-session-fields">
       <label>Agent <select id="n-agent"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode v1</option><option value="opencode2">opencode v2</option><option value="omp">omp</option><option value="pi">pi</option><option value="demo">Demo agent · simulated, no model</option></select></label>
-      <label>Workspace <input id="n-workspace" placeholder="Leave blank for a disposable demo workspace"><small>The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
-      <label>Resume ACP session ID <input id="n-resume" placeholder="Optional"><small>Use the same agent and workspace as the original session. The agent must support loading sessions.</small></label>
+      <label><span>Workspace <span class="fl-info" title="The agent works in this local folder. A blank workspace creates a small demo project with a failing test."></span></span><input id="n-workspace" placeholder="Blank for a disposable demo"><small class="fl-help">The agent works in this local folder. A blank workspace creates a small demo project with a failing test.</small></label>
       <div id="n-card-worker"></div>
-      <label>Simulated failures <input id="n-failures" type="number" min="0" max="100" value="0"><small>Optional: exercise retry and recovery behavior.</small></label>
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="advanced-body">
+          <label><span>Resume ACP session ID <span class="fl-info" title="Use the same agent and workspace as the original session. The agent must support loading sessions."></span></span><input id="n-resume" placeholder="Optional"><small class="fl-help">Use the same agent and workspace as the original session. The agent must support loading sessions.</small></label>
+          <label><span>Simulated failures <span class="fl-info" title="Optional: exercise retry and recovery behavior."></span></span><input id="n-failures" type="number" min="0" max="100" value="0"><small class="fl-help">Optional: exercise retry and recovery behavior.</small></label>
+        </div>
+      </details>
       <p class="session-note" id="n-demo-note" hidden>The demo agent is simulated. It shows the chat, approvals, questions, and retry flow without running a coding model.</p>
     </div>
     <p class="session-note warning" id="n-production-note" hidden>Coding sessions need local CLIs and logins. Choose the Trigger.dev · local tab or Hatchet to create one.</p>
     <label class="agent-only" hidden>Steps <input id="n-turns" type="number" min="1" max="200" value="8"></label>
     <label class="agent-only" hidden>Seconds per step (time a human has to steer) <input id="n-step" type="number" min="1" max="3600" value="5"></label>
     <div id="n-placement" hidden aria-live="polite"></div>
-    <div class="row" style="justify-content:flex-end">
+    <div class="dialog-actions">
       <button class="secondary" value="cancel" formnovalidate type="submit">Close</button>
       <button class="primary" id="n-create" value="create" type="submit">Create session</button>
     </div>
@@ -224,8 +432,10 @@
 <!-- The fleet tab (fleet.js): registered execution PCs and their settings. -->
 <dialog id="fleet-dialog" class="fl-dialog" aria-labelledby="fl-title"></dialog>
 
+<script src="/static/overlays.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/card-search.js"></script>
+<script src="/static/flow-graph.js"></script>
 <script src="/static/flow-builder.js"></script>
 <script src="/static/fleet.js"></script>
 <script>
@@ -303,10 +513,20 @@ async function api(method, path, body) {
   return data;
 }
 
+// A length of time in the largest units that matter: 42s, 7m, 3h 12m, 2d 5h.
+function span(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+}
+
 function ago(iso) {
-  if (!iso) return "";
-  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
-  return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+  return iso ? span((Date.now() - new Date(iso)) / 1000) : "";
 }
 
 function queueText(card) {
@@ -350,13 +570,14 @@ function columnOrder(a, b) {
 // columns but keeps them as drop targets. Search covers every card; only the rendering is paged:
 // columns render PAGE cards at a time, so a board of thousands of runs stays responsive.
 const PAGE = 50;
-const FLIP_MAX = 300;          // above this many cards on screen, skip the glide animation
+const FLIP_MAX = 150;          // above this many cards on screen, skip the glide animation (see #columns.many in the CSS)
 const FINISHED = new Set(["done", "stopped"]);
 let query = "";
 let hideFinished = store.get("hideFinished", false);
 let shownLimit = {};           // column -> cards rendered (PAGE more per "Show more")
 let filtered = { cards: null, query: "", hits: [] };
 let renderedCount = 0;
+let loadedContext = null;      // the backend/board whose first snapshot has arrived
 
 function filteredCards() {
   if (filtered.cards === cards && filtered.query === query) return filtered.hits;
@@ -404,20 +625,27 @@ function renderBoard() {
     sortedColumns[col] = hidden ? [] : inCol;
     const more = !hidden && rest > 0 ? moreButton(col, rest) : null;
     const note = hidden && inCol.length ? el("div", { class: "hidden-note" }, `${inCol.length} hidden`)
-      : !inCol.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : "—") : null;
+      : !inCol.length ? el("div", { class: "empty" }, query && total[col] ? "No matches" : loadedContext === contextKey() ? "Nothing here" : "Loading…") : null;
     return el("section", { class: shown.length ? "column" : "column is-empty", "aria-label": COLUMN_LABELS[col], "data-col": col },
-      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", {}, count)), ...shown.map(cardNode), more, note);
+      el("h2", {}, el("span", {}, COLUMN_LABELS[col]), el("span", { class: "col-count" }, count)), ...shown.map(cardNode), more, note);
   }));
+  $("columns").classList.toggle("many", renderedCount > FLIP_MAX);
   if (renderedCount <= FLIP_MAX) flip(before);
   moreObserver?.disconnect();
   document.querySelectorAll("#columns .show-more").forEach((b) => moreObserver?.observe(b));
+  markOpenCard();
+  renderNeedsYou();
+  // Only once the board's first snapshot has arrived: until then "no cards" just means "not loaded".
+  const empty = cards.length === 0 && loadedContext === contextKey();
+  $("board-empty").hidden = !empty;
+  $("columns").classList.toggle("board-empty", empty);
 }
 
 // Scrolling near the end of a column loads its next page; the button remains a fallback.
 const sortedColumns = {};      // column -> its filtered, sorted cards as last rendered
 const moreObserver = typeof IntersectionObserver === "function" ? new IntersectionObserver((entries) => {
   for (const entry of entries) if (entry.isIntersecting) loadMore(entry.target.dataset.col);
-}, { rootMargin: "0px 0px 800px 0px" }) : null;
+}, { rootMargin: "0px 0px 800px 0px", scrollMargin: "0px 0px 800px 0px" }) : null; // rootMargin: page scroll (phones); scrollMargin: a lane's own scroll (desktop)
 
 function moreButton(col, rest) {
   return el("button", { type: "button", class: "secondary show-more", "data-col": col, onclick: () => loadMore(col) },
@@ -432,6 +660,7 @@ function loadMore(col) {
   shownLimit[col] = from + PAGE;
   button.before(...list.slice(from, to).map(cardNode));
   renderedCount += to - from;
+  $("columns").classList.toggle("many", renderedCount > FLIP_MAX);
   moreObserver?.unobserve(button);
   if (to < list.length) {
     const next = moreButton(col, list.length - to);
@@ -496,6 +725,7 @@ function beginDrag(pending) {
   const { card, node } = pending, rect = node.getBoundingClientRect();
   const ghost = node.cloneNode(true);
   ghost.classList.add("drag-ghost");
+  ghost.classList.remove("is-open");
   Object.assign(ghost.style, { width: `${rect.width}px`, left: `${rect.left}px`, top: `${rect.top}px` });
   document.body.append(ghost);
   const placeholder = el("div", { class: "drop-placeholder", style: `height:${rect.height}px` });
@@ -515,9 +745,25 @@ function beginDrag(pending) {
     } else if (action === "reorder" && card.reorder_note) section.append(el("p", { class: "drop-note" }, card.reorder_note));
   }
   dragMove(pending.x, pending.y);
+  requestAnimationFrame(dragAutoScroll);
+}
+
+// Holding a dragged card near the edge of a lane scrolls it, so any position can be reached.
+function dragAutoScroll() {
+  if (!drag) return;
+  const EDGE = 56, SPEED = 12, { x, y } = drag.pointer, lanes = $("columns");
+  const scrollBy = (node, delta) => { const before = node.scrollLeft + node.scrollTop; node.scrollBy(delta); return node.scrollLeft + node.scrollTop !== before; };
+  const lane = document.elementsFromPoint(x, y).map((n) => n.closest?.("#columns .column")).find(Boolean);
+  const box = lane?.getBoundingClientRect(), wide = lanes.getBoundingClientRect();
+  const down = box ? (y > box.bottom - EDGE ? SPEED : y < box.top + EDGE ? -SPEED : 0) : 0;
+  const across = x > wide.right - EDGE ? SPEED : x < wide.left + EDGE ? -SPEED : 0;
+  const moved = (down && scrollBy(lane, { top: down })) | (across && scrollBy(lanes, { left: across }));
+  if (moved) dragMove(x, y);
+  requestAnimationFrame(dragAutoScroll);
 }
 
 function dragMove(x, y) {
+  drag.pointer = { x, y };
   const { ghost, placeholder, dx, dy, card } = drag;
   ghost.style.transform = `translate(${x - dx - parseFloat(ghost.style.left)}px, ${y - dy - parseFloat(ghost.style.top)}px) rotate(1.5deg)`;
   const section = document.elementsFromPoint(x, y).map((n) => n.closest?.("#columns .column")).find(Boolean);
@@ -548,9 +794,7 @@ async function dragEnd(cancelled) {
   const at = ids.indexOf("*");
   const above = at > 0 ? ids[at - 1] : null, below = at >= 0 && at < ids.length - 1 ? ids[at + 1] : null;
   const unchanged = target === card.column && action === "reorder" && neighbours(card) === `${above}|${below}`;
-  const destructive = ["cancel"].includes(action) || (action === "restart" && ["running", "waiting"].includes(card.column));
-  const confirmed = !action || unchanged || !destructive ||
-    confirm(action === "cancel" ? `Cancel "${card.title}"? The engine stops it now.` : `Stop "${card.title}" and run it again from the start?`);
+  const confirmed = !action || unchanged || confirmMove(card, action);
   // Glide the card to where it lands (or back), then hand the board back to live updates.
   const home = (action && confirmed && !unchanged ? placeholder : null)?.getBoundingClientRect();
   if (home && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -563,21 +807,32 @@ async function dragEnd(cancelled) {
   document.querySelectorAll(".drop-action, .drop-note").forEach((n) => n.remove());
   document.querySelectorAll(".drop-dim").forEach((n) => n.classList.remove("drop-dim")); // card nodes are reused
   drag = null;
-  if (action && confirmed && !unchanged) {
-    // Optimistic: show the card in its new column until the engine reports back.
-    const key = contextKey(), local = cards.find((c) => c.id === card.id);
-    if (local && ["reorder", "restart", "start_now"].includes(action)) local.column = target === "scheduled" ? "scheduled" : "queued";
-    if (local && action === "reorder") local.order = estimateOrder(target, above, below);
-    movingIds.add(card.id);
-    renderBoard();
-    try {
-      setStatus(`${MOVE_LABELS[action]}…`);
-      const result = await api("POST", `/api/cards/${system}/${encodeURIComponent(card.id)}/move`, { board, to: target, above, below });
-      setStatus(result.id !== card.id ? `${MOVE_LABELS[action]}: started as a new run` : `${MOVE_LABELS[action]}: done`);
-      if (openCardId === card.id && result.id !== card.id) openCardId = result.id;
-    } catch (e) { setStatus(e.message, true); }
-    finally { movingIds.delete(card.id); if (key === contextKey()) await refresh(); }
-  } else renderBoard();
+  if (action && confirmed && !unchanged) await sendMove(card, target, action, above, below);
+  else renderBoard();
+}
+
+// A move that stops running work asks first, however it was started.
+function confirmMove(card, action) {
+  const destructive = action === "cancel" || (action === "restart" && ["running", "waiting"].includes(card.column));
+  return !destructive || confirm(action === "cancel" ? `Cancel "${card.title}"? The engine stops it now.` : `Stop "${card.title}" and run it again from the start?`);
+}
+function runMove(card, target, action, above, below) {
+  if (confirmMove(card, action)) sendMove(card, target, action, above, below);
+}
+async function sendMove(card, target, action, above, below) {
+  // Optimistic: show the card in its new column until the engine reports back.
+  const key = contextKey(), local = cards.find((c) => c.id === card.id);
+  if (local && ["reorder", "restart", "start_now"].includes(action)) local.column = target === "scheduled" ? "scheduled" : "queued";
+  if (local && action === "reorder") local.order = estimateOrder(target, above, below);
+  movingIds.add(card.id);
+  renderBoard();
+  try {
+    setStatus(`${MOVE_LABELS[action]}…`);
+    const result = await api("POST", `/api/cards/${system}/${encodeURIComponent(card.id)}/move`, { board, to: target, above, below });
+    setStatus(result.id !== card.id ? `${MOVE_LABELS[action]}: started as a new run` : `${MOVE_LABELS[action]}: done`);
+    if (openCardId === card.id && result.id !== card.id) openCardId = result.id;
+  } catch (e) { setStatus(e.message, true); }
+  finally { movingIds.delete(card.id); if (key === contextKey()) await refresh(); }
 }
 
 function neighbours(card) {
@@ -610,8 +865,7 @@ function flip(before, except = null) {
 // face text does (the "running 3m" clock), so re-rendering a big board mostly moves nodes.
 const cardNodes = new WeakMap(); // card -> { face, node }
 function cardNode(card) {
-  const when = card.column === "queued" || card.column === "scheduled" ? `waiting ${ago(card.created_at)}`
-    : card.finished_at ? `took ${duration(card) || "—"}` : `running ${ago(card.started_at)}`;
+  const when = card.column === "queued" || card.column === "scheduled" ? ago(card.created_at) : card.finished_at ? duration(card) : ago(card.started_at);
   const face = `${when}|${movingIds.has(card.id)}`;
   const known = cardNodes.get(card);
   if (known?.face === face) return known.node;
@@ -620,23 +874,147 @@ function cardNode(card) {
   return node;
 }
 
+// Sessions blocked until a person acts, and how to say so on a card.
+const NEEDS_YOU = { approval: "Needs approval", question: "Has a question", awaiting_review: "Ready for review", awaiting_input: "Needs direction", stuck: "Stuck" };
+const SESSION_LABELS = { starting: "Starting", retrying: "Retrying" };
+const WHEN_LABELS = { scheduled: "Waiting for", queued: "Waiting for", running: "Running for", waiting: "Open for", done: "Took", stopped: "Took" };
+const needsYou = (card) => !FINISHED.has(card.column) && card.session_state in NEEDS_YOU;
+// Engine statuses that only repeat the column a card is already in, so the card doesn't show them.
+const PLAIN_STATUS = { scheduled: ["scheduled"], queued: ["queued", "pending"], running: ["running", "executing"], waiting: ["waiting", "paused"],
+  done: ["completed", "completed_successfully", "succeeded", "success", "done"], stopped: [] };
+const statusWords = (status) => { const s = String(status || "").replaceAll("_", " ").toLowerCase(); return s.charAt(0).toUpperCase() + s.slice(1); };
+
+function stateChip(card) {
+  if (needsYou(card)) return el("span", { class: "chip attention" }, NEEDS_YOU[card.session_state]);
+  if (card.session_state in SESSION_LABELS) return el("span", { class: `chip ${card.column}` }, SESSION_LABELS[card.session_state]);
+  if (card.session_state || !card.status || PLAIN_STATUS[card.column]?.includes(card.status.toLowerCase())) return null;
+  if (card.error && card.status.toLowerCase() === "failed") return null; // the error, in red, already says so
+  return el("span", { class: `chip ${card.column}` }, statusWords(card.status));
+}
+
+// Where a queued card stands. The queue's totals are the same for every card, so they live in the drawer.
+function queuePosition(card) {
+  const q = card.queue || {};
+  if (card.column !== "queued") return "";
+  return [q.ahead == null ? "" : q.ahead === 0 ? "next up" : `${q.ahead} ahead`, q.paused ? "queue PAUSED" : ""].filter(Boolean).join(" · ");
+}
+
 function renderCard(card, when) {
-  const last = card.last;
-  const q = card.column === "queued" ? queueText(card) : "";
   const workers = [...new Set((card.workers || []).map((w) => w.id))];
+  const whenLabel = WHEN_LABELS[card.column] || "For";
   const movable = Object.keys(card.moves || {}).length > 0;
   const priority = card.column === "queued" && card.system === "hatchet" && card.priority ? el("span", { class: "chip", title: "Hatchet priority (1 low – 3 high)" }, `P${card.priority}`) : null;
-  return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
+  const chip = stateChip(card), q = queuePosition(card);
+  // What happened most recently; for a failed run, why it failed.
+  const detail = (card.column === "stopped" && card.error) || card.last;
+  const name = card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task;
+  // One line: who is doing it and (right-aligned) for how long. Everything else is in the hover card.
+  const who = [name, q].filter(Boolean).join(" · ");
+  return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}${needsYou(card) ? " needs-you" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
       "aria-roledescription": movable ? "draggable card" : "card",
       onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
       onpointerdown: movable ? (e) => dragStart(e, card) : null },
     el("div", { class: "title" }, card.title, priority ? " " : null, priority),
-    el("div", { class: "meta" }, el("span", { class: `chip ${card.column}` }, card.session_state?.replaceAll("_", " ") || card.status), el("span", {}, card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task), el("span", {}, when),
-      workers.length ? el("span", { title: "Execution workers" }, `on ${workers.slice(0, 2).join(", ")}${workers.length > 2 ? ` +${workers.length - 2}` : ""}`) : null),
-    q ? el("div", { class: "meta", style: "margin-top:4px" }, q) : null,
-    last ? el("div", { class: "last" }, last) : null,
+    chip ? el("div", { class: "states" }, chip) : null,
+    detail ? el("div", { class: `last${detail === card.error ? " is-error" : ""}` }, detail) : null,
+    el("div", { class: "meta" },
+      card.column === "running" ? el("span", { class: "live-dot", title: "Running" }) : null,
+      el("span", { class: "source" }, who),
+      when ? el("span", { class: "when", "aria-label": `${whenLabel} ${when}` }, when) : null),
     backendLink(card.backend_url));
 }
+
+// ---------------------------------------------------------------- Hover card and right click
+const cardById = (id) => cards.find((c) => c.id === id);
+function cardDetails(card) {
+  const row = (name, value) => (value ? [el("dt", {}, name), el("dd", {}, value)] : []);
+  const workers = (card.workers || []).map((w) => [w.id, w.pool && `pool ${w.pool}`].filter(Boolean).join(" · ")).join("\n");
+  const detail = card.error || card.last;
+  const running = WHEN_LABELS[card.column] && (card.finished_at ? duration(card) : card.started_at ? ago(card.started_at) : ago(card.created_at));
+  return el("div", {}, el("strong", {}, card.title),
+    detail ? el("p", { class: card.error ? "hover-error" : "" }, detail) : null,
+    el("dl", {}, ...row(card.flow ? "Flow" : "Agent", card.flow || (card.agent === "demo" ? "Demo · simulated" : card.agent) || card.task),
+      ...row("Workers", workers), ...row(WHEN_LABELS[card.column]?.replace(" for", "") || "Time", running),
+      ...row("Queue", queueText(card)), ...row("Created", AgentChat.localTime(card.created_at))));
+}
+Overlays.hoverCard($("columns"), ".card[data-id]", (node) => {
+  const card = cardById(node.dataset.id);
+  return card && !drag ? cardDetails(card) : null;
+});
+
+function copyText(text, what) {
+  navigator.clipboard.writeText(text).then(() => setStatus(`Copied ${what}`), () => setStatus("Copy failed", true));
+}
+function setFilter(text) {
+  const box = $("search");
+  box.value = text; query = text; shownLimit = {}; renderSoon();
+}
+// The moves the engine allows for this card, the same ones as dragging it.
+function moveItems(card) {
+  const items = [];
+  const others = (col) => cards.filter((c) => c.column === col && c.id !== card.id).sort(columnOrder);
+  for (const [target, action] of Object.entries(card.moves || {})) {
+    const inColumn = others(target);
+    const first = inColumn[0]?.id ?? null, last = inColumn.at(-1)?.id ?? null;
+    if (action === "reorder") {
+      const order = [...inColumn, card].sort(columnOrder), at = order.indexOf(card);
+      items.push({ label: "Move to top", disabled: at === 0, onSelect: () => runMove(card, target, action, null, first) });
+      items.push({ label: "Move to bottom", disabled: at === order.length - 1, onSelect: () => runMove(card, target, action, last, null) });
+    } else {
+      const label = action === "restart" ? "Run again" : MOVE_LABELS[action] || action;
+      items.push({ label, danger: action === "cancel", onSelect: () => runMove(card, target, action, action === "restart" ? last : null, null) });
+    }
+  }
+  return items.sort((a, b) => Number(!!a.danger) - Number(!!b.danger));
+}
+function cardMenu(event, card) {
+  const moves = moveItems(card), worker = card.workers?.[0]?.id;
+  const url = /^https?:\/\//.test(card.backend_url || "") ? card.backend_url : null;
+  const copy = !navigator.clipboard;
+  Overlays.menu(event, [
+    { label: "Open", shortcut: "Enter", onSelect: () => openCard(card.id) },
+    url ? { label: `Open in ${SYSTEM_LABELS[system].split(" · ")[0]}`, onSelect: () => window.open(url, "_blank", "noopener,noreferrer") } : undefined,
+    ...(moves.length ? [null, ...moves] : []), null,
+    card.agent ? { label: `Only ${card.agent === "demo" ? "demo" : card.agent} cards`, onSelect: () => setFilter(`agent:${card.agent}`) } : undefined,
+    worker ? { label: `Only cards on ${worker}`, onSelect: () => setFilter(`worker:${worker}`) } : undefined,
+    { label: "Copy title", disabled: copy, onSelect: () => copyText(card.title, "the title") },
+    { label: "Copy run ID", disabled: copy, onSelect: () => copyText(card.id, "the run ID") },
+  ].filter((item) => item !== undefined));
+}
+function laneMenu(event) {
+  Overlays.menu(event, [{ label: "New card", onSelect: () => $("new-card").click() }, null,
+    { label: hideFinished ? "Show done / failed" : "Hide done / failed", onSelect: () => $("hide-finished").click() },
+    { label: "Clear filter", disabled: !query, onSelect: () => setFilter("") }]);
+}
+$("columns").addEventListener("contextmenu", (e) => {
+  if (e.pointerType === "touch" || e.target.closest("a, input, textarea, select")) return;
+  e.preventDefault();
+  if (drag) return;
+  const node = e.target.closest(".card[data-id]"), card = node && cardById(node.dataset.id);
+  if (card) cardMenu(e, card); else laneMenu(e);
+});
+
+// Show which card the drawer belongs to. Card nodes are reused, so this runs after every render.
+function markOpenCard() {
+  document.querySelector("#columns .card.is-open")?.classList.remove("is-open");
+  if (openCardId != null) document.querySelector(`#columns .card[data-id="${CSS.escape(openCardId)}"]`)?.classList.add("is-open");
+}
+
+// The cards waiting on a person, oldest first; the toolbar button walks through them.
+function waitingOnYou() {
+  return cards.filter(needsYou).sort((a, b) => cmp(a.started_at || a.created_at || "", b.started_at || b.created_at || ""));
+}
+function renderNeedsYou() {
+  const n = waitingOnYou().length, button = $("needs-you");
+  button.hidden = !n;
+  button.textContent = n === 1 ? "1 needs you" : `${n} need you`;
+}
+$("empty-new-card").addEventListener("click", () => $("new-card").click());
+$("needs-you").addEventListener("click", () => {
+  const list = waitingOnYou();
+  if (!list.length) return;
+  openCard(list[(list.findIndex((c) => c.id === openCardId) + 1) % list.length].id);
+});
 
 function backendLink(url) {
   if (!url || !/^https?:\/\//.test(url)) return null;
@@ -649,8 +1027,7 @@ function backendLink(url) {
 
 function duration(card) {
   if (!card.started_at || !card.finished_at) return "";
-  const s = (new Date(card.finished_at) - new Date(card.started_at)) / 1000;
-  return s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m`;
+  return span((new Date(card.finished_at) - new Date(card.started_at)) / 1000);
 }
 
 // ---- Back gesture / Back button closes the open overlay instead of leaving the board.
@@ -699,19 +1076,28 @@ const touchScreen = matchMedia("(pointer: coarse)").matches;
 
 function openCard(id) {
   if (id !== openCardId) {
-    dag = null; selectedNode = null; nodeLog.reset(null); $("d-dag-section").hidden = true;
+    dag = null; selectedNode = null; runGraphShape = null; $("d-dag").classList.remove("expanded"); nodeLog.reset(null); $("d-dag-section").hidden = true;
     const at = system;
     cardLog.reset(id, (before) => api("GET", `/api/cards/${at}/${encodeURIComponent(id)}/logs?limit=1000&before=${before}`));
   }
-  openCardId = id; renderDrawer(); refreshDag(); refresh(); $("drawer").inert = false; $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false");
+  openCardId = id; markOpenCard(); renderDrawer(); refreshDag(); refresh(); $("drawer").inert = false; $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false");
   pushOverlay("drawer", () => hideDrawer());
   if (touchScreen) return;
   if (cards.find(c => c.id === id)?.task === "agent-session") chat.focus(); else $("d-instruction").focus(); }
-function hideDrawer() { openCardId = null; watchPlacement(); $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
+function hideDrawer() { openCardId = null; markOpenCard(); watchPlacement(); $("drawer").inert = true; $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); }
 function closeDrawer() { const wasOpen = openCardId !== null; hideDrawer(); if (wasOpen) dropOverlay("drawer"); }
 // Hidden by Back as well as by ✕: either way, stop streaming the card's transcript.
 new MutationObserver(() => { if (!$("drawer").classList.contains("open")) refresh(); })
   .observe($("drawer"), { attributes: true, attributeFilter: ["class"] });
+
+// Under the drawer's title: the card's state at a glance, then who is doing the work and for how long.
+function drawerState(card) {
+  const session = card.task === "agent-session";
+  const chip = session ? null : stateChip(card) || el("span", { class: `chip ${card.column}` }, card.column === "stopped" ? statusWords(card.status) : COLUMN_LABELS[card.column] || statusWords(card.status));
+  const name = card.flow ? `flow · ${card.flow}` : card.agent === "demo" ? "Demo · simulated" : card.agent || card.task;
+  const time = card.finished_at ? (duration(card) && `took ${duration(card)}`) : card.started_at ? `started ${ago(card.started_at)} ago` : card.created_at ? `created ${ago(card.created_at)} ago` : "";
+  return [chip, ...[name, time].filter(Boolean).map((text) => el("span", {}, text))].filter(Boolean);
+}
 
 function renderDrawer() {
   const card = cards.find((c) => c.id === openCardId);
@@ -723,6 +1109,7 @@ function renderDrawer() {
   $("d-progress-section").hidden = session;
   if (session) chat.render(card, runKey());
   $("d-title").textContent = card.title;
+  $("d-state").replaceChildren(...drawerState(card));
   $("d-backend").replaceChildren(...[backendLink(card.backend_url)].filter(Boolean));
   const workers = (card.workers || []).map((w) => `${w.step ? w.step + ": " : ""}${w.id}${w.pool ? ` · pool ${w.pool}` : ""}${w.tags?.length ? ` · ${w.tags.join(", ")}` : ""}`);
   const facts = [["Status", card.status], ["Task", card.task], ["Run id", card.id], ["Workers", workers.join("\n")], ["Created", AgentChat.localTime(card.created_at)], ["Started", AgentChat.localTime(card.started_at)], ["Finished", AgentChat.localTime(card.finished_at)]];
@@ -736,6 +1123,8 @@ function renderDrawer() {
   const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
   $("d-output-section").hidden = session || !output;
   $("d-output").textContent = output;
+  $("d-output").classList.toggle("is-error", !!card.error);
+  $("d-output-title").textContent = card.error ? "Error" : "Output";
   $("d-input-section").hidden = session || card.input == null;
   $("d-input").textContent = card.input != null ? JSON.stringify(card.input, null, 2) : "";
   $("d-replay-section").hidden = session || !["done", "stopped"].includes(card.column);
@@ -790,7 +1179,6 @@ function showPlacement(watch, card, data) {
 
 // ---------------------------------------------------------------- DAG view
 const SVG_NS = "http://www.w3.org/2000/svg";
-const NODE_W = 150, NODE_H = 44, GAP_X = 24, GAP_Y = 44, PAD = 12;
 let dag = null;          // {model, nodes, edges} for the open card
 let selectedNode = null; // node id
 
@@ -867,101 +1255,134 @@ function svg(tag, attrs = {}, ...children) {
   return node;
 }
 
-// Layered layout, top to bottom: a node's row = 1 + the deepest of its predecessors (nodes arrive
-// topologically sorted). Each node wants to sit under the average of its parents; nodes in a row
-// are then pushed apart just enough not to overlap, keeping the row centred on where they wanted to be.
-function layoutDag(graph) {
-  const preds = Object.fromEntries(graph.nodes.map((n) => [n.id, []]));
-  for (const e of graph.edges) if (preds[e.to] && preds[e.from]) preds[e.to].push(e.from);
-  const row = {};
-  for (const n of graph.nodes) row[n.id] = preds[n.id].length ? Math.max(...preds[n.id].map((p) => row[p] ?? 0)) + 1 : 0;
-  const rows = [];
-  for (const n of graph.nodes) (rows[row[n.id]] ??= []).push(n.id);
-  const step = NODE_W + GAP_X;
-  const x = {};
-  rows.forEach((ids) => {
-    const want = Object.fromEntries(ids.map((id, i) => [id,
-      preds[id].length ? preds[id].reduce((s, p) => s + x[p], 0) / preds[id].length : i * step]));
-    ids.sort((a, b) => want[a] - want[b]);
-    ids.forEach((id, i) => { x[id] = i === 0 ? want[id] : Math.max(want[id], x[ids[i - 1]] + step); });
-    const drift = ids.reduce((s, id) => s + x[id] - want[id], 0) / ids.length;
-    ids.forEach((id) => { x[id] -= drift; });
-  });
-  const xs = Object.values(x);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const pos = {};
-  for (const n of graph.nodes) pos[n.id] = { x: x[n.id] - minX + PAD, y: PAD + row[n.id] * (NODE_H + GAP_Y) };
-  return { pos, width: maxX - minX + NODE_W + 2 * PAD, height: PAD * 2 + rows.length * NODE_H + (rows.length - 1) * GAP_Y };
+// ---------------------------------------------------------------- A run's graph
+// The same viewer as the flow editor (flow-graph.js), with a run's data and a run's actions: looking
+// at what happened and acting on the run. Nothing here can change the flow itself; "Edit this flow" goes there.
+const GRAPH_TITLES = { declared: ["Flow graph", "Dependencies the engine enforces"], dataflow: ["Task graph", "Data dependencies recorded by Prefect"] };
+let runGraph = null, runGraphShape = null;
+const flowLayouts = new Map(); // flow name -> saved positions by step, or null
+
+function runGraphViewer() {
+  if (runGraph) return runGraph;
+  const expand = el("button", { type: "button", class: "secondary fg-icon", title: "Expand", onclick: () => {
+    $("d-dag").classList.toggle("expanded");
+    setTimeout(() => runGraph.fit(), 180);
+  } }, el("span", { class: "fg-sr" }, "Expand"),
+    svg("svg", { width: 15, height: 15, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": 1.4, "stroke-linecap": "round", "aria-hidden": "true" }, svg("path", { d: "M8 2v12M4 5l4-3 4 3M4 11l4 3 4-3" })));
+  runGraph = FlowGraph.mount({ label: "Run graph", autoFit: true, viewTools: [expand], on: {
+    select: (target) => { if (target.type === "node") selectNode(target.id); },
+    nodeKey: (e, id) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectNode(id); } },
+    menu: runGraphMenu,
+    card: runGraphCard,
+  } });
+  $("d-dag").replaceChildren(runGraph.element);
+  return runGraph;
+}
+
+// A portable flow appears where its author placed it, if the editor's layout covers every step.
+async function loadFlowLayout(name) {
+  if (flowLayouts.has(name)) return;
+  flowLayouts.set(name, null);
+  try {
+    const data = await api("GET", `/api/flow-documents/${encodeURIComponent(name)}`);
+    if (data.layout?.positions) { flowLayouts.set(name, data.layout.positions); runGraphShape = null; renderDag(); }
+  } catch { /* no saved layout: the automatic one is fine */ }
+}
+
+function runNodeStatus(n) {
+  // The engine reports a placed step as running while it still waits for a fleet worker.
+  const placing = !["done", "stopped"].includes(n.column) && ["queued", "waiting"].includes(n.execution?.state) && !n.execution.worker;
+  const status = !placing ? n.status.toLowerCase() : n.execution.intervention_needed ? "intervention needed" : n.execution.state === "waiting" ? "waiting for a worker" : "queued for a worker";
+  return { placing, status, state: placing ? "waiting" : n.column };
 }
 
 function renderDag() {
   const section = $("d-dag-section");
   if (!dag || !dag.nodes.length || (dag.nodes.length < 2 && !dag.nodes[0].kind)) { section.hidden = true; return; }
   section.hidden = false;
-  $("d-dag-title").textContent = { declared: "DAG (declared dependencies)", dataflow: "Task graph (data dependencies)" }[dag.model] || "Run graph (child runs)";
-  const { pos, width, height } = layoutDag(dag);
-  const visible = dag.edges.filter((e) => pos[e.from] && pos[e.to]);
-  // Spread each node's outgoing (bottom) and incoming (top) edge ends across its width, ordered
-  // by the x of the other end, so edges into a node with several parents don't all meet in a point.
-  const anchor = (end, other) => {
-    const groups = {};
-    for (const e of visible) (groups[e[end]] ??= []).push(e);
-    const at = new Map();
-    for (const list of Object.values(groups)) {
-      list.sort((p, q) => pos[p[other]].x - pos[q[other]].x);
-      list.forEach((e, i) => at.set(e, (NODE_W * (i + 1)) / (list.length + 1)));
-    }
-    return at;
-  };
-  const outX = anchor("from", "to"), inX = anchor("to", "from");
-  const edges = visible.map((e) => {
-    const a = pos[e.from], b = pos[e.to];
-    const x1 = a.x + outX.get(e), y1 = a.y + NODE_H, x2 = b.x + inX.get(e), y2 = b.y;
-    const bend = Math.max(20, (y2 - y1) / 2);
-    return svg("path", { class: `dag-edge ${e.kind}`, d: `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2 - 2}`,
-      "marker-end": `url(#arrow-${e.kind})` });
+  const [title, about] = GRAPH_TITLES[dag.model] || ["Run graph", "Child runs and the order they ran in"];
+  $("d-dag-title").textContent = title;
+  $("d-dag-title").title = about;
+  const flow = cards.find((c) => c.id === openCardId)?.flow;
+  if (flow) loadFlowLayout(flow);
+  const graph = runGraphViewer();
+  const ids = new Set(dag.nodes.map((n) => n.id));
+  const edges = dag.edges.filter((e) => ids.has(e.from) && ids.has(e.to));
+  const preds = Object.fromEntries(dag.nodes.map((n) => [n.id, []]));
+  for (const e of edges) preds[e.to].push(e.from);
+  const auto = FlowGraph.autoLayout(dag.nodes.map((n) => n.id), preds);
+  const saved = flowLayouts.get(flow);
+  const positions = saved && dag.nodes.every((n) => saved[n.step ?? n.id]) ? Object.fromEntries(dag.nodes.map((n) => [n.id, saved[n.step ?? n.id]])) : auto.positions;
+  const height = FlowGraph.bounds(positions).height;
+  $("d-dag").style.setProperty("--graph-height", `${Math.max(220, height + 72)}px`);
+  graph.render({
+    nodes: dag.nodes.map((n) => {
+      const { status, state } = runNodeStatus(n);
+      const took = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
+      return { id: n.id, label: n.label, sub: status + took, kind: n.kind, state, selected: n.id === selectedNode, problem: !!n.error, ariaLabel: `${n.label}: ${status}` };
+    }),
+    edges: edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
+    positions, ariaLabel: `Run graph with ${dag.nodes.length} steps. Tab to a step; Enter shows its output and logs.`,
   });
-  const nodes = dag.nodes.map((n) => {
-    const p = pos[n.id];
-    const label = n.label.length > 20 ? n.label.slice(0, 19) + "…" : n.label;
-    const time = n.finished_at && n.started_at ? ` · ${secs(n.started_at, n.finished_at)}` : "";
-    // The engine reports a placed step as running while it still waits for a fleet worker.
-    const placing = !["done", "stopped"].includes(n.column) && ["queued", "waiting"].includes(n.execution?.state) && !n.execution.worker;
-    const status = !placing ? n.status.toLowerCase() : n.execution.intervention_needed ? "intervention needed" : n.execution.state === "waiting" ? "waiting for a worker" : "queued for a worker";
-    return svg("g", { class: `dag-node${n.kind ? " " + n.kind : ""}${n.id === selectedNode ? " selected" : ""}`, transform: `translate(${p.x},${p.y})`,
-      tabindex: "0", role: "button", "aria-label": `${n.label}: ${status}`,
-      onclick: () => selectNode(n.id), onkeydown: (ev) => { if (ev.key === "Enter") selectNode(n.id); } },
-      svg("title", {}, `${n.label} — ${placing ? FlowBuilder.executionText(n.execution) : n.status}`),
-      svg("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 8 }),
-      svg("rect", { class: `bar-${placing ? "waiting" : n.column}`, width: 5, height: NODE_H - 8, x: 4, y: 4, rx: 2 }),
-      svg("text", { x: 16, y: 18 }, label),
-      svg("text", { class: "st", x: 16, y: 34 }, status + time),
-      n.kind ? svg("text", { class: "kind", x: NODE_W - 8, y: 13, "text-anchor": "end" }, n.kind) : null);
-  });
-  const markers = ["depends", "calls", "then"].map((kind) =>
-    svg("marker", { id: `arrow-${kind}`, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" },
-      svg("path", { d: "M0,0 L10,5 L0,10 z", class: `dag-edge ${kind}`, style: "stroke-dasharray:none" })));
-  $("d-dag").replaceChildren(svg("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "Run graph" },
-    svg("defs", {}, ...markers), ...edges, ...nodes));
+  // A new graph, or one whose steps changed, is fitted; a later update leaves the view where the user put it.
+  const shape = `${openCardId}|${JSON.stringify(positions)}`;
+  if (shape !== runGraphShape) { runGraphShape = shape; graph.fit(); }
   renderLegend();
   renderNodePanel();
 }
 
+// Only runs whose graph has more than one kind of line need telling them apart.
 function renderLegend() {
-  const line = (kind) => svg("svg", { width: 26, height: 8 }, svg("path", { class: `dag-edge ${kind}`, d: "M1,4 L25,4" }));
-  const items = dag.model === "declared"
-    ? [[line("depends"), "depends on (enforced by the engine)"]]
-    : dag.model === "dataflow"
-      ? [[line("depends"), "passed its result to (recorded by Prefect)"]]
-      : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]];
-  if (dag.nodes.some((n) => n.kind)) items.push([svg("svg", { width: 26, height: 12 }, svg("rect", { x: 1, y: 1, width: 24, height: 10, rx: 3, class: "box", style: "fill:none;stroke:var(--muted);stroke-dasharray:4 3" })), "agent step (dashed) / program step"]);
-  $("d-legend").replaceChildren(...items.map(([icon, text]) => el("span", {}, icon, text)),
-    el("span", {}, "Click a node for its output and logs"));
+  const line = (kind) => svg("svg", { width: 26, height: 8 }, svg("path", { class: `fg-line ${kind}`, d: "M1,4 L25,4" }));
+  $("d-legend").replaceChildren(...(GRAPH_TITLES[dag.model] ? [] : [[line("calls"), "parent started child run"], [line("then"), "ran after (inferred from timing)"]])
+    .map(([icon, text]) => el("span", {}, icon, text)));
+}
+
+function runGraphCard(target) {
+  if (target.type === "edge") {
+    const kind = dag?.edges.find((e) => e.from === target.from && e.to === target.to)?.kind;
+    const label = (id) => dag.nodes.find((n) => n.id === id)?.label || id;
+    return el("div", {}, el("p", {}, el("strong", {}, label(target.to)), { calls: " was started by ", then: " ran after " }[kind] || " waits for ", el("strong", {}, label(target.from))));
+  }
+  const n = dag?.nodes.find((x) => x.id === target.id);
+  if (!n) return null;
+  const { placing, status } = runNodeStatus(n);
+  const worker = n.execution?.worker;
+  const row = (name, value) => (value ? [el("dt", {}, name), el("dd", {}, value)] : []);
+  return el("div", {}, el("strong", {}, n.label),
+    placing ? el("p", {}, FlowBuilder.executionText(n.execution)) : null,
+    n.error ? el("p", { class: "hover-error" }, n.error) : null,
+    el("dl", {}, ...row("Status", status), ...row("Agent", n.agent), ...row("Worker", worker && [worker.id, worker.pool && `pool ${worker.pool}`].filter(Boolean).join(" · ")),
+      ...row("Started", AgentChat.localTime(n.started_at)), ...row("Took", n.started_at && n.finished_at ? secs(n.started_at, n.finished_at) : null)));
+}
+
+// What you can do with a run from its graph. None of it edits the flow.
+function runGraphMenu(event, target) {
+  const card = cards.find((c) => c.id === openCardId), node = target.type === "node" ? dag?.nodes.find((n) => n.id === target.id) : null;
+  const edit = card?.flow ? [{ label: "Edit this flow", onSelect: () => openFlowEditor(card.flow) }] : [];
+  if (!node) { Overlays.menu(event, [{ label: "Fit on screen", onSelect: () => runGraph.fit() }, ...edit]); return; }
+  const restart = node.kind ? restartState(node, card) : null;
+  const url = /^https?:\/\//.test(node.backend_url || "") ? node.backend_url : null;
+  const copy = !navigator.clipboard;
+  Overlays.menu(event, [
+    { label: selectedNode === node.id ? "Hide output and logs" : "Show output and logs", onSelect: () => selectNode(node.id) },
+    ...(restart ? [{ label: "Restart step", disabled: restart.disabled, title: restart.title, onSelect: () => restartStep(node) }] : []),
+    ...(url ? [{ label: `Open in ${SYSTEM_LABELS[system].split(" · ")[0]}`, onSelect: () => window.open(url, "_blank", "noopener,noreferrer") }] : []), null,
+    { label: "Copy step name", disabled: copy, onSelect: () => copyText(node.step || node.label, "the step name") },
+    ...(node.ref ? [{ label: "Copy run ID", disabled: copy, onSelect: () => copyText(node.ref, "the run ID") }] : []),
+    ...(edit.length ? [null, ...edit] : []),
+  ]);
+}
+
+async function openFlowEditor(name) {
+  flowsDialog.showModal();
+  pushOverlay("flows", onFlowsBack);
+  await flowBuilder.open();
+  await flowBuilder.show(name);
 }
 
 function secs(a, b) {
-  const s = (new Date(b) - new Date(a)) / 1000;
-  return s < 60 ? `${s.toFixed(1)}s` : `${Math.round(s / 60)}m`;
+  return span((new Date(b) - new Date(a)) / 1000);
 }
 
 function selectNode(id) {
@@ -1004,25 +1425,36 @@ function renderNodePanel() {
   nodeLog.render();
 }
 
+// Whether a step can be restarted now, and why or why not. The panel's button and the graph's menu share it.
+function restartState(node, card) {
+  const disabled = !node.restart_supported || !node.ref || !["done", "stopped"].includes(card?.column);
+  return { disabled, title: !node.restart_supported ? node.restart_reason || "This engine has no native dependent-step replay"
+    : disabled ? "Stop or finish the flow before restarting a step"
+    : node.restart_mode === "runtime" ? "Start a new run from this step and its descendants, reusing other results and workspace files"
+    : "Replay this step; the engine restarts its dependent descendants" };
+}
+// Resolves false if the engine refused, so the button can be used again.
+async function restartStep(node) {
+  const current = runKey(), ref = node.ref, wanted = restartWorkers.get(nodeKey(ref));
+  try {
+    const data = await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(ref)}/restart`, wanted ? { worker: wanted } : {});
+    if (current !== runKey()) return true;
+    if (data.replayed) { dag.final = false; refreshDag(); setStatus("Engine accepted step replay; watching the run…"); }
+    else { pendingOpen = data.id; setStatus("Restart created; waiting for the new run…"); }
+    refresh();
+    return true;
+  } catch (e) { if (current === runKey()) setStatus(e.message, true); return false; }
+}
+
 function renderFlowNode(panel, node) {
   const card = cards.find(c => c.id === openCardId), key = nodeKey(node.ref);
   const restart = el("button", { class: "secondary restart-step", type: "button", onclick: async () => {
-    const current = runKey(), ref = node.ref;
     restart.disabled = true;
-    try {
-      const wanted = restartWorkers.get(key);
-      const data = await api("POST", `/api/cards/${system}/${encodeURIComponent(openCardId)}/nodes/${encodeURIComponent(ref)}/restart`, wanted ? {worker:wanted} : {});
-      if (current !== runKey()) return;
-      if (data.replayed) { dag.final = false; refreshDag(); setStatus("Engine accepted step replay; watching the run…"); }
-      else { pendingOpen = data.id; setStatus("Restart created; waiting for the new run…"); }
-      refresh();
-    } catch (e) { if (current === runKey()) { setStatus(e.message, true); restart.disabled = false; } }
+    if (!(await restartStep(node))) restart.disabled = false;
   } }, "Restart step");
-  restart.disabled = !node.restart_supported || !node.ref || !["done", "stopped"].includes(card?.column);
-  restart.title = !node.restart_supported ? node.restart_reason || "This engine has no native dependent-step replay"
-    : restart.disabled ? "Stop or finish the flow before restarting a step"
-    : node.restart_mode === 'runtime' ? "Start a new run from this step and its descendants, reusing other results and workspace files"
-    : "Replay this step; the engine restarts its dependent descendants";
+  const can = restartState(node, card);
+  restart.disabled = can.disabled;
+  restart.title = can.title;
   const header = el("div", { class: "row" }, el("h5", {}, `${node.label} · ${node.kind}`), backendLink(node.backend_url), restart);
   const actual = node.execution?.worker;
   header.append(actual ? el('span', {class:'status'}, `Executed by ${actual.id} on ${actual.hostname} · pool ${actual.pool}${actual.tags?.length ? ' · '+actual.tags.join(', ') : ''}`)
@@ -1095,7 +1527,7 @@ async function act(action, body) {
   catch (e) { if (key === runKey()) setStatus(e.message, true); }
 }
 
-function setStatus(text, error = false) { const s = $("status"); s.textContent = text; s.classList.toggle("error", error); }
+function setStatus(text, error = false) { const s = $("status"); s.textContent = text; s.title = text; s.classList.toggle("error", error); delete s.dataset.feed; }
 
 // ---------------------------------------------------------------- Live updates
 // One server-sent event stream per (backend, board, open card). The server watches the engine's
@@ -1134,7 +1566,9 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) close
 
 function liveStatus() {
   const count = query ? `${filteredCards().length} of ${cards.length} cards match` : `${cards.length} cards`;
-  setStatus(`${SYSTEM_LABELS[system] || system} · ${count} · ${feedLive ? "live" : "polling"} · updated ${new Date().toLocaleTimeString()}`);
+  setStatus(`${feedLive ? "Live" : "Polling"} · ${count}`);
+  $("status").dataset.feed = feedLive ? "live" : "polling";
+  $("status").title = `${feedLive ? "Live updates" : "Refreshing every few seconds"} · updated ${new Date().toLocaleTimeString()}`;
 }
 
 function onLive(message) {
@@ -1155,6 +1589,7 @@ function onLive(message) {
   if (message.type !== "cards") return;
   const before = cards.find((c) => c.id === openCardId);
   if (message.reset) {
+    loadedContext = contextKey();
     if (message.cards) cards = message.cards;
     else cards = message.rows.map((row) => {
       const card = {};
@@ -1361,6 +1796,7 @@ $("new-form").addEventListener("submit", async (e) => {
 const flowsDialog = $("flows-dialog");
 const flowBuilder = FlowBuilder.mount(flowsDialog, {
   onClose: () => closeFlows(),
+  onShowFleet: (query) => openFleet(query),
   onActivated: () => loadFlows(),
   // Run the active version: hide the builder (its unsaved edits stay for next time) and open New card.
   onRun: async (name) => { flowBuilder.hide(); flowsDialog.close(); await dropOverlay("flows"); openNewCard(`flow:${name}`); },
@@ -1373,6 +1809,8 @@ async function closeFlows() {
   flowsDialog.close(); await dropOverlay("flows");
   return true;
 }
+// Steps may have been moved in the editor: a run's graph picks up the new layout next time.
+flowsDialog.addEventListener("close", () => { flowLayouts.clear(); runGraphShape = null; if (dag && openCardId) renderDag(); });
 $("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOverlay("flows", onFlowsBack); flowBuilder.open(); });
 // Escape asks before discarding unsaved edits instead of closing straight away.
 flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
@@ -1380,7 +1818,9 @@ flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows()
 const fleetDialog = $("fleet-dialog");
 const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet() });
 async function closeFleet() { fleet.stop(); if (fleetDialog.open) { fleetDialog.close(); await dropOverlay("fleet"); } }
-$("fleet-btn").addEventListener("click", () => { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open(); });
+// Opens over the flow editor when a step asks to see its workers; closing returns to the editor.
+function openFleet(filter = "") { fleetDialog.showModal(); pushOverlay("fleet", () => { fleet.stop(); fleetDialog.close(); }); fleet.open({ filter }); }
+$("fleet-btn").addEventListener("click", () => openFleet());
 // Escape closes an open form first, then the fleet tab.
 fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
 
@@ -1404,7 +1844,7 @@ $("d-pause").addEventListener("click", async () => {
     system = systems.includes(store.get("system")) ? store.get("system") : systems[0];
     if (!boards.includes(board)) board = boards[0];
     setStatus(`${SYSTEM_LABELS[system] || system} · connecting…`);
-    renderHeader(); refresh(); loadFlows();
+    renderHeader(); renderBoard(); refresh(); loadFlows();
   } catch (e) { setStatus(e.message, true); }
 })();
 </script>

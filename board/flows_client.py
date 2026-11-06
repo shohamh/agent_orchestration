@@ -103,8 +103,14 @@ class FlowHost:
     async def delete_document(self, name: str, revision: str) -> tuple[int, Any]:
         return await self._call("DELETE", f"/documents/{quote(name, safe='')}?revision={quote(revision, safe='')}")
 
-    async def activation(self, name: str) -> tuple[int, Any]:
-        return await self._call("GET", f"/documents/{quote(name, safe='')}/activation")
+    async def activation(self, name: str, disable: bool = False) -> tuple[int, Any]:
+        return await self._call("GET", f"/documents/{quote(name, safe='')}/activation{'?disable=1' if disable else ''}")
+
+    async def deactivate(self, name: str, revision: str) -> tuple[int, Any]:
+        self._cache = None
+        result = await self._call("POST", f"/documents/{quote(name, safe='')}/deactivate", {"revision": revision}, timeout=180)
+        self._cache = None
+        return result
 
     async def activate(self, name: str, revision: str | None) -> tuple[int, Any]:
         self._cache = None

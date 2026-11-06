@@ -108,7 +108,7 @@ function previewOf(name) {
   return { name, revision, activeRevision: entry.active ? revisionOf(entry.active) : null, change, engines, disruptive,
     impact: crypto.createHash('sha256').update(JSON.stringify([revision, engines])).digest('hex').slice(0, 16) };
 }
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -116,7 +116,7 @@ const server = http.createServer(async (request, response) => {
   const json = (status, data) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data)); };
   if (url.pathname.startsWith('/api/')) calls.push({ method: request.method, path: url.pathname, query: url.search, body });
   try {
-    const m = url.pathname.match(/^\/api\/flow-documents(?:\/([^/]+))?(?:\/(layout|activation|activate))?$/);
+    const m = url.pathname.match(/^\/api\/flow-documents(?:\/([^/]+))?(?:\/(layout|activation|activate|deactivate))?$/);
     if (m) {
       const [, rawName, sub] = m, name = rawName && decodeURIComponent(rawName);
       if (!name && request.method === 'GET') return json(200, { documents: [...store.keys()].sort().map(docOf) });
@@ -139,7 +139,8 @@ const server = http.createServer(async (request, response) => {
         if (entry.active) entry.yaml = null; else store.delete(name);
         return json(200, { ok: true });
       }
-      if (sub === 'activation' && request.method === 'GET') return json(200, previewOf(name));
+      if (sub === 'activation' && request.method === 'GET') return json(200, url.searchParams.get('disable') ? { ...previewOf(name), change: 'remove', revision: null } : previewOf(name));
+      if (sub === 'deactivate' && request.method === 'POST') { entry.active = null; return json(200, { name, activeRevision: null, engines: [{ engine: 'hatchet', state: 'active', error: null }] }); }
       if (sub === 'activate' && request.method === 'POST') {
         if (fault.addRunOnActivate) { fault.addRunOnActivate = false; runs.hatchet.push({ system: 'hatchet', board: 'lab-a', id: 'run-2', title: 'Another run', status: 'RUNNING' }); }
         const pv = previewOf(name);
@@ -285,8 +286,8 @@ async function openFlows() {
 // ---------------------------------------------------------------- tests
 test('loads multi-agent-design: states in the list, parallel branches and the fan-in', async () => {
   await openFlows();
-  await waitFor('document.querySelectorAll(".fb-node").length === 4', 'four steps drawn');
-  assert.equal(await evaluate('document.querySelectorAll(".fb-edge").length'), 4);
+  await waitFor('document.querySelectorAll(".fg-node").length === 4', 'four steps drawn');
+  assert.equal(await evaluate('document.querySelectorAll(".fg-edge").length'), 4);
   const states = await evaluate('[...document.querySelectorAll(".fb-flow-item")].map(b => b.querySelector(".fb-flow-name").textContent + ":" + b.querySelector(".fb-chip").textContent)');
   assert.deepEqual(states, ['multi-agent-design:Active', 'old-flow:Removed', 'other-flow:Not active']);
   assert.equal(await nodeY('architecture'), await nodeY('risk_review'), 'the two agents run in parallel on one row');
@@ -359,19 +360,19 @@ test('unsaved changes guard switching flows and starting a new one', async () =>
   await type('dialog.fb-ask input', 'fan-flow');
   await choose('dialog.fb-ask select', 'empty');
   await click('dialog.fb-ask .fb-ask-actions button', 'Create');
-  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && document.querySelectorAll('.fb-node').length === 1`, 'new flow from the empty template');
+  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && document.querySelectorAll('.fg-node').length === 1`, 'new flow from the empty template');
   assert.equal(await evaluate(q('.fb-state') + '.textContent'), 'Not saved yet', 'a new flow has no state chip yet');
   assert.equal(store.get('multi-agent-design').yaml, MULTI_YAML, 'discarding never saved anything');
 });
 
 test('builds parallel branches and a fan-in by dragging, the step list and the inspector; cycles are refused', async () => {
-  for (const label of ['+ Agent step', '+ Agent step', '+ Program step']) { await click('.fb-toolbar button', label); await sleep(50); }
-  await waitFor('document.querySelectorAll(".fb-node").length === 4');
+  for (const label of ['+ Agent step', '+ Agent step', '+ Program step']) { await click('.fg-tools button', label); await sleep(50); }
+  await waitFor('document.querySelectorAll(".fg-node").length === 4');
   assert.equal(await evaluate('document.activeElement.dataset.focus'), 'step:id', 'a new step opens its form with the ID focused');
-  await click('.fb-toolbar button', 'Fit');
+  await click('.fg-tools button', 'Fit');
   // Drag a connector from first_step's output handle onto agent_1.
   await drag(await centre('[data-handle="first_step"] .dot'), await centre('[data-step="agent_1"] .box'));
-  await waitFor(`document.querySelector('.fb-edge[data-from="first_step"][data-to="agent_1"]')`, 'dragged dependency');
+  await waitFor(`document.querySelector('.fg-edge[data-from="first_step"][data-to="agent_1"]')`, 'dragged dependency');
   // The accessible control in the step list.
   await click('.fb-tab', 'Steps');
   await choose('select[aria-label="Add dependency: agent_2 waits for…"]', 'first_step');
@@ -387,10 +388,10 @@ test('builds parallel branches and a fan-in by dragging, the step list and the i
   assert.match(await evaluate(`[...${q('.fb-inspector select.fb-add-dep')}.options].find(o => o.value === 'program_1').textContent`), /would create a cycle/);
   assert.equal(await evaluate(`[...${q('.fb-inspector select.fb-add-dep')}.options].find(o => o.value === 'program_1').disabled`), true);
   await click('.fb-tab', 'Graph');
-  await click('.fb-toolbar button', 'Fit');
+  await click('.fg-tools button', 'Fit');
   await drag(await centre('[data-handle="program_1"] .dot'), await centre('[data-step="first_step"] .box'));
   await waitFor(`/cycle/.test(document.querySelector('.fb-status').textContent)`, 'cycle refused with a message');
-  assert.equal(await evaluate('document.querySelectorAll(".fb-edge").length'), 4);
+  assert.equal(await evaluate('document.querySelectorAll(".fg-edge").length'), 4);
   assert.equal(await nodeY('agent_1'), await nodeY('agent_2'));
   assert.ok(await nodeY('program_1') > await nodeY('agent_1'));
   await waitFor(`document.querySelector('.fb-yaml').value.includes('"program_1"') && !document.querySelector('.fb-yaml').readOnly`);
@@ -431,7 +432,7 @@ test('cycle errors from YAML show on nodes and in the problem list; invalid YAML
   const problems = await evaluate('[...document.querySelectorAll(".fb-problem")].map(p => p.textContent)');
   assert.ok(problems.some((t) => /first_step · needs.*cycle/.test(t)), problems.join('\n'));
   await click('.fb-tab', 'Graph');
-  assert.equal(await evaluate('document.querySelectorAll(".fb-node.has-error").length'), 4, 'every step in the cycle is marked');
+  assert.equal(await evaluate('document.querySelectorAll(".fg-node.has-error").length'), 4, 'every step in the cycle is marked');
   assert.match(await evaluate(q('[data-step="first_step"]') + '.getAttribute("aria-label")'), /1 problem/);
   await shot('desktop-cycle-errors');
   // Invalid YAML: the text stays, the graph keeps the last valid document, graph edits pause.
@@ -442,10 +443,10 @@ test('cycle errors from YAML show on nodes and in the problem list; invalid YAML
   assert.equal(await evaluate('document.querySelector(".fb-yaml").value'), broken);
   assert.match(await evaluate(q('.fb-banner') + '.textContent'), /last valid version/);
   await click('.fb-tab', 'Graph');
-  assert.equal(await evaluate('document.querySelectorAll(".fb-node").length'), 4);
-  await click('.fb-toolbar button', '+ Program step');
+  assert.equal(await evaluate('document.querySelectorAll(".fg-node").length'), 4);
+  await click('.fg-tools button', '+ Program step');
   await waitFor(`/Fix it, or discard the YAML changes/.test(document.querySelector('.fb-status').textContent)`);
-  assert.equal(await evaluate('document.querySelectorAll(".fb-node").length'), 4, 'no graph edit over invalid YAML');
+  assert.equal(await evaluate('document.querySelectorAll(".fg-node").length'), 4, 'no graph edit over invalid YAML');
   await click('.fb-tab', 'YAML');
   assert.equal(await evaluate('document.querySelector(".fb-yaml").value'), broken, 'switching tabs keeps the invalid text');
   await click('.fb-banner button', 'Discard YAML changes');
@@ -457,7 +458,7 @@ test('cycle errors from YAML show on nodes and in the problem list; invalid YAML
   await click('.fb-inspector .fb-need', 'program_1');
   await waitFor(`document.querySelectorAll('.fb-problem').length === 0 && document.querySelector('.fb-problems').hidden`);
   await click('.fb-tab', 'Graph');
-  assert.equal(await evaluate('document.querySelectorAll(".fb-node.has-error").length'), 0);
+  assert.equal(await evaluate('document.querySelectorAll(".fg-node.has-error").length'), 0);
 });
 
 test('a failed save keeps the edits; a stale revision shows both versions and never overwrites silently', async () => {
@@ -489,14 +490,14 @@ test('a failed save keeps the edits; a stale revision shows both versions and ne
   store.get('fan-flow').yaml = serialize(external);
   await click('.fb-actions button', 'Save draft');
   await answer('Load the saved version');
-  await waitFor(`document.querySelectorAll('.fb-node').length === 5 && !!document.querySelector('[data-step="external_step"]')`);
+  await waitFor(`document.querySelectorAll('.fg-node').length === 5 && !!document.querySelector('[data-step="external_step"]')`);
   assert.equal(await saveEnabled(), false);
   assert.equal(activateCalls(), 0);
 });
 function document_has_cycle_free() { return !/cycle/.test(store.get('fan-flow').yaml); }
 
 test('keyboard: Tab to a step, Enter selects, arrows nudge, Delete removes after confirmation', async () => {
-  await evaluate(q('.fb-svg') + '.focus()');
+  await evaluate(q('.fg-svg') + '.focus()');
   await press('Tab');
   assert.equal(await evaluate('document.activeElement.dataset.step'), 'first_step', 'steps are in the tab order; dependencies are not');
   await press('Enter');
@@ -524,8 +525,8 @@ test('keyboard: Tab to a step, Enter selects, arrows nudge, Delete removes after
   assert.equal(await evaluate('document.activeElement.textContent'), 'Delete step');
   await press('Enter');
   await waitFor(`!document.querySelector('[data-step="first_step"]')`);
-  assert.equal(await evaluate('document.querySelectorAll(".fb-edge").length'), 2);
-  assert.equal(await evaluate('document.activeElement === document.querySelector(".fb-svg")'), true);
+  assert.equal(await evaluate('document.querySelectorAll(".fg-edge").length'), 2);
+  assert.equal(await evaluate('document.activeElement === document.querySelector(".fg-svg")'), true);
   assert.equal(await saveEnabled(), true);
   await click('.fb-actions button', 'Save draft');
   await waitFor(`/Saved draft fan-flow/.test(document.querySelector('.fb-status').textContent)`);
@@ -557,7 +558,7 @@ test('long step IDs and descriptions are clipped in the graph and wrap in forms'
   assert.equal(await evaluate(`[...document.querySelectorAll('.fb-actions button')].find(b => b.textContent === 'Activate…').disabled`), true, 'unsaved drafts cannot be activated');
   await click(`[data-step="${long}"] .box`);
   assert.deepEqual(await sideways('.fb-inspector'), [], 'the long ID wraps everywhere in the form');
-  await click('.fb-toolbar button', 'Flow settings');
+  await click('.fg-tools button', 'Flow settings');
   assert.deepEqual(await sideways('.fb-inspector'), [], 'flow settings fit');
   await click('.fb-actions button', 'Save draft');
   await waitFor(`/Saved draft fan-flow/.test(document.querySelector('.fb-status').textContent)`);
@@ -566,13 +567,13 @@ const FB_NODE_W = 184;
 
 test('fields the forms do not cover (environment, setup, unknown keys) survive graph edits and stay visible', async () => {
   await click('.fb-flow-item', 'other-flow');
-  await waitFor(`document.querySelector('.fb-title').textContent === 'other-flow' && document.querySelectorAll('.fb-node').length === 2`);
-  await click('.fb-toolbar button', 'Flow settings');
+  await waitFor(`document.querySelector('.fb-title').textContent === 'other-flow' && document.querySelectorAll('.fg-node').length === 2`);
+  await click('.fg-tools button', 'Flow settings');
   assert.match(await evaluate(q('.fb-inspector') + '.textContent'), /Environment setup.*setup_environment step runs first/s);
   assert.equal(await evaluate(`['count', 'fast', 'note'].map(k => document.querySelector('.fb-inspector [aria-label="' + k + ' type"]').value).join()`), 'number,boolean,empty');
   await click('[data-step="helper"] .box');
   assert.match(await evaluate(q('.fb-inspector .fb-extra') + '.textContent'), /Other settings.*setup.*future_key/s);
-  await click('.fb-toolbar button', '+ Program step');
+  await click('.fg-tools button', '+ Program step');
   await waitFor(`document.querySelector('.fb-yaml').value.includes('program_1') && !document.querySelector('.fb-yaml').readOnly`);
   const sent = calls.filter((c) => c.path.endsWith('/serialize')).at(-1).body.document;
   assert.deepEqual(sent.environment, { agent: 'codex', files: [{ source: 'docs/', target: 'context/' }] });
@@ -581,19 +582,88 @@ test('fields the forms do not cover (environment, setup, unknown keys) survive g
   assert.deepEqual(sent.input, { count: 2, fast: true, note: null });
   await click('.fb-flow-item', 'fan-flow');
   await answer('Discard changes');
-  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && !!document.querySelector('.fb-node')`);
+  await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && !!document.querySelector('.fg-node')`);
+});
+
+test('graph: right click offers actions for a step, a dependency and the canvas; the menu sits inside the dialog', async () => {
+  const fresh = 'menu-flow';
+  store.set(fresh, { yaml: serialize({ name: fresh, input: {}, steps: { a: { kind: 'program', run: 'echo a', needs: [] }, b: { kind: 'agent', agent: 'codex', prompt: 'B', needs: ['a'], description: 'Second step' } } }), active: null, layout: null });
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await click('#flows-btn');
+  await waitFor(`[...document.querySelectorAll('.fb-flow-name')].some((n) => n.textContent === '${fresh}')`, 'the flow is listed');
+  await click('.fb-flow-item', fresh);
+  await waitFor('document.querySelector(\'[data-step="b"]\')', 'the graph');
+  await evaluate('document.getElementById("fb-tab-graph").click()');
+  await sleep(100);
+  const open = async (at) => {
+    await mouse('mouseMoved', at, 0);
+    await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: at.x, y: at.y, button: 'right', buttons: 2, clickCount: 1 });
+    await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: at.x, y: at.y, button: 'right', buttons: 0, clickCount: 1 });
+    await waitFor('document.querySelector(".ctx-menu")', 'the menu');
+    return evaluate('[...document.querySelectorAll(".ctx-item span")].map((n) => n.textContent)');
+  };
+  const pick = (label) => evaluate(`[...document.querySelectorAll('.ctx-item')].find((n) => n.textContent.startsWith(${JSON.stringify(label)})).click()`);
+  const stepLabels = await open(await centre('[data-step="b"] .box'));
+  assert.deepEqual(stepLabels, ['Edit step', 'Add agent step after', 'Add program step after', 'Duplicate', 'Copy step ID', 'Delete step']);
+  assert.equal(await evaluate('document.querySelector(".ctx-menu").parentElement.id'), 'flows-dialog', 'not under the modal dialog');
+  assert.match(await evaluate('document.querySelector(".fb-inspector h3").textContent'), /Step b/, 'right click selects it');
+  await pick('Duplicate');
+  await waitFor('document.querySelector(\'[data-step="b_copy"]\')', 'the copy');
+  assert.equal(await evaluate('document.querySelector(\'[data-step="b_copy"]\').getAttribute("aria-label").includes("waits for a")'), true);
+
+  // Undo and redo the duplicate.
+  await click('.fg-tools button', 'Undo');
+  await waitFor('!document.querySelector(\'[data-step="b_copy"]\')', 'undo removes the copy');
+  await click('.fg-tools button', 'Redo');
+  await waitFor('document.querySelector(\'[data-step="b_copy"]\')', 'redo restores it');
+  await click('.fg-tools button', 'Undo');
+  await waitFor('!document.querySelector(\'[data-step="b_copy"]\')');
+
+  const canvas = await evaluate(`(() => { const r = document.querySelector('.fg-svg').getBoundingClientRect(); return { x: r.right - 60, y: r.top + 90 }; })()`);
+  const canvasLabels = await open(canvas);
+  assert.equal(canvasLabels[0], 'Add agent step here');
+  assert.ok(canvasLabels.includes('Auto-layout'));
+  await pick('Add agent step here');
+  await waitFor('document.querySelector(\'[data-step="agent_1"]\')', 'a step added at the pointer');
+  const placed = await evaluate(`(() => { const r = document.querySelector('[data-step="agent_1"] .box').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  assert.ok(Math.abs(placed.y - canvas.y) < 90, 'near where the menu was opened');
+  await click('.fg-tools button', 'Undo');
+  await waitFor('!document.querySelector(\'[data-step="agent_1"]\')');
+
+  // Dropping a new dependency on empty space offers to create the next step there.
+  const handle = await centre('[data-handle="b"] .dot');
+  await drag(handle, canvas);
+  await waitFor('document.querySelector(".ctx-menu")', 'the add-a-step menu');
+  await pick('Add program step here');
+  await waitFor('document.querySelector(\'[data-step="program_1"]\')');
+  assert.match(await evaluate('document.querySelector(\'[data-step="program_1"]\').getAttribute("aria-label")'), /waits for b/);
+
+  // Hovering a step shows its details, and lights up what it connects to.
+  const over = await centre('[data-step="a"] .box');
+  // No button named: mouse() always says left, which the browser reports as a held button, and a drag shows no hover card.
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: over.x, y: over.y, button: 'none', buttons: 0 });
+  await waitFor('document.querySelector(".hover-card.on")', 'the hover card');
+  assert.match(await evaluate('document.querySelector(".hover-card").textContent'), /echo a/);
+  assert.equal(await evaluate('document.querySelector(".fg-svg").classList.contains("tracing") && document.querySelector(\'[data-step="b"]\').classList.contains("lit")'), true);
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 2, y: 2, button: 'none', buttons: 0 });
+  store.delete(fresh);
+  await click('.fb-close'); await sleep(50);
+  if (await evaluate('document.querySelector(".fb-ask")?.open')) await click('.fb-ask button', 'Discard changes');
+  await sleep(50);
+  await evaluate('document.querySelector("#flows-btn").click()');
+  await sleep(300);
 });
 
 test('dark theme uses the board\'s dark colours', async () => {
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
   await sleep(100);
   const colours = await evaluate(`({ dialog: getComputedStyle(document.querySelector('#flows-dialog')).backgroundColor,
-    box: getComputedStyle(document.querySelector('.fb-node .box')).fill, label: getComputedStyle(document.querySelector('.fb-node .label')).fill,
-    canvas: getComputedStyle(document.querySelector('.fb-canvas')).backgroundColor })`);
-  assert.deepEqual(colours, { dialog: 'rgb(27, 32, 41)', box: 'rgb(27, 32, 41)', label: 'rgb(230, 233, 240)', canvas: 'rgb(38, 44, 56)' });
+    box: getComputedStyle(document.querySelector('.fg-node .box')).fill, label: getComputedStyle(document.querySelector('.fg-node .label')).fill,
+    canvas: getComputedStyle(document.querySelector('.fg-canvas')).backgroundColor })`);
+  assert.deepEqual(colours, { dialog: 'rgb(27, 31, 39)', box: 'rgb(27, 31, 39)', label: 'rgb(233, 235, 241)', canvas: 'rgb(14, 16, 20)' });
   await shot('desktop-dark');
   await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] });
-  assert.equal(await evaluate(`getComputedStyle(document.querySelector('.fb-node .box')).fill`), 'rgb(255, 255, 255)');
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('.fg-node .box')).fill`), 'rgb(255, 255, 255)');
 });
 
 test('activation previews per-engine impact, needs explicit consent to interrupt, re-checks a changed impact, then Run opens New card', async () => {
@@ -645,7 +715,7 @@ test('closing with unsaved changes asks first (close button and Escape)', async 
   await click('.fb-close');
   await answer('Keep editing');
   assert.equal(await evaluate('document.querySelector("#flows-dialog").open'), true);
-  await evaluate(q('.fb-svg') + '.focus()');
+  await evaluate(q('.fg-svg') + '.focus()');
   await press('Escape');
   await answer('Discard changes');
   await waitFor('!document.querySelector("#flows-dialog").open');
@@ -657,29 +727,29 @@ test('closing with unsaved changes asks first (close button and Escape)', async 
 test('a new step is panned into view, even when auto-layout places it off screen', async () => {
   await openFlows();
   await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow'`, 'reopens the last flow');
-  await click('.fb-toolbar button', 'Auto-layout');
-  for (let i = 0; i < 6; i++) await click('.fb-toolbar button[aria-label="Zoom in"]');
-  const ids = () => evaluate('[...document.querySelectorAll(".fb-node")].map(n => n.dataset.step)');
-  const inView = (id) => evaluate(`(() => { const s = document.querySelector('.fb-svg').getBoundingClientRect(), b = document.querySelector('[data-step="${id}"] .box').getBoundingClientRect();
+  await click('.fg-tools button', 'Auto-layout');
+  for (let i = 0; i < 6; i++) await click('.fg-tools button[aria-label="Zoom in"]');
+  const ids = () => evaluate('[...document.querySelectorAll(".fg-node")].map(n => n.dataset.step)');
+  const inView = (id) => evaluate(`(() => { const s = document.querySelector('.fg-svg').getBoundingClientRect(), b = document.querySelector('[data-step="${id}"] .box').getBoundingClientRect();
     return b.left >= s.left && b.right <= s.right && b.top >= s.top && b.bottom <= s.bottom; })()`);
   for (let i = 0; i < 3; i++) {
     const before = await ids();
-    await click('.fb-toolbar button', '+ Program step');
-    await waitFor(`document.querySelectorAll(".fb-node").length === ${before.length + 1}`, 'the step is drawn');
+    await click('.fg-tools button', '+ Program step');
+    await waitFor(`document.querySelectorAll(".fg-node").length === ${before.length + 1}`, 'the step is drawn');
     const added = (await ids()).find((id) => !before.includes(id));
     assert.equal(await inView(added), true, `${added} is fully on the canvas`);
   }
-  assert.match(await evaluate(q('.fb-zoom') + '.textContent'), /^2\d\d%$/, 'panning keeps the zoom level');
+  assert.match(await evaluate(q('.fg-zoom') + '.textContent'), /^2\d\d%$/, 'panning keeps the zoom level');
   // A canvas narrower than the zoomed step: zoom out just enough to show it whole.
   await call('Emulation.setDeviceMetricsOverride', { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
   await sleep(200);
-  for (let i = 0; i < 6; i++) await click('.fb-toolbar button[aria-label="Zoom in"]');
+  for (let i = 0; i < 6; i++) await click('.fg-tools button[aria-label="Zoom in"]');
   const before = await ids();
-  await click('.fb-toolbar button', '+ Program step');
-  await waitFor(`document.querySelectorAll(".fb-node").length === ${before.length + 1}`, 'the step is drawn');
+  await click('.fg-tools button', '+ Program step');
+  await waitFor(`document.querySelectorAll(".fg-node").length === ${before.length + 1}`, 'the step is drawn');
   const added = (await ids()).find((id) => !before.includes(id));
   assert.equal(await inView(added), true, `${added} is fully on the narrow canvas`);
-  assert.ok(parseInt(await evaluate(q('.fb-zoom') + '.textContent')) < 250, 'the zoom drops only because the step could not fit');
+  assert.ok(parseInt(await evaluate(q('.fg-zoom') + '.textContent')) < 250, 'the zoom drops only because the step could not fit');
   await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
   await click('.fb-close');
   await answer('Discard changes');
@@ -697,7 +767,7 @@ test('phone: full screen, step list and form editing without sideways scrolling,
   await waitFor(`document.querySelector('.fb-title').textContent === 'fan-flow' && document.querySelector('.fb-steps-view:not([hidden]) .fb-step-row')`, 'phones start on the step list');
   const fits = () => evaluate(`(() => { const d = document.querySelector('#flows-dialog').getBoundingClientRect();
     return d.width === 375 && document.documentElement.scrollWidth <= 375 && document.querySelector('.fb').scrollWidth <= 375
-      && [...document.querySelectorAll('.fb *')].every(n => !n.getClientRects().length || n.getBoundingClientRect().right <= 375.5 || n.closest('.fb-flows, .fb-svg')); })()`);
+      && [...document.querySelectorAll('.fb *')].every(n => !n.getClientRects().length || n.getBoundingClientRect().right <= 375.5 || n.closest('.fb-flows, .fg-svg')); })()`);
   assert.equal(await fits(), true, 'full screen, nothing wider than the phone');
   const small = await evaluate(`[...document.querySelectorAll('.fb button, .fb select, .fb input:not([type=checkbox])')].filter(n => n.getClientRects().length && !n.closest('.fb-flows'))
     .map(n => [n.textContent || n.getAttribute('aria-label'), n.getBoundingClientRect().height]).filter(([, h]) => h < 44)`);
@@ -731,27 +801,27 @@ test('phone: full screen, step list and form editing without sideways scrolling,
   await waitFor(`/agent_1/.test(document.querySelector('[data-row="phone_step"] .fb-needs').textContent)`);
   // Graph view: a tap opens the form, a one-finger drag on the background pans.
   await click('.fb-tab', 'Graph');
-  await waitFor('document.querySelectorAll(".fb-node").length === 5');
+  await waitFor('document.querySelectorAll(".fg-node").length === 5');
   const handle = await evaluate(`(() => { const b = document.querySelector('[data-handle="agent_1"] .hit').getBoundingClientRect(); return Math.min(b.width, b.height); })()`);
   assert.ok(handle >= 44, `connector handle is a 44px target (${handle})`);
   await shot('phone-graph');
   const tap = async (at) => { await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] }); await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); await sleep(50); };
-  const before = await evaluate(q('.fb-viewport') + '.getAttribute("transform")');
-  const canvas = await evaluate(`(() => { const b = document.querySelector('.fb-svg').getBoundingClientRect(); return { x: b.left + 12, y: b.bottom - 12 }; })()`);
+  const before = await evaluate(q('.fg-viewport') + '.getAttribute("transform")');
+  const canvas = await evaluate(`(() => { const b = document.querySelector('.fg-svg').getBoundingClientRect(); return { x: b.left + 12, y: b.bottom - 12 }; })()`);
   await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [canvas] });
   for (let i = 1; i <= 6; i++) await call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: canvas.x + i * 10, y: canvas.y - i * 10 }] });
   await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await sleep(50);
-  assert.notEqual(await evaluate(q('.fb-viewport') + '.getAttribute("transform")'), before, 'one-finger drag pans');
+  assert.notEqual(await evaluate(q('.fg-viewport') + '.getAttribute("transform")'), before, 'one-finger drag pans');
   // Two fingers spreading apart zoom in.
-  const zoom = await evaluate(q('.fb-zoom') + '.textContent');
-  const mid = await evaluate(`(() => { const b = document.querySelector('.fb-svg').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+  const zoom = await evaluate(q('.fg-zoom') + '.textContent');
+  const mid = await evaluate(`(() => { const b = document.querySelector('.fg-svg').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
   await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: mid.x - 30, y: mid.y, id: 1 }, { x: mid.x + 30, y: mid.y, id: 2 }] });
   for (let i = 1; i <= 6; i++) await call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: mid.x - 30 - i * 12, y: mid.y, id: 1 }, { x: mid.x + 30 + i * 12, y: mid.y, id: 2 }] });
   await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await sleep(50);
-  assert.ok(parseInt(await evaluate(q('.fb-zoom') + '.textContent')) > parseInt(zoom), 'pinch zooms in');
-  await click('.fb-toolbar button', 'Fit');
+  assert.ok(parseInt(await evaluate(q('.fg-zoom') + '.textContent')) > parseInt(zoom), 'pinch zooms in');
+  await click('.fg-tools button', 'Fit');
   await tap(await centre('[data-step="phone_step"] .label'));
   await waitFor(`document.querySelector('.fb').classList.contains('fb-inspecting') && document.querySelector('.fb-inspector h3').textContent === 'Step phone_step'`, 'tap opens the form');
   await click('.fb-inspector .fb-back');
@@ -783,7 +853,7 @@ test('fleet compatibility per step: matches with detection times, waits, explain
   try { await waitFor(`document.querySelector('.fb-title').textContent === 'fleet-flow'`, 'fleet-flow opens'); }
   catch (error) { error.message += `; state: ${JSON.stringify(await evaluate(`({title: document.querySelector('.fb-title')?.textContent, ask: document.querySelector('dialog.fb-ask')?.open, status: document.querySelector('.fb-status')?.textContent, width: innerWidth, flow: document.querySelector('.fb')?.className})`))}`; throw error; }
   await click('.fb-tab', 'Graph');
-  await waitFor(`document.querySelectorAll('.fb-node').length === 3`, 'fleet-flow graph renders');
+  await waitFor(`document.querySelectorAll('.fg-node').length === 3`, 'fleet-flow graph renders');
   await click('[data-step="build"] .box');
   await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="ready"]')`, 'the step is checked against the fleet');
   const check = calls.filter((c) => c.path === '/api/launch/validate').at(-1).body;
@@ -793,6 +863,7 @@ test('fleet compatibility per step: matches with detection times, waits, explain
   assert.equal(await evaluate(`!!document.querySelector('.fb-inspector .fb-placement [data-worker="pc-a"] time[datetime="${fake.CHECKED}"]')`), true, 'last detected time');
   assert.match(await evaluate(q('.fb-inspector .fb-placement-source') + '.textContent'), /default worker in Flow settings/, 'says where the selection comes from');
   // A tag no worker in the pool has: blocked and explained; the draft still saves.
+  await evaluate(`document.querySelector('.fb-fold[data-fold="step-run"]').open = true`);
   await type('.fb-inspector [data-focus="step:build:worker-tags"]', 'cuda');
   await waitFor(`document.querySelector('.fb-inspector .fb-placement[data-status="blocked"]')`, 'missing tag blocks');
   const blocked = await evaluate(q('.fb-inspector .fb-placement') + '.textContent');
@@ -850,4 +921,84 @@ test('an ambiguous program asks for requires_command; declaring it clears the bl
 test('no uncaught page errors', () => {
   assert.equal(activateCalls(), 2, 'only the explicitly confirmed activations reached the server');
   assert.deepEqual(errors, []);
+});
+
+const dismiss = async () => { for (let i = 0; i < 40; i++) { if (await evaluate('document.querySelector(".fb-ask")?.open')) { await click('.fb-ask button', 'Close'); return; } await sleep(50); } };
+test('the sidebar filters flows; a switch enables or disables each, showing what it affects first; disabled flows are gray', async () => {
+  const fresh = 'switch-flow';
+  store.set(fresh, { yaml: serialize({ name: fresh, input: {}, steps: { a: { kind: 'program', run: 'echo a', needs: [] } } }), active: null, layout: null });
+  store.set('other-switch', { yaml: serialize({ name: 'other-switch', input: {}, steps: { b: { kind: 'program', run: 'echo b', needs: [] } } }), active: null, layout: null });
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await click('#flows-btn');
+  await waitFor(`document.querySelector('.fb-flow-item')`, 'the list');
+  await waitFor(`[...document.querySelectorAll('.fb-flow-name')].some((n) => n.textContent === '${fresh}')`, 'the flow is listed');
+  const names = () => evaluate('[...document.querySelectorAll(".fb-flow-name")].map((n) => n.textContent)');
+  const box = '.fb-filter';
+  await type(box, 'switch-flow');
+  await evaluate(`document.querySelector('${box}').dispatchEvent(new Event('input'))`);
+  assert.ok((await names()).includes(fresh));
+  assert.ok(!(await names()).includes('other-switch'), 'filtered out');
+  const row = `[...document.querySelectorAll('.fb-flow-row')].find((n) => n.textContent.includes('${fresh}'))`;
+  assert.equal(await evaluate(`${row}.querySelector('.fb-switch').getAttribute('aria-checked')`), 'false');
+  // Turning on goes through the activation preview.
+  await evaluate(`${row}.querySelector('.fb-switch').click()`);
+  await waitFor('document.querySelector(".fb-ask")?.open', 'the preview');
+  assert.match(await evaluate('document.querySelector(".fb-ask").textContent'), new RegExp(`Activate ${fresh}`));
+  await click('.fb-ask button', 'Activate');
+  await sleep(100);
+  await dismiss();  // the results of the activation
+  await waitFor(`${row}.querySelector('.fb-switch').getAttribute('aria-checked') === 'true'`, 'enabled');
+  // Turning off keeps the draft.
+  await evaluate(`${row}.querySelector('.fb-switch').click()`);
+  await waitFor('/Disabling/.test(document.querySelector(".fb-ask")?.textContent || "") && document.querySelector(".fb-ask").open', 'the disable preview');
+  assert.match(await evaluate('document.querySelector(".fb-ask").textContent'), /saved draft stays/);
+  await click('.fb-ask button', 'Disable');
+  await sleep(100);
+  await dismiss();
+  await waitFor(`${row}.querySelector('.fb-switch').getAttribute('aria-checked') === 'false'`, 'disabled');
+  assert.ok(calls.some((c) => c.method === 'POST' && c.path === `/api/flow-documents/${fresh}/deactivate`), 'asked the host to disable it');
+  assert.equal(store.get(fresh).yaml != null, true, 'the draft stays');
+  // The filter is cleared and the graph behaves: shift+scroll goes sideways; the ? stays open on click.
+  await evaluate(`(() => { const n = document.querySelector('${box}'); n.value = ''; n.dispatchEvent(new Event('input')); })()`);
+  await evaluate('document.getElementById("fb-tab-graph").click()');
+  await sleep(100);
+  const viewport = () => evaluate('document.querySelector(".fg-viewport").getAttribute("transform")');
+  const before = await viewport();
+  const mid = await centre('.fg-svg');
+  await call('Input.dispatchMouseEvent', { type: 'mouseWheel', x: mid.x, y: mid.y, deltaX: 0, deltaY: 80, modifiers: 8 });
+  await sleep(100);
+  const [bx, by] = before.match(/-?[\d.]+/g).map(Number), [ax, ay] = (await viewport()).match(/-?[\d.]+/g).map(Number);
+  assert.notEqual(ax, bx, 'moved sideways');
+  assert.equal(ay, by, 'not up or down');
+  await click('.fg-help');
+  await waitFor('document.querySelector(".tip.pinned.on")', 'the help');
+  assert.match(await evaluate('document.querySelector(".tip.pinned").textContent'), /Right-click/);
+  await click('.fg-help');
+  await waitFor('!document.querySelector(".tip.pinned")', 'closed again');
+  store.delete(fresh); store.delete('other-switch');
+  await click('.fb-close'); await sleep(50);
+  if (await evaluate('document.querySelector(".fb-ask")?.open')) await click('.fb-ask button', 'Discard changes');
+  await sleep(50);
+  await evaluate('document.querySelector("#flows-btn").click()');
+  await sleep(300);
+});
+
+test('a step shows how many workers can take it, and clicking opens the fleet filtered to what it needs', async () => {
+  store.set('count-flow', { yaml: serialize({ name: 'count-flow', input: {}, worker: { pool: 'build' }, steps: { build: { kind: 'program', run: 'python build.py', needs: [] } } }), active: null, layout: null });
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await click('#flows-btn');
+  await waitFor(`[...document.querySelectorAll('.fb-flow-name')].some((n) => n.textContent === 'count-flow')`, 'the flow');
+  await click('.fb-flow-item', 'count-flow');
+  await waitFor(`document.querySelector('.fb-title').textContent === 'count-flow'`);
+  await evaluate(`document.querySelector('[data-fold="flow-where"]').open = true`);
+  await waitFor(`document.querySelector('[data-where="build"] .fb-where-count')`, 'the count');
+  assert.match(await evaluate(`document.querySelector('[data-where="build"] .fb-where-count').textContent`), /^\d+$/);
+  assert.match(await evaluate(`document.querySelector('[data-where="build"]').getAttribute('title') || document.querySelector('[data-where="build"]').dataset.tip`), /workers can run build/);
+  await evaluate(`document.querySelector('[data-where="build"]').click()`);
+  await waitFor('document.querySelector("#fleet-dialog").open', 'the fleet');
+  assert.match(await evaluate('document.querySelector(".fl-filter-input").value'), /pool:build/);
+  assert.equal(await evaluate('document.querySelector("#flows-dialog").open'), true, 'over the editor, which stays where it was');
+  await evaluate('document.querySelector(\'[aria-label="Close fleet"]\').click()');
+  await waitFor('!document.querySelector("#fleet-dialog").open', 'back to the editor');
+  store.delete('count-flow');
 });
