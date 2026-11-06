@@ -10,7 +10,7 @@ import asyncio
 import os
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import aiohttp
 import json
@@ -132,8 +132,43 @@ class FlowHost:
                 **({'engine': engine} if engine else {})}
         return await self._request('POST', '/launch/validate', body, timeout=30)
 
-    async def validate_card(self, agent, worker, engine=None):
-        body = {'card': {'agent': agent, 'worker': worker}, **({'engine': engine} if engine else {})}
+    async def normalize_context(self, context):
+        return (await self._request('POST', '/launch/context', {'context': context}))['context']
+
+    # Uploads and schedules (New card). Schedules are stored by the flow host and started by the board.
+    async def save_upload(self, name, data):
+        return await self._request('POST', '/uploads', {'name': name, 'data': data}, timeout=120)
+
+    async def delete_upload(self, upload):
+        return await self._request('DELETE', f'/uploads/{quote(upload, safe="")}')
+
+    async def schedules(self, system=None, board=None):
+        query = urlencode({k: v for k, v in (('system', system), ('board', board)) if v})
+        return (await self._request('GET', '/schedules' + (f'?{query}' if query else '')))['schedules']
+
+    async def schedule(self, schedule_id):
+        return await self._request('GET', f'/schedules/{quote(schedule_id, safe="")}')
+
+    async def create_schedule(self, body):
+        return await self._request('POST', '/schedules', body)
+
+    async def preview_schedule(self, body):
+        return await self._request('POST', '/schedules/preview', body)
+
+    async def claim_schedules(self, systems):
+        return (await self._request('POST', '/schedules/claim', {'systems': systems}))['schedules']
+
+    async def delete_schedule(self, schedule_id):
+        return await self._request('DELETE', f'/schedules/{quote(schedule_id, safe="")}')
+
+    async def set_schedule_enabled(self, schedule_id, enabled):
+        return await self._request('POST', f'/schedules/{quote(schedule_id, safe="")}/{"enable" if enabled else "disable"}', {})
+
+    async def record_schedule(self, schedule_id, **outcome):
+        return await self._request('POST', f'/schedules/{quote(schedule_id, safe="")}/result', outcome)
+
+    async def validate_card(self, agent, worker, engine=None, command=None):
+        body = {'card': {'agent': agent, 'worker': worker, **({'command': command} if command else {})}, **({'engine': engine} if engine else {})}
         return await self._request('POST', '/launch/validate', body, timeout=30)
 
     # Fleet management (the board's fleet tab). Each returns (HTTP status, body) for pass-through.

@@ -1,9 +1,8 @@
 # Execution workers and environment setup
 
-Start `agents/flow_host.py` as before. It also supervises a loopback execution service on 8096
-(the implicit `local` worker); this stays up when flow definitions re-register. Other PCs run
-the same execution service and are registered in the coordinator's fleet registry, which the
-board's **Fleet** tab edits. Engine-launched flows without an explicit selection use any compatible fleet worker. Standalone sessions with an existing workspace or resume ID retain their local executor behavior.
+Steps run on registered PCs, including the one the flow host runs on: there is no built-in worker,
+so a flow waits until a compatible PC is registered. Each PC runs an execution service and is listed
+in the coordinator's fleet registry, which the board's **Fleet** tab edits. Engine-launched flows without an explicit selection use any compatible fleet worker. Standalone sessions with an existing workspace or resume ID retain their local executor behavior.
 
 Each native task is still scheduled, retried and cancelled by its engine. Its Python coordinator
 dispatches the command or agent to an execution service chosen from the fleet. The node panel
@@ -39,6 +38,14 @@ One registration is one PC, however many engines and pools it serves. In the boa
 
 The link works once, expires after 30 minutes, and the uuid is the only thing in it. The settings
 from the form stay on the server, and the PC receives them when it checks in.
+
+**Cancel** immediately invalidates that install uuid for both downloads and claims, and frees the
+name for a new install link. A new link always gets a new uuid.
+
+Opening the binary download URL in a browser supplies the platform's release filename:
+`agent-worker-x86_64-pc-windows-msvc.exe` on Windows or
+`agent-worker-x86_64-unknown-linux-musl` on Linux. The board preserves this filename when proxying
+the download; the original `/install/<uuid>/agent-worker` URL does not need an `.exe` suffix.
 
 ### Identity: a name and a uuid
 
@@ -148,6 +155,12 @@ down updates when it next connects, and **Get update command** gives a one-time 
 `agent-worker update --server … --code … --force` that downloads the new program and installs it
 over the old one). Put the new programs in `dist/worker/` (see below) before pressing the button.
 
+An update link uses its own one-time authorization token, not the install or worker uuid. Its
+`/update/<token>/agent-worker` download and completion request pass through the board without an
+interactive board login; the relay still validates the token and its expiry. Once the update is
+reported complete or failed, that link cannot download again. Normal Fleet management APIs
+continue to require board login. Browser downloads retain the same platform filename as installs.
+
 ### Building and releasing the worker
 
 `worker/` is a Rust crate. `worker/ci/build.sh` (Linux, static musl) and `worker/ci/build.ps1`
@@ -158,8 +171,34 @@ server serves. Pushing a tag `worker-vX.Y.Z` runs the same scripts in **GitHub A
 release with both programs. `worker/ci/fetch-release.sh` downloads the assets of a release into
 `dist/worker/` for an offline server. The Rust dependencies are vendored in `worker/vendor/` (pruned of import libraries for Windows targets we do not build), so
 `cargo build --locked` needs no network; `worker/ci/vendor.sh` refreshes them after a `Cargo.toml` change.
-Windows may flag an unsigned program as unknown: sign the
-Windows build (or have your security team allow it) before distributing it.
+
+#### Windows security checks
+
+Windows releases are currently unsigned. Signing establishes publisher identity; it does not
+guarantee a clean antivirus verdict. A SmartScreen “unrecognized app” warning is separate from a
+Defender Antivirus detection ([Microsoft developer guidance](https://learn.microsoft.com/en-us/defender-xdr/developer-faq)).
+
+If Defender detects a worker, keep the threat name, file SHA-256 and Defender intelligence version.
+Update security intelligence normally before changing or rebuilding the program. On 2026-11-06,
+the unchanged release with SHA-256
+`7d596083a81072989f5a7179398d5de5f42f5181e5698d038268107856faa30e`
+was detected as `Trojan:Win32/Bearfoos.A!ml` with intelligence `1.463.156.0`, then scanned clean
+with `1.463.163.0`. This is a result for that artifact and machine, not a guarantee for future builds.
+
+For an explicit file check, run the installed Defender platform's `MpCmdRun.exe` with
+`-Scan -ScanType 3 -File <absolute Windows file path> -DisableRemediation`.
+Use a native backslash path. For this custom scan, `-DisableRemediation` ignores file exclusions
+and reports detections in the console without quarantining the file; it does not turn off
+real-time protection. Require both a successful scan and “found no threats” in its output.
+
+A file scan alone does not verify runtime behavior: also exercise the downloaded worker's
+opt-in install, Scheduled Task startup, program execution, update, restart and uninstall, then
+check for new Defender detection events (Operational log event 1116). Keep protection enabled;
+do not add exclusions to make the check pass. If detection persists with current intelligence,
+submit the exact affected binary through Microsoft's
+[software-developer false-positive process](https://learn.microsoft.com/en-us/defender-xdr/submission-guide),
+with the owner's approval to upload it. Neither changing languages nor signing alone is a
+verified remedy for a particular detection.
 
 ### Why the PC needs no open port: the relay
 
@@ -291,8 +330,7 @@ back to mutable files.
 The registry is `workers.local.yaml` on the coordinator (`FLOW_WORKERS_FILE` overrides it); token
 values stay in the ignored `workers.local.env` or the flow host's environment and are never
 written to the registry. [workers.example.yaml](../workers.example.yaml) shows the format. Without
-a registry file the coordinator uses one implicit worker, `local` (`FLOW_WORKER_ID`), in pool
-`default`, at `http://127.0.0.1:8096` with token variable `FLOW_WORKER_TOKEN`.
+a registry file the fleet is empty.
 
 A legacy (version 1) registry keeps working as it is: its single `pool` becomes the worker's only
 pool membership, and IDs, tags, endpoints and `token_env` references are kept. Flow and step
@@ -319,10 +357,21 @@ can be deleted at any time.
 
 ## Choosing workers in the board
 
-**Starting a flow (New card).** Choose a default worker or pool and required tags, and expand
-**Choose workers for individual steps** to override placement per step. A step's own worker ID
+**New card.** The form asks four things, in order:
+
+1. **What runs**: an agent, a program or a flow, the active flows shown as cards.
+2. **Input**: a prompt, a command or the flow's inputs (the first text input is a paragraph; a flow
+   with no inputs gets one paragraph that its steps read as `{{ input.text }}`), plus optional
+   attachments, described in [Attaching files, repositories and Confluence](#attaching-files-repositories-and-confluence).
+3. **Where it runs**: required tags (a worker needs all of them) and worker pools (**All pools**, or
+   any number of pools, of which a worker needs one). The form says how many workers match while you
+   choose. **More placement options** chooses one worker or, for a flow, workers per step.
+4. **When**: right now or later, and an optional repeat. See [Schedules](#schedules).
+
+**Starting a flow.** The pools and tags are the flow's default, and
+**Choose workers for individual steps** overrides placement per step. A step's own worker ID
 chooses that worker regardless of the default pool; a step pool replaces the default pool; step
-tags replace the default's tags and keep its pool. A default chosen at launch replaces the flow's
+tags replace the default's tags and keep its pools. A default chosen at launch replaces the flow's
 default worker, and a step chosen at launch replaces that step's own setting; otherwise the flow
 definition's default and step settings apply as before. While you choose, the dialog asks the flow host
 (`POST /api/launch/validate`, with the selected backend) where each step can run and shows, per step:
@@ -337,10 +386,13 @@ Under each step every registered worker is listed as Compatible, Might match (wa
 compatible, with the reasons, and the required agent or command with its last detected status and
 check time (for an offline PC, its last known result, marked as such).
 
-**Standalone coding agent cards.** **Run on (fleet worker)** places the card on a pool, a worker
-or tags, on Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the
-coordinator there) and when a workspace or resume ID is filled in: a placed card runs in a new
-workspace on that PC. The same compatibility panel is shown, and a blocked card cannot be created.
+**Agent and program cards.** **Where it runs** places the card on pools, tags or one worker, on
+Hatchet and Prefect. It is disabled, with the reason, on Trigger.dev (cards run on the coordinator
+there) and when **Advanced** has a workspace or resume ID: a placed card runs in a new workspace on
+that PC. The same compatibility panel is shown, and a blocked card cannot be created.
+A program card checks the executable it can read from the command. A pipeline or a variable is not
+checked in advance and fails on the worker if the program is missing. Its workspace stays on the PC.
+Program cards run on every worker, Python or Rust. Agent cards need a Python execution worker.
 With a blank workspace and no selection, new Hatchet and Prefect cards check all registered workers and run on a compatible one. Cards using an existing workspace or resume ID run locally as before.
 
 **Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
@@ -405,6 +457,42 @@ network currently carries full snapshots rather than binary diffs or compressed 
 coordinator's saved publications are deltas. Parallel branches changing one path differently
 produce an explicit conflict; identical changes are allowed, and later dependent edits win.
 
+## Attaching files, repositories and Confluence
+
+**New card** can attach sources to one run of any agent, program or flow. Unlike `environment` below,
+this is not part of the flow's definition and nobody has to review it: what can't be prepared fails
+the run with its error.
+
+| Source | Where it lands in the workspace | How it gets there |
+|---|---|---|
+| Files | `context/files/<name>` | Uploaded through the board to the flow host, kept in the coordinators' shared `FLOW_WORKSPACES` volume |
+| GitHub, GitLab or any git repository | `repos/<name>` | Cloned on a worker with its credential helper or SSH, shallow unless the ref is a commit |
+| Confluence page tree | `context/confluence/<page id>` | Exported on a Python execution worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there |
+
+Sources are prepared once per run, on a worker the run's selection allows, and every step gets the same
+copy, so parallel steps don't conflict where they join. An agent's prompt gets a note listing them.
+Everything attached must fit the transfer limit of **64 MiB and 10,000 files**. The Rust worker clones
+repositories but does not import Confluence pages: a run that lands on one fails and says so.
+
+Uploads the run has not used are removed after 7 days; a schedule keeps the ones it needs.
+
+## Schedules
+
+**When** in New card stores a card that starts later or repeats. The record is the card's request plus
+its time and five-field cron, in `FLOW_STATE_DIR/schedules.json` on the flow host; the board checks
+every 10 seconds and starts what is due through the same checks as a card started by hand. A schedule
+therefore behaves the same on every engine, but the engine does not know about it until it starts.
+
+Schedules show in the board's **Scheduled** column with **Run now**, **Pause** and **Delete**.
+
+- Repeats follow the time zone of the browser that created them, across daylight saving changes.
+- **Right now** with a repeat starts one run immediately, then follows the repeat.
+- **If the previous run is still active** chooses what a repeat does then. **Skip this run** is the
+  default, and the card says when it skipped: an agent waiting for a human would otherwise collect a
+  new run each time. **Start another run** lets runs overlap. **Run now** starts one regardless.
+- A start that fails is recorded on the card; a repeat tries again at its next time.
+- Runs missed while the board was down are not made up: the schedule starts once and moves on.
+
 ## Flow YAML
 
 ```yaml
@@ -443,7 +531,8 @@ steps:
 ```
 
 Configure context in the existing **Flows** YAML editor. Files are source paths on the setup PC,
-including directories; browser uploads are not implemented. Git uses that PC's credential helper
+including directories; to upload a file for one run, attach it in **New card**
+([Attaching files, repositories and Confluence](#attaching-files-repositories-and-confluence)). Git uses that PC's credential helper
 or SSH, with interactive terminal prompting disabled so failures appear in setup chat. HTTP URLs
 must not contain credentials. Confluence imports use
 [Spenhouet's Confluence Markdown Exporter](https://github.com/Spenhouet/confluence-markdown-exporter),

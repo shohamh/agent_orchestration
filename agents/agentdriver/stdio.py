@@ -27,7 +27,13 @@ async def main():
     start = await receive()
     if start.pop("type", None) != "start":
         raise ValueError("First input must be a start message")
-    await run_session(start, receive, sink)
+    if start.get("agent") == "program" or start.get("context"):  # needs the attached sources first
+        import uuid
+        from flowkit.distributed import execute_session
+        run_id = start.pop("runId", None) or uuid.uuid4().hex
+        await execute_session(start, run_id, receive, sink)
+    else:
+        await run_session(start, receive, sink)
 
 
 if __name__ == "__main__":

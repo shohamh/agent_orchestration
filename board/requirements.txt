@@ -1,2 +1,1 @@
-hatchet-sdk==1.44.0
 aiohttp==3.14.5

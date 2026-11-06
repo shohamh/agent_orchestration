@@ -49,7 +49,8 @@ function selectionFor(doc, stepId, execution) {
   const specific = execution?.steps?.[stepId] || doc.steps[stepId].worker || {};
   if (specific.id) return { ...specific };
   const result = { ...base, ...specific };
-  if (specific.pool) delete result.id;
+  if (specific.pool) { delete result.id; delete result.pools; }
+  else if (specific.pools?.length) { delete result.id; delete result.pool; }
   return result;
 }
 
@@ -66,6 +67,7 @@ function matchWorker(worker, req) {
   const id = worker.id, incompatible = [], unknown = [];
   if (req.id && req.id !== id) incompatible.push(reason('worker_id', `The step is assigned to worker ${req.id}, not ${id}`));
   if (req.pool && !worker.pools.includes(req.pool)) incompatible.push(reason('pool', `${id} is not in pool ${req.pool}`, { pool: req.pool }));
+  if (req.pools?.length && !req.pools.some((p) => worker.pools.includes(p))) incompatible.push(reason('pool', `${id} is not in ${req.pools.length === 1 ? 'pool' : 'any of the pools'} ${req.pools.join(', ')}`, { pools: req.pools }));
   const missing = (req.tags || []).filter((t) => !worker.tags.includes(t));
   if (missing.length) incompatible.push(reason('tags', `${id} lacks tags: ${missing.join(', ')}`, { missing }));
   if (req.engine && !worker.engines.includes(req.engine)) incompatible.push(reason('engine', `${id} is not registered for ${req.engine}`, { engine: req.engine }));
@@ -86,7 +88,7 @@ function matchWorker(worker, req) {
 
 function blocked(reasons, matches = [], req = {}) {
   const codes = [...new Set(reasons.map((r) => r.code))];
-  const texts = codes.map((c) => (c === 'tags' ? `Add the missing tags to a worker${req.pool ? ` in pool ${req.pool}` : ''}, or remove them from the requirement.` : RESOLUTIONS[c])).filter(Boolean);
+  const texts = codes.map((c) => (c === 'tags' ? `Add the missing tags to a worker${req.pool ? ` in pool ${req.pool}` : req.pools?.length ? ` in ${req.pools.length === 1 ? 'pool' : 'pools'} ${req.pools.join(', ')}` : ''}, or remove them from the requirement.` : RESOLUTIONS[c])).filter(Boolean);
   return { status: 'blocked', reasons, message: `No registered worker can run this step: ${reasons.map((r) => r.message).join('; ')}`,
     resolution: texts.join(' ') || RESOLUTIONS.no_workers, candidates: [], workers: matches };
 }
@@ -117,10 +119,12 @@ function launchCheck(body, workers, flowsByName) {
   const engine = ENGINES[body.system];
   if (body.card) {
     if (!['hatchet', 'prefect'].includes(body.system)) return [400, { error: 'fleet placement of standalone cards is supported on Hatchet and Prefect' }];
-    if (!AGENTS.includes(body.card.agent)) return [400, { error: 'agent must be codex, claude, opencode, opencode2, omp, pi or demo' }];
+    if (body.card.agent !== 'program' && !AGENTS.includes(body.card.agent)) return [400, { error: 'agent must be codex, claude, opencode, opencode2, omp, pi or demo' }];
     const wanted = clean(body.card.worker);
     if (!Object.keys(wanted).length) return [400, { error: 'choose a worker, a pool or tags to place the card' }];
-    const decision = validateLaunch({ ...wanted, agent: body.card.agent, ...(engine ? { engine } : {}) }, workers);
+    const software = body.card.agent === 'program' ? softwareRequirement({ kind: 'program', run: body.card.command }) : { agent: body.card.agent };
+    if (software.ambiguous_command) delete software.ambiguous_command; // a program card is not checked in advance then
+    const decision = validateLaunch({ ...wanted, ...software, ...(engine ? { engine } : {}) }, workers);
     return [200, { status: decision.status, fleet: true, card: decision }];
   }
   const doc = body.document || flowsByName[body.flow];

@@ -5,7 +5,16 @@
                                                       open card's new transcript rows / log lines
   GET  /api/boards/{system}/{board}/cards             -> cards on a board (no transcripts or logs)
   POST /api/boards/{system}/{board}/cards             {kind, goal, turns, stepSeconds} -> new run
-                                                      kind: steerable-agent (default) | research-report
+                                                      kind: steerable-agent (default) | research-report |
+                                                      agent-session | program {command} | flow {flow, input}
+                                                      optional: worker {id?, pool?, pools?, tags?}, context
+                                                      {text?, repositories?, files?, confluence?}, schedule
+                                                      {at?, cron?, timezone?, utcOffset?, summary?, overlap?, runNow?}
+  POST /api/uploads?name=<file name>                  raw file bytes -> {id, name, size} for context.files
+  DELETE /api/uploads/{id}
+  GET  /api/schedules?system=&board=                  cards that start later or repeat
+  POST /api/schedules/preview {at?, cron?, timezone?, utcOffset?} -> {next: [time, ...]}
+  POST /api/schedules/{id}/{run|enable|disable}, DELETE /api/schedules/{id}
   GET  /api/cards/{system}/{run_id}/dag               -> nodes + edges of the run's DAG / call tree
   GET  /api/cards/{system}/{run_id}/transcript       ?before=<row key>&limit=100 -> older session rows
   GET  /api/cards/{system}/{run_id}/logs             ?before=<index>&limit=1000 -> older log lines
@@ -59,9 +68,12 @@ log = logging.getLogger("board")
 def load_adapters() -> dict[str, Any]:
     adapters: dict[str, Any] = {}
     if os.environ.get("HATCHET_CLIENT_TOKEN"):
-        from hatchet_adapter import HatchetAdapter
-
-        adapters["hatchet"] = HatchetAdapter()
+        try:
+            from hatchet_adapter import HatchetAdapter
+        except ImportError:  # the other engines still work
+            log.error("HATCHET_CLIENT_TOKEN is set but this image has no Hatchet SDK: rebuild it with ENGINES=hatchet")
+        else:
+            adapters["hatchet"] = HatchetAdapter()
     if os.environ.get("TRIGGER_SECRET_KEY"):
         from trigger_adapter import TriggerAdapter
 
@@ -81,12 +93,15 @@ def load_adapters() -> dict[str, Any]:
     return adapters
 
 
-def adapter_for(request: web.Request) -> Any:
-    system = request.match_info["system"]
-    adapter = request.app["adapters"].get(system)
+def adapter_of(app: web.Application, system: str) -> Any:
+    adapter = app["adapters"].get(system)
     if adapter is None:
         raise web.HTTPNotFound(text=f"backend {system!r} is not configured")
     return adapter
+
+
+def adapter_for(request: web.Request) -> Any:
+    return adapter_of(request.app, request.match_info["system"])
 
 
 @web.middleware
@@ -240,20 +255,73 @@ async def card_events(request: web.Request) -> web.Response:
 
 
 SESSION_AGENTS = ("codex", "claude", "opencode", "opencode2", "omp", "pi", "demo")
+PROGRAM = "program"  # a program card runs as a session whose `agent` is this and whose goal is the command
+SCHEDULE_POLL_SECONDS = 10
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # the transfer limit of a run (agents/flowkit/artifacts.py)
 
 
 async def create_card(request: web.Request) -> web.Response:
     body = await json_object(request)
+    system, board = request.match_info["system"], request.match_info["board"]
+    when = body.pop("schedule", None)
+    status, result = await (launch_card(request.app, system, board, body) if when is None
+                            else schedule_card(request.app, system, board, body, when))
+    return web.json_response(result, status=status)
+
+
+def card_title(body: dict[str, Any]) -> str:
+    if body.get("kind") == "flow":
+        first = next((v for v in (body.get("input") or {}).values() if isinstance(v, str) and v.strip()), "")
+        return f"{body.get('flow')}: {first}"[:200] if first else str(body.get("flow"))[:200]
+    return str(body.get("command") or body.get("goal") or body.get("kind") or "card").strip()[:200]
+
+
+async def schedule_card(app: web.Application, system: str, board: str, body: dict[str, Any], when: Any) -> tuple[int, dict]:
+    """Store a card that starts later or repeats, after checking that it could start at all. A card
+    that also starts now is the schedule's first run, so a repeat can't overlap it."""
+    if not isinstance(when, dict):
+        raise ValueError("schedule must be an object")
+    timing = {k: v for k, v in when.items() if k != "runNow"}
+    status, checked = await launch_card(app, system, board, body, dry_run=True)
+    if status >= 400:
+        return status, checked
+    host = app["flow_host"]
+    saved = await host.create_schedule({"system": system, "board": board, "title": card_title(body), "kind": str(body.get("kind") or ""),
+                                        "request": body, "schedule": timing})
+    if not when.get("runNow"):
+        return 201, {"schedule": saved}
+    try:
+        status, started = await launch_card(app, system, board, body)
+    except Exception:
+        await host.delete_schedule(saved["id"])
+        raise
+    if status >= 400:
+        await host.delete_schedule(saved["id"])
+        return status, started
+    await host.record_schedule(saved["id"], run=started["id"])
+    return 201, {**started, "schedule": saved}
+
+
+async def launch_card(app: web.Application, system: str, board: str, body: dict[str, Any], dry_run: bool = False) -> tuple[int, dict]:
+    """Check a card and, unless `dry_run`, start it. Returns (HTTP status, body). New card and the
+    schedules go through here, so a scheduled card is held to what a card started by hand is."""
+    adapter = adapter_of(app, system)
     kind = body.get("kind", "steerable-agent")
     if kind == "flow":
-        return await create_flow_card(request, body)
+        return await launch_flow(app, adapter, system, board, body, dry_run)
+    program = kind == PROGRAM
+    if program:
+        if body.get("resumeSessionId"):
+            raise ValueError("a program card cannot resume an agent session")
+        body = {**body, "goal": text_field(body, "command", 20000), "agent": PROGRAM}
+        kind = "agent-session"
     goal = text_field(body, "goal", 20000).strip()
     if kind not in ("steerable-agent", "research-report", "agent-session"):
         raise web.HTTPBadRequest(text=f"unknown kind {kind!r}")
     options = {}
     if kind == "agent-session":
         agent = body.get("agent", "codex")
-        if agent not in SESSION_AGENTS:
+        if agent not in SESSION_AGENTS and not program:
             raise ValueError("agent must be codex, claude, opencode, opencode2, omp, pi or demo")
         workspace = body.get("workspace", "")
         if not isinstance(workspace, str) or len(workspace) > 4096 or "\x00" in workspace:
@@ -263,46 +331,140 @@ async def create_card(request: web.Request) -> web.Response:
         if body.get('resumeSessionId'):
             if not workspace.strip(): raise ValueError('resuming a session requires its original workspace')
             options['session_options']['resumeSessionId'] = text_field(body, 'resumeSessionId', 512)
+        if program:
+            text = (body.get("context") or {}).get("text") if isinstance(body.get("context"), dict) else None
+            if text:
+                options["session_options"]["programInput"] = text
+        attached = await app["flow_host"].normalize_context(body["context"]) if body.get("context") else None
+        if attached:
+            options["session_options"]["context"] = {k: v for k, v in attached.items() if k != "text"}
         worker = worker_selector(body.get('worker'))
-        if not worker and not workspace.strip() and not body.get('resumeSessionId') and request.match_info['system'] in ('hatchet', 'prefect'):
+        if not worker and not workspace.strip() and not body.get('resumeSessionId') and system in ('hatchet', 'prefect'):
             worker = {'tags': []}  # default to any compatible fleet worker for new disposable sessions
         if worker:  # placed on the fleet by the engine adapter (agents/flowkit/distributed.py)
-            if request.match_info['system'] not in ('hatchet', 'prefect'):
+            if system not in ('hatchet', 'prefect'):
                 raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
             if workspace.strip() or body.get('resumeSessionId'):
                 raise ValueError('a card placed on a fleet worker runs in a new workspace there; clear the workspace')
             # As for flows: a confirmed mismatch blocks launch; offline, busy or unchecked matches wait.
-            launch = await request.app['flow_host'].validate_card(agent, worker, engine=SYSTEM_ENGINES.get(request.match_info['system']))
+            launch = await app['flow_host'].validate_card(agent, worker, engine=SYSTEM_ENGINES.get(system), **({'command': goal} if program else {}))
             if launch['status'] == 'blocked':
                 card = launch['card']
-                return web.json_response({'error': f"Cannot launch: {card['message']} {card['resolution']}", 'launch': launch}, status=409)
+                return 409, {'error': f"Cannot launch: {card['message']} {card['resolution']}", 'launch': launch}
             options['session_options']['worker'] = worker
             options['launch'] = launch
     launch = options.pop('launch', None)
-    run_id = await adapter_for(request).create(
-        request.match_info["board"],
-        kind,
-        goal,
-        bounded_int(body, "turns", 6, 1, 1000),
-        bounded_int(body, "stepSeconds", 5, 1, 3600),
-        **options,
-    )
-    return web.json_response({"id": run_id, **({'launch': launch} if launch else {})}, status=201)
+    turns, step_seconds = bounded_int(body, "turns", 6, 1, 1000), bounded_int(body, "stepSeconds", 5, 1, 3600)
+    if dry_run:
+        return 200, ({'launch': launch} if launch else {})
+    run_id = await adapter.create(board, kind, goal, turns, step_seconds, **options)
+    return 201, {"id": run_id, **({'launch': launch} if launch else {})}
 
 
 def worker_selector(value: Any) -> dict[str, Any]:
-    """A card's fleet requirement: {id?, pool?, tags?}; empty or absent runs the card as before."""
+    """A card's fleet requirement: {id?, pool?, pools? (any of them), tags? (all of them)}; empty or
+    absent runs the card as before."""
     if value is None or value == {}:
         return {}
-    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'tags'}:
-        raise ValueError('worker must contain id, pool and/or tags')
+    if not isinstance(value, dict) or set(value) - {'id', 'pool', 'pools', 'tags'}:
+        raise ValueError('worker must contain id, pool, pools and/or tags')
     for key in ('id', 'pool'):
         if key in value and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 100):
             raise ValueError(f'worker {key} must be nonempty text (max 100)')
-    tags = value.get('tags', [])
-    if not isinstance(tags, list) or len(tags) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in tags):
-        raise ValueError('worker tags must be a list of at most 50 nonempty strings')
+    for key in ('pools', 'tags'):
+        items = value.get(key, [])
+        if not isinstance(items, list) or len(items) > 50 or any(not isinstance(t, str) or not t or len(t) > 100 for t in items):
+            raise ValueError(f'worker {key} must be a list of at most 50 nonempty strings')
     return dict(value)
+
+
+async def upload_file(request: web.Request) -> web.Response:
+    """One file attached in New card, kept by the flow host until the run starts. The body is read
+    as a stream: the application's request size limit is for JSON calls."""
+    data = bytearray()
+    async for chunk in request.content.iter_chunked(1024 * 1024):
+        data += chunk
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise web.HTTPRequestEntityTooLarge(max_size=MAX_UPLOAD_BYTES, actual_size=len(data), text="A file can be at most 64 MiB")
+    saved = await request.app["flow_host"].save_upload(request.query.get("name"), base64.b64encode(bytes(data)).decode())
+    return web.json_response(saved, status=201)
+
+
+async def delete_upload(request: web.Request) -> web.Response:
+    return web.json_response(await request.app["flow_host"].delete_upload(request.match_info["id"]))
+
+
+async def schedules_list(request: web.Request) -> web.Response:
+    host = request.app["flow_host"]
+    return web.json_response({"schedules": await host.schedules(request.query.get("system"), request.query.get("board"))})
+
+
+async def schedules_preview(request: web.Request) -> web.Response:
+    return web.json_response(await request.app["flow_host"].preview_schedule(await json_object(request)))
+
+
+async def schedule_delete(request: web.Request) -> web.Response:
+    return web.json_response(await request.app["flow_host"].delete_schedule(request.match_info["id"]))
+
+
+async def schedule_action(request: web.Request) -> web.Response:
+    host, schedule_id, action = request.app["flow_host"], request.match_info["id"], request.match_info["action"]
+    if action in ("enable", "disable"):
+        return web.json_response(await host.set_schedule_enabled(schedule_id, action == "enable"))
+    if action != "run":
+        raise web.HTTPNotFound()
+    item = await host.schedule(schedule_id)
+    outcome = await start_scheduled(request.app, item, by_hand=True)
+    if outcome.get("error"):
+        return web.json_response({"error": outcome["error"]}, status=409)
+    return web.json_response(outcome)
+
+
+async def start_scheduled(app: web.Application, item: dict[str, Any], by_hand: bool = False) -> dict[str, Any]:
+    """Start one schedule's card and record the outcome on the schedule, where the board shows it.
+    Unless the schedule's `overlap` is "start", a repeat is skipped while its previous run is active:
+    an agent that waits for a human would otherwise collect a new run every hour."""
+    host, system, board = app["flow_host"], item["system"], item["board"]
+    try:
+        if not by_hand and item.get("overlap") != "start" and item.get("last_run") and item.get("cron"):
+            cards = await adapter_of(app, system).list_cards(board)
+            previous = next((c for c in cards if c.id == item["last_run"]), None)
+            if previous is not None and not is_final(previous.column):
+                outcome = {"skipped": "The previous run is still active"}
+                await host.record_schedule(item["id"], **outcome)
+                return outcome
+        status, result = await launch_card(app, system, board, dict(item["request"]))
+        outcome = {"run": result["id"]} if status < 400 else {"error": result.get("error") or f"status {status}"}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # the card can't start now; the schedule shows why and the next time still comes
+        outcome = {"error": str(getattr(exc, "text", None) or exc)}
+    await host.record_schedule(item["id"], **outcome)
+    app["hub"].poke(system)
+    return outcome
+
+
+async def run_due_schedules(app: web.Application) -> None:
+    systems = list(app["adapters"])
+    if not systems:
+        return
+    for item in await app["flow_host"].claim_schedules(systems):
+        await start_scheduled(app, item)
+
+
+async def scheduler(app: web.Application) -> None:
+    while True:
+        await asyncio.sleep(SCHEDULE_POLL_SECONDS)
+        try:
+            await run_due_schedules(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # the flow host may be restarting; due schedules wait for the next pass
+            log.debug("could not check schedules: %s", exc)
+
+
+async def start_scheduler(app: web.Application) -> None:
+    app["scheduler"] = asyncio.create_task(scheduler(app))
 
 
 async def card_execution(request: web.Request) -> web.Response:
@@ -312,9 +474,9 @@ async def card_execution(request: web.Request) -> web.Response:
     return web.json_response({'execution': execution.get('card'), 'steps': execution})
 
 
-async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Response:
+async def launch_flow(app: web.Application, adapter: Any, system: str, board: str, body: dict[str, Any], dry_run: bool) -> tuple[int, dict]:
     name = text_field(body, "flow", 100)
-    flow = (await request.app["flow_host"].flows()).get(name)
+    flow = (await app["flow_host"].flows()).get(name)
     if flow is None:
         raise ValueError(f"unknown flow {name!r}")
     raw = body.get("input") or {}
@@ -333,15 +495,20 @@ async def create_flow_card(request: web.Request, body: dict[str, Any]) -> web.Re
     first = next((v for v in params.values() if isinstance(v, str) and v.strip()), "")
     title = str(body.get("title") or (f"{name}: {first}" if first else name))[:200]
     if 'execution' in body:
-        params['flowExecution'] = await request.app['flow_host'].validate_routing(body['execution'], flow['steps'])
+        params['flowExecution'] = await app['flow_host'].validate_routing(body['execution'], flow['steps'])
+    if body.get('context'):
+        attached = await app['flow_host'].normalize_context(body['context'])
+        if attached:
+            params['flowContext'] = attached
     # A confirmed mismatch blocks launch; offline, busy or unchecked matches launch and wait.
-    launch = await request.app['flow_host'].validate_launch(flow, params.get('flowExecution'),
-                                                           engine=SYSTEM_ENGINES.get(request.match_info['system']))
+    launch = await app['flow_host'].validate_launch(flow, params.get('flowExecution'), engine=SYSTEM_ENGINES.get(system))
     if launch['status'] == 'blocked':
         problems = [f"{sid}: {d['message']} {d['resolution']}" for sid, d in launch['steps'].items() if d['status'] == 'blocked']
-        return web.json_response({'error': 'Cannot launch: ' + ' | '.join(problems), 'launch': launch}, status=409)
-    run_id = await adapter_for(request).create_flow(request.match_info["board"], name, params, title)
-    return web.json_response({"id": run_id, 'launch': launch}, status=201)
+        return 409, {'error': 'Cannot launch: ' + ' | '.join(problems), 'launch': launch}
+    if dry_run:
+        return 200, {'launch': launch}
+    run_id = await adapter.create_flow(board, name, params, title)
+    return 201, {"id": run_id, 'launch': launch}
 
 
 async def launch_validate(request: web.Request) -> web.Response:
@@ -357,16 +524,16 @@ async def launch_validate(request: web.Request) -> web.Response:
         raise ValueError('send one of flow, document or card')
     if 'card' in body:
         card = body['card']
-        if not isinstance(card, dict) or set(card) - {'agent', 'worker'}:
-            raise ValueError('card must contain agent and worker')
-        if card.get('agent') not in SESSION_AGENTS:
+        if not isinstance(card, dict) or set(card) - {'agent', 'worker', 'command'}:
+            raise ValueError('card must contain agent, worker and for a program its command')
+        if card.get('agent') not in (*SESSION_AGENTS, PROGRAM):
             raise ValueError('agent must be codex, claude, opencode, opencode2, omp, pi or demo')
         worker = worker_selector(card.get('worker'))
         if not worker:
             raise ValueError('choose a worker, a pool or tags to place the card')
         if system not in ('hatchet', 'prefect'):
             raise ValueError('fleet placement of standalone cards is supported on Hatchet and Prefect')
-        return web.json_response(await request.app['flow_host'].validate_card(card['agent'], worker, engine=engine))
+        return web.json_response(await request.app['flow_host'].validate_card(card['agent'], worker, engine=engine, **({'command': card['command']} if card.get('command') else {})))
     if 'document' in body:
         flow = body['document']
         if not isinstance(flow, dict) or not isinstance(flow.get('steps'), dict) or len(json.dumps(flow)) > 200000:
@@ -643,7 +810,7 @@ async def fleet_update(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
 
 
-INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server'}
+INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart'}
 
 
 async def fleet_updates(request: web.Request) -> web.Response:
@@ -860,6 +1027,9 @@ async def poke_after_writes(request: web.Request, handler: Any) -> web.StreamRes
 
 
 async def close_adapters(app: web.Application) -> None:
+    if "scheduler" in app:
+        app["scheduler"].cancel()
+        await asyncio.gather(app["scheduler"], return_exceptions=True)
     await app["hub"].close()
     for adapter in [*app["adapters"].values(), app["flow_host"]]:
         if hasattr(adapter, "close"):
@@ -877,6 +1047,7 @@ def make_app() -> web.Application:
     app["adapters"] = load_adapters()
     app["flow_host"] = FlowHost()
     app["hub"] = Hub(app["adapters"], decorate=lambda cards: label_flows(app, cards))
+    app.on_startup.append(start_scheduler)
     app.on_cleanup.append(close_adapters)
     app.on_response_prepare.append(revalidate_ui)
     auth.install(app)
@@ -922,6 +1093,12 @@ def make_app() -> web.Application:
     app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
     app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)
     app.router.add_post('/api/launch/validate', launch_validate)
+    app.router.add_post('/api/uploads', upload_file)
+    app.router.add_delete('/api/uploads/{id}', delete_upload)
+    app.router.add_get('/api/schedules', schedules_list)
+    app.router.add_post('/api/schedules/preview', schedules_preview)
+    app.router.add_delete('/api/schedules/{id}', schedule_delete)
+    app.router.add_post('/api/schedules/{id}/{action}', schedule_action)
     app.router.add_post("/api/flows/validate", flows_validate)
     app.router.add_put("/api/flows/{name}", flows_save)
     app.router.add_delete("/api/flows/{name}", flows_delete)

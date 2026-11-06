@@ -1,0 +1,11 @@
+# Optional overlay: lets the agent board and flow workers reach this stack by service name, without
+# sharing the rest of it. Enable: append :docker-compose.agents.yml to COMPOSE_FILE in .env.
+services:
+  hatchet-engine:
+    networks: [default, agents]
+  hatchet-dashboard:
+    networks: [default, agents]
+
+networks:
+  agents:
+    name: agent-net

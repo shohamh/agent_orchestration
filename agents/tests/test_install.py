@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -18,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aiohttp
-from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import TestClient, TestServer
 from flowkit import install
 from flowkit.relay import make_app
 
@@ -363,6 +364,141 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(GOOD_TOKEN, json.dumps(body))
 
 
+class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
+    """The real board, authenticated flow host and install service share one temporary registry."""
+    async def asyncSetUp(self):
+        import flow_host
+        with patch.object(sys, 'path', [str(ROOT / 'board'), *sys.path]):
+            import server as board_server
+
+        env = patch.dict(os.environ, {'FLOW_HOST_TOKEN': 'install-test-host-secret',
+                                      'BOARD_PASSWORD': 'install-test-password', 'BOARD_SECRET': 'install-test-cookie-key'})
+        env.start(); self.addCleanup(env.stop)
+        attempts = patch.object(install, 'FAILED_ATTEMPTS', {})
+        attempts.start(); self.addCleanup(attempts.stop)
+        delay = patch.object(install, 'WRONG_CODE_DELAY', 0)
+        delay.start(); self.addCleanup(delay.stop)
+        self.relay = TestServer(make_app(install=install.add_routes))
+        self.addAsyncCleanup(self.relay.close)
+        await self.relay.start_server()
+        host = flow_host.serve(None, '127.0.0.1', 0)
+        self.addCleanup(host.server_close)
+        self.host_url = f'http://127.0.0.1:{host.server_port}'
+        # The enclosing environment patch restores these addresses after all three servers close.
+        os.environ.update({'FLOW_HOST_URL': self.host_url, 'FLOW_RELAY_URL': str(self.relay.make_url('')),
+                           'FLOW_RELAY_LOCAL_URL': str(self.relay.make_url(''))})
+        thread = threading.Thread(target=host.serve_forever, daemon=True)
+        thread.start()
+        self.addAsyncCleanup(asyncio.to_thread, thread.join)
+        self.addAsyncCleanup(asyncio.to_thread, host.shutdown)
+
+        with patch.object(board_server, 'load_adapters', return_value={}):
+            app = board_server.make_app()
+        self.client = TestClient(TestServer(app), cookie_jar=aiohttp.CookieJar(unsafe=True))
+        self.addAsyncCleanup(self.client.close)
+        await self.client.start_server()
+        self.pc = aiohttp.ClientSession()
+        self.addAsyncCleanup(self.pc.close)
+        async with self.client.post('/login', data={'password': 'install-test-password'}, allow_redirects=False) as response:
+            self.assertEqual(response.status, 302)
+
+    async def api(self, method, path='/api/fleet/installs', **kwargs):
+        async with self.client.request(method, path, **kwargs) as response:
+            return response.status, await response.json()
+
+    async def claim(self, code):
+        async with self.pc.post(self.client.make_url(f'/install/{code}/claim'), json=claim_body()) as response:
+            return response.status, await response.json()
+
+    async def download(self, code):
+        async with self.pc.get(self.client.make_url(f'/install/{code}/agent-worker')) as response:
+            return response.status, await response.read()
+
+    async def test_startup_choices_survive_board_creation_listing_and_the_pc_claim(self):
+        for autostart in ('logon', 'boot', 'none'):
+            for auto_restart in (True, False):
+                with self.subTest(autostart=autostart, auto_restart=auto_restart):
+                    name = f'{autostart}-restart-{int(auto_restart)}'
+                    status, created = await self.api('POST', json={**FORM, 'id': name, 'autostart': autostart, 'auto_restart': auto_restart})
+                    self.assertEqual(status, 200, created)
+                    code = created['install']['code']
+                    self.assertEqual((str(uuid.UUID(code)), uuid.UUID(code).version), (code, 4))
+                    status, listing = await self.api('GET')
+                    self.assertEqual(status, 200, listing)
+                    saved = next(item for item in listing['installs'] if item['code'] == code)
+                    self.assertEqual((saved['id'], saved['autostart'], saved['auto_restart'], saved['state']),
+                                     (name, autostart, auto_restart, 'pending'))
+                    status, settings = await self.claim(code)
+                    self.assertEqual(status, 200, settings)
+                    self.assertEqual({key: settings[key] for key in ('ok', 'uuid', 'name', 'os', 'engines', 'pool', 'tags', 'slots',
+                                                                    'cpu_limit', 'ram_limit', 'autostart', 'auto_restart')},
+                                     {'ok': True, 'uuid': code, 'name': name, 'os': 'windows', 'engines': ['hatchet', 'prefect'],
+                                      'pool': 'build', 'tags': ['gpu'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85,
+                                      'autostart': autostart, 'auto_restart': auto_restart})
+
+    async def test_bad_startup_choices_and_unknown_fields_never_create_an_install(self):
+        for changes in ({'autostart': 'startup'}, {'autostart': 'Boot'}, {'autostart': None}, {'autostart': True},
+                        {'auto_restart': 'false'}, {'auto_restart': 0}, {'auto_restart': None}, {'extra': True}):
+            with self.subTest(changes=changes):
+                status, rejected = await self.api('POST', json={**FORM, **changes})
+                self.assertEqual(status, 400, rejected)
+                status, listing = await self.api('GET')
+                self.assertEqual((status, listing), (200, {'installs': []}))
+        status, created = await self.api('POST', json=FORM)
+        self.assertEqual(status, 200, created)
+        self.assertEqual((await self.claim(created['install']['code']))[0], 200)
+
+    async def test_cancelling_a_uuid_burns_its_download_and_claim_and_frees_the_name(self):
+        status, created = await self.api('POST', json=FORM)
+        self.assertEqual(status, 200, created)
+        code = created['install']['code']
+        expected_binary = b'MZ-fake-worker-agent-worker-x86_64-pc-windows-msvc.exe'
+        self.assertEqual(await self.download(code), (200, expected_binary))
+        status, duplicate = await self.api('POST', json=FORM)
+        self.assertEqual(status, 400, duplicate)
+
+        status, cancelled = await self.api('DELETE', f'/api/fleet/installs/{code}')
+        self.assertEqual(status, 200, cancelled)
+        self.assertEqual((cancelled['install']['code'], cancelled['install']['state']), (code, 'cancelled'))
+        self.assertEqual((await self.download(code))[0], 404)
+        self.assertEqual((await self.claim(code))[0], 404)
+        self.assertEqual(await self.api('GET'), (200, {'installs': []}))
+
+        status, fresh = await self.api('POST', json=FORM)
+        self.assertEqual(status, 200, fresh)
+        replacement = fresh['install']['code']
+        self.assertNotEqual(replacement, code)
+        self.assertEqual(await self.download(replacement), (200, expected_binary))
+        status, settings = await self.claim(replacement)
+        self.assertEqual(status, 200, settings)
+        self.assertEqual((settings['uuid'], settings['name'], settings['autostart'], settings['auto_restart']),
+                         (replacement, 'build-pc', 'boot', False))
+        self.assertEqual((await self.download(code))[0], 404)
+
+    async def test_bad_codes_and_unauthenticated_management_cannot_cancel_a_pending_install(self):
+        status, created = await self.api('POST', json=FORM)
+        self.assertEqual(status, 200, created)
+        code = created['install']['code']
+        for method, path in (('GET', '/api/fleet/installs'), ('POST', '/api/fleet/installs'),
+                             ('DELETE', f'/api/fleet/installs/{code}')):
+            async with self.pc.request(method, self.client.make_url(path), json=FORM) as response:
+                self.assertEqual(response.status, 401, path)
+        for method, path in (('GET', '/fleet/installs'), ('POST', '/fleet/installs'),
+                             ('DELETE', f'/fleet/installs/{code}')):
+            async with self.pc.request(method, self.host_url + path, json=FORM) as response:
+                self.assertEqual(response.status, 401, path)
+        for bad_code in ('short', 'x' * 43, str(uuid.uuid4())):
+            with self.subTest(code=bad_code):
+                status, rejected = await self.api('DELETE', f'/api/fleet/installs/{bad_code}')
+                self.assertEqual(status, 400, rejected)
+                self.assertEqual((await self.download(bad_code))[0], 404)
+                self.assertEqual((await self.claim(bad_code))[0], 404)
+        status, listing = await self.api('GET')
+        self.assertEqual(status, 200, listing)
+        self.assertEqual([(item['code'], item['state']) for item in listing['installs']], [(code, 'pending')])
+        self.assertEqual(await self.download(code), (200, b'MZ-fake-worker-agent-worker-x86_64-pc-windows-msvc.exe'))
+
+
 class BundleTests(unittest.TestCase):
     """The Python worker bundle (the legacy install path and the test oracle's reference)."""
     def names(self):
@@ -381,6 +517,9 @@ class BundleTests(unittest.TestCase):
             return {l.split('==')[0].lower(): l.split('==')[1] for l in (ROOT/'agents'/path).read_text().splitlines() if '==' in l and not l.startswith('#')}
         worker, full = pins('requirements-worker.txt'), pins('requirements.txt')
         for name, version in worker.items(): self.assertEqual(full.get(name), version, name)
+        for path in ('../board/requirements.txt', '../board/requirements-hatchet.txt', 'requirements-flow.txt',
+                     'requirements-flow-hatchet.txt', 'requirements-flow-prefect.txt'):
+            for name, version in pins(path).items(): self.assertEqual(full.get(name), version, name)
 
 
 if __name__ == '__main__':

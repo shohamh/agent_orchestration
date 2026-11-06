@@ -57,8 +57,10 @@ export function defineFlow(def: FlowDef) {
     ttl: QUEUE_TTL,
     retry: { maxAttempts: 1 },
     run: async (params: Record<string, Json>, { ctx }) => {
-      const { flowRestart: _flow_restart, flowExecution: _flow_execution, ...userInput } = params ?? {};
-      const input = { ...def.input, ...userInput };
+      const { flowRestart: _flow_restart, flowExecution: _flow_execution, flowContext: _flow_context, ...userInput } = params ?? {};
+      const input: Record<string, Json> = { ...def.input, ...userInput };
+      const attachedText = (_flow_context as { text?: string } | null | undefined)?.text;
+      if (attachedText && !("text" in def.input)) input.text = attachedText;
       metadata.set("title", String(input.topic ?? input.goal ?? def.name).slice(0, 512));
       metadata.set("flow", def.name);
       const runIds: Record<string, string> = {};
@@ -68,7 +70,7 @@ export function defineFlow(def: FlowDef) {
         for (const id of ids) {
           const step = def.steps[id];
           if (runIds[id] || !step.needs.every((need) => need in outputs)) continue;
-          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])), _flow_restart, _flow_execution };
+          const context = { input, steps: Object.fromEntries(step.needs.map((need) => [need, { output: outputs[need] }])), _flow_restart, _flow_execution, _flow_context };
           const handle = await steps[id].trigger({ flowRunId: ctx.run.id, context }, { tags: [`flowrun:${ctx.run.id}`] });
           runIds[id] = handle.id;
           metadata.set("steps", runIds);

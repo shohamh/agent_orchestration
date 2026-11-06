@@ -43,7 +43,7 @@ def _locked():
     """Serialize read-modify-write transactions across coordinator processes."""
     with _LOCK:
         path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(path) + '.lock', 'a+b') as lockfile:
+        with open(os.environ.get('FLOW_WORKERS_LOCK') or str(path) + '.lock', 'a+b') as lockfile:
             if os.name == 'nt':
                 import msvcrt
                 lockfile.seek(0)
@@ -67,10 +67,6 @@ def _locked():
 def relay_key(w):
     """What a PC is known as to the relay: its uuid (generated on the PC at install), or its name for older registrations."""
     return w.get('uuid') or w['id']
-
-def _default():
-    return {'id': os.environ.get('FLOW_WORKER_ID', 'local'), 'pool': 'default', 'tags': [],
-            'url': 'http://127.0.0.1:8096', 'token_env': 'FLOW_WORKER_TOKEN'}
 
 def _normalize(item, stored=False):
     """Validate one registry entry. `stored` entries (read from the file) above the slot
@@ -113,7 +109,7 @@ def _normalize(item, stored=False):
 def _load():
     """The registry document: normalized workers plus the tag catalog (tags offered before use)."""
     path = _path()
-    data = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {'workers': [_default()]}
+    data = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {'workers': []}
     if not isinstance(data, dict) or data.get('version', 1) not in (1, 2) or not isinstance(data.get('workers'), list): raise ValueError('Invalid worker registry')
     workers = [_normalize(w, stored=True) for w in data['workers']]
     if len({w['id'] for w in workers}) != len(workers): raise ValueError('Worker ids must be unique')

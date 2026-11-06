@@ -70,6 +70,58 @@ cp .env.example .env && docker compose up -d --build
 docker compose exec example-worker python demo.py
 ```
 
+## The board and flow host
+
+The root [docker-compose.yml](docker-compose.yml) runs the board and the flow host. Hatchet, Trigger.dev and Prefect are
+optional and separate: start any of them from their own folders, and the board reaches them through their published ports.
+
+```bash
+cp .env.example .env    # set FLOW_HOST_TOKEN, ENGINES and FLOW_BACKENDS
+docker compose up -d --build
+```
+
+- **An engine appears on the board** when `board/.env` has its credential or URL: `HATCHET_CLIENT_TOKEN`,
+  `TRIGGER_SECRET_KEY` / `TRIGGER_DEV_SECRET_KEY`, or `PREFECT_API_URL`. With none set, the board runs with no tabs.
+- **`ENGINES`** picks the SDKs built into the shared image (`hatchet`, `prefect`). Trigger.dev needs none.
+- **`FLOW_BACKENDS`** picks the engines the flow host keeps flows active on. Empty means none.
+- **The flow host runs on Linux** with the repository mounted at `/repo`. Agent steps on its `local` worker can't run:
+  the image has no agent adapters, Node or CLI logins, and no Confluence exporter. Register this PC in the board's
+  **Fleet** tab and place agent and Confluence steps there.
+- **Still native:** the coding agent workers (`agents/hatchet_worker.py`, `agents/prefect_worker.py`, `trigger dev`).
+- **Not offline yet:** the offline bundle ships the board image but not `agents/`, `flows/` or this compose file.
+
+## The board and flow containers
+
+The root [docker-compose.yml](docker-compose.yml) runs the board and the flow containers on a shared network, `agent-net`.
+Hatchet, Trigger.dev and Prefect are optional and separate. Start the ones you want from their own folders, with
+`docker-compose.agents.yml` added to `COMPOSE_FILE` in their `.env`, so the board reaches them by service name.
+
+```bash
+cp .env.example .env    # set FLOW_HOST_TOKEN and choose the engines
+docker compose up -d --build
+```
+
+| Container | Image | Job |
+|---|---|---|
+| `board` | `agent-board` | The web UI. Holds the Hatchet SDK only with `ENGINES=hatchet`. |
+| `flow-host` | `agent-flow-host` | Drafts, activation, the API the board calls, and the relay PCs connect through. |
+| `flow-worker-hatchet` | `agent-flow-worker-hatchet` | Registers active flows with Hatchet and sends each step to a PC. Profile `hatchet`. |
+| `flow-worker-prefect` | `agent-flow-worker-prefect` | The same for Prefect. Profile `prefect`. |
+
+- **Steps run on registered PCs, never in these containers.** There is no built-in worker: register a PC in the
+  board's **Fleet** tab, including this one if it should run steps. Until then flows wait for a worker.
+- **An engine appears on the board** when `board/.env` has its credential or URL: `HATCHET_CLIENT_TOKEN`,
+  `TRIGGER_SECRET_KEY` / `TRIGGER_DEV_SECRET_KEY`, or `PREFECT_API_URL`.
+- **Activating a flow** restarts the worker process inside each engine's flow worker container, through
+  `agents/flow_worker_service.py`. The containers themselves keep running.
+- **Trigger.dev flows are not covered yet.** `trigger dev` runs on this PC and can't resolve the `flow-host` address
+  stored for a registered PC, so flow steps on Trigger.dev can't reach PCs in this setup.
+- **Registering a PC needs the worker program** in `dist/worker` (`worker/ci/build.sh`, `worker/ci/build.ps1` or
+  `worker/ci/fetch-release.sh`).
+- **Still native:** `agents/hatchet_worker.py`, `agents/prefect_worker.py` and `trigger dev`, which run coding agent
+  cards with this PC's CLI logins.
+- **Not offline yet:** the offline bundle ships the board image but not these images, `agents/`, `flows/` or this file.
+
 ## Secrets and local files
 
 No secrets are committed. Every `.env`, `webapp.env`, `.env.local`, generated registry password and offline bundle (`dist/`) is in [.gitignore](.gitignore). Each one has a committed `*.example` next to it, or is created by a script (`trigger.dev/generate-secrets.sh`, `hatchet/scripts/create-token.sh`, `offline/load.sh`). The example files hold local-only defaults (for example the Hatchet admin password), so change them before exposing a stack beyond your machine.

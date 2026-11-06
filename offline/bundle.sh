@@ -24,7 +24,7 @@ OUT=${OUT:-$ROOT/dist/offline-bundle}
 TRIGGER_RUNTIMES=${TRIGGER_RUNTIMES:-node-24}
 # JS projects whose dependencies must be installable offline (space separated, relative to ROOT).
 NPM_PROJECTS=${NPM_PROJECTS:-trigger.dev/example-project}
-PY_REQUIREMENTS=${PY_REQUIREMENTS:-hatchet/example-worker/requirements.txt board/requirements.txt}
+PY_REQUIREMENTS=${PY_REQUIREMENTS:-hatchet/example-worker/requirements.txt board/requirements.txt board/requirements-hatchet.txt}
 PLATFORM_ARCH=${PLATFORM_ARCH:-amd64}
 
 SKOPEO_IMAGE=${SKOPEO_IMAGE:-quay.io/skopeo/stable:v1.20.0}
@@ -107,7 +107,7 @@ log "Agent board images"
 ensure_env "$ROOT/board"
 (
   cd "$ROOT/board"
-  docker compose build
+  ENGINES=${BOARD_ENGINES:-hatchet} docker compose build
   { docker compose config --images; sed -n 's/^FROM //p' Dockerfile; } | sort -u | tee "$OUT/images/board.txt"
   docker save $(cat "$OUT/images/board.txt") >"$OUT/images/board.tar"
 )

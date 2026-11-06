@@ -29,6 +29,7 @@ def input_model(flow: Flow) -> Any:
 
     fields = {key: (type(value) if value is not None else str | None, value) for key, value in flow.input.items()}
     fields['flowExecution'] = (dict | None, None)
+    fields['flowContext'] = (dict | None, None)
     return create_model(f"Input_{flow.name.replace('-', '_')}", **fields)
 
 

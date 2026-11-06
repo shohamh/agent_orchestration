@@ -108,7 +108,7 @@ function previewOf(name) {
   return { name, revision, activeRevision: entry.active ? revisionOf(entry.active) : null, change, engines, disruptive,
     impact: crypto.createHash('sha256').update(JSON.stringify([revision, engines])).digest('hex').slice(0, 16) };
 }
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;

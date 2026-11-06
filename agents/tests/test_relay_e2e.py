@@ -46,9 +46,7 @@ class RelayedPcTests(FleetFixture):
         self.local = TestServer(self.service); await self.local.start_server()
         self.addAsyncCleanup(self.local.close)
         if register:
-            from flowkit.fleet_registry import delete_worker
             install.register(self.record, TOKEN)
-            delete_worker('local')  # the default entry would point at this machine's real service
         return await self.connect()
 
     async def connect(self):
@@ -119,12 +117,11 @@ class RelayedPcTests(FleetFixture):
                'TRIGGER_SECRET_KEY': '', 'TRIGGER_DEV_SECRET_KEY': '', 'PREFECT_API_URL': ''}
         patcher = patch.dict(os.environ, env); patcher.start(); self.addCleanup(patcher.stop)
         board = TestServer(board_server.make_app()); await board.start_server(); self.addAsyncCleanup(board.close)
-        from flowkit.fleet_registry import delete_worker
         record = install.create(FORM)
         self.service = make_app(worker_id='pc-r', root=self.root/'pc-r', slots=1, token=TOKEN)
         self.service['identity']['uuid'] = record['code']
         self.local = TestServer(self.service); await self.local.start_server(); self.addAsyncCleanup(self.local.close)
-        install.register(record, TOKEN); delete_worker('local')
+        install.register(record, TOKEN)
         connector = Connector(f'http://127.0.0.1:{board.port}', record['code'], TOKEN, self.local.port)
         task = asyncio.create_task(connector.run()); self.addAsyncCleanup(self.stop, task)
         await until(lambda: record['code'] in self.relay.app['relay'].peers and self.relay.app['relay'].peers[record['code']].online(), message='connected through the board')

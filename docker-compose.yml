@@ -1,0 +1,89 @@
+# The agent board and the flow containers, on the shared network agent-net:
+#   cp .env.example .env     # then set the tokens and choose the engines
+#   docker compose up -d --build
+#
+# Hatchet, Trigger.dev and Prefect are optional and not part of this project. Start the ones you want
+# from their own folders, with docker-compose.agents.yml in COMPOSE_FILE to join the network.
+name: agent-board
+
+x-flow-env: &flow-env
+  PYTHONDONTWRITEBYTECODE: "1"
+  FLOW_WORKSPACES: /workspaces
+  # On the shared volume: flow workers only read the repository, and file locks must hold across containers.
+  FLOW_WORKERS_LOCK: /workspaces/.workers.lock
+  FLOW_RELAY_LOCAL_URL: http://flow-host:8097
+  FLOW_HOST_TOKEN: ${FLOW_HOST_TOKEN:?Set FLOW_HOST_TOKEN in .env (see .env.example)}
+  HATCHET_CLIENT_HOST_PORT: ${HATCHET_GRPC:-hatchet-engine:7070}
+  HATCHET_CLIENT_SERVER_URL: ${HATCHET_URL:-http://hatchet-dashboard:80}
+  HATCHET_CLIENT_TLS_STRATEGY: none
+  PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
+  TRIGGER_API_URL: ${TRIGGER_URL:-http://webapp:3000}
+
+# A flow worker coordinates its engine's tasks and only reads the repository.
+x-flow-worker: &flow-worker
+  restart: unless-stopped
+  init: true
+  networks: [agents]
+  volumes:
+    - .:/repo:ro
+    - flow_workspaces:/workspaces
+  environment:
+    <<: *flow-env
+
+include:
+  - path:
+      - board/docker-compose.yml
+      - board/docker-compose.agents.yml
+
+services:
+  # Drafts, activation, the API the board calls and the relay PCs connect through. Steps run on
+  # registered PCs, never here.
+  flow-host:
+    build:
+      context: ./agents
+      target: flow-host
+    image: agent-flow-host:local
+    command: ["python", "-u", "agents/flow_host.py"]
+    restart: unless-stopped
+    init: true
+    networks: [agents]
+    volumes:
+      - .:/repo
+      - flow_workspaces:/workspaces
+    environment:
+      <<: *flow-env
+      FLOW_HOST_BIND: 0.0.0.0
+      FLOW_RELAY_BIND: 0.0.0.0
+      FLOW_BACKENDS: ${FLOW_BACKENDS:-}
+      FLOW_WORKER_SERVICES: hatchet=http://flow-worker-hatchet:8098,prefect=http://flow-worker-prefect:8098
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8095), 3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  flow-worker-hatchet:
+    <<: *flow-worker
+    profiles: ["hatchet"]
+    build:
+      context: ./agents
+      target: flow-worker-hatchet
+    image: agent-flow-worker-hatchet:local
+    command: ["python", "-u", "agents/flow_worker_service.py", "hatchet"]
+
+  flow-worker-prefect:
+    <<: *flow-worker
+    profiles: ["prefect"]
+    build:
+      context: ./agents
+      target: flow-worker-prefect
+    image: agent-flow-worker-prefect:local
+    command: ["python", "-u", "agents/flow_worker_service.py", "prefect"]
+
+networks:
+  agents:
+    name: agent-net
+
+volumes:
+  flow_workspaces:

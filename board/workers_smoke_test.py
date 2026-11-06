@@ -40,7 +40,7 @@ async def main(args):
         for service in services: await service.start_server()
         registry=ROOT/'workers.local.yaml'
         original=registry.read_bytes() if registry.exists() else None
-        previous=yaml.safe_load(original) if original else {'workers':[{'id':'local','url':'http://127.0.0.1:8096','pool':'default','tags':[],'token_env':'FLOW_WORKER_TOKEN'}]}
+        previous=yaml.safe_load(original) if original else {'workers':[]}
         previous['workers'] += [{'id':name,'url':str(service.make_url('')).rstrip('/'),'pool':'smoke','tags':['test']} for name,service in zip(('smoke-a','smoke-b'),services)]
         registry.write_text(yaml.safe_dump(previous),encoding='utf-8')
         wiki=({'base_url':'https://shibboleth.atlassian.net/wiki','page_id':'2067399657','target':'context/wiki'}

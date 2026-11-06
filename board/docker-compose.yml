@@ -7,7 +7,11 @@ name: agent-board
 
 services:
   board:
-    build: .
+    build:
+      context: .
+      args:
+        # Engine SDKs to build in: hatchet for the Hatchet tab, or empty
+        ENGINES: ${ENGINES:-}
     image: agent-board:local
     restart: unless-stopped
     ports:
@@ -28,7 +32,7 @@ services:
       TRIGGER_DEV_SECRET_KEY: ${TRIGGER_DEV_SECRET_KEY:-}
       TRIGGER_API_URL: ${TRIGGER_URL:-http://host.docker.internal:8030}
       # Prefect (leave empty to disable): the server's REST API
-      PREFECT_API_URL: ${PREFECT_API_URL-http://host.docker.internal:4200/api}
+      PREFECT_API_URL: ${PREFECT_API_URL:-}
       # Portable flows: the flow host on the worker PC (agents/flow_host.py)
       FLOW_HOST_URL: ${FLOW_HOST_URL:-http://host.docker.internal:8095}
       FLOW_HOST_TOKEN: ${FLOW_HOST_TOKEN:-}

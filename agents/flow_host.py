@@ -27,7 +27,8 @@
 
 Env: FLOW_HOST_BIND (127.0.0.1), FLOW_HOST_PORT (8095), FLOW_HOST_TOKEN, FLOW_BACKENDS
 (hatchet,prefect,trigger: which to keep in sync), FLOW_STATE_DIR, FLOW_ACTIVATION_READY_SECONDS (5:
-how long a restarted worker must stay up to count as active).
+how long a restarted worker must stay up to count as active), FLOW_WORKER_SERVICES (hatchet=<url>,prefect=<url>:
+flow workers running as their own containers instead of child processes).
 """
 
 import hmac
@@ -50,7 +51,7 @@ from flowkit import document, trigger_codegen  # noqa: E402
 from flowkit.activation import ENGINES, Store  # noqa: E402
 from flowkit.definition import FLOW_NAME, FlowError, parse_text  # noqa: E402
 
-WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py", 'execution': 'flow_execution_worker.py', 'relay': 'fleet_relay.py'}
+WORKERS = {"hatchet": "flow_worker_hatchet.py", "prefect": "flow_worker_prefect.py", 'relay': 'fleet_relay.py'}
 # `lock` guards drafts and layouts (held briefly); `activation_lock` serializes activations and worker
 # restarts, which take seconds, so saving a draft never waits for a restart.
 lock = threading.RLock()
@@ -69,13 +70,15 @@ class Supervisor:
         self.backends = [b for b in backends if b in WORKERS]
         self.store = store
         self.processes: dict[str, subprocess.Popen] = {}
+        self.revisions: dict[str, dict] = {}
         self.stopping = False
 
     def _start(self, backend: str) -> None:
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         env = {**os.environ, "PYTHONUTF8": "1"}
         if self.store is not None and backend in ENGINES:
-            env.update(FLOW_STATE_DIR=str(self.store.state), FLOW_ACTIVE_REVISIONS=json.dumps(self.store.active_revisions(backend)))
+            self.revisions[backend] = self.store.active_revisions(backend)
+            env.update(FLOW_STATE_DIR=str(self.store.state), FLOW_ACTIVE_REVISIONS=json.dumps(self.revisions[backend]))
         self.processes[backend] = subprocess.Popen(
             [sys.executable, "-u", str(HERE / WORKERS[backend])], cwd=HERE.parent, creationflags=flags,
             start_new_session=os.name != "nt", env=env)
@@ -153,6 +156,83 @@ class Supervisor:
         self.stopping = True
         for backend in list(self.processes):
             self._stop(backend)
+
+
+class RemoteSupervisor:
+    """Supervisor's job when each flow worker is its own container (FLOW_WORKER_SERVICES, see
+    flow_worker_service.py): the same calls, made over the network."""
+
+    def __init__(self, services: dict[str, str], backends: list[str], store: Store) -> None:
+        self.services = {b: services[b].rstrip("/") for b in backends if b in services}
+        self.backends = list(self.services)
+        self.store = store
+        self.stopping = False
+
+    def _call(self, backend: str, path: str, body: dict | None = None, timeout: float = 5) -> dict:
+        token = os.environ.get("FLOW_HOST_TOKEN", "")
+        request = urllib.request.Request(self.services[backend] + path, data=None if body is None else json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json", **({"Authorization": f"Bearer {token}"} if token else {})})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read())
+
+    def _restart(self, backend: str, wait: float) -> str | None:
+        if backend not in self.services:
+            return f"the {backend} flow worker is not configured (FLOW_WORKER_SERVICES)"
+        try:
+            return self._call(backend, "/restart", {"wait": wait}, timeout=wait + 30).get("error")
+        except (OSError, ValueError) as exc:
+            return f"the {backend} flow worker at {self.services[backend]} did not answer ({type(exc).__name__}); is its compose profile on?"
+
+    def restart(self) -> None:
+        for backend, error in self.restart_many(self.backends, 0).items():
+            if error:
+                log(error)
+
+    def running(self, backend: str) -> bool:
+        try:
+            return bool(self._call(backend, "/state", timeout=2)["running"])
+        except (KeyError, OSError, ValueError):
+            return False
+
+    def restart_many(self, backends: list[str], wait: float) -> dict[str, str | None]:
+        """Together, so the interruption is one moment, like Supervisor.restart_many."""
+        errors: dict[str, str | None] = {}
+
+        def one(backend: str) -> None:
+            errors[backend] = self._restart(backend, wait)
+        threads = [threading.Thread(target=one, args=(b,)) for b in backends]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return errors
+
+    def restart_one(self, backend: str, wait: float) -> str | None:
+        return self.restart_many([backend], wait)[backend]
+
+    def watch(self) -> None:
+        """A worker container that started late or restarted may be behind the active versions:
+        bring it up to date. Each container keeps its own worker process running."""
+        while not self.stopping:
+            time.sleep(5)
+            if not activation_lock.acquire(blocking=False):
+                continue  # an activation is restarting workers right now
+            try:
+                for backend in self.backends:
+                    try:
+                        behind = self._call(backend, "/state", timeout=2).get("revisions") != self.store.active_revisions(backend)
+                    except (OSError, ValueError):
+                        continue  # not up; it starts on the active versions
+                    if behind:
+                        log(f"{backend} flow worker is behind the active versions; restarting it")
+                        error = self._restart(backend, 0)
+                        if error:
+                            log(error)
+            finally:
+                activation_lock.release()
+
+    def stop(self) -> None:
+        self.stopping = True  # the containers stay up: compose owns them
 
 
 class HostError(Exception):
@@ -546,9 +626,9 @@ class Api(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _json_body(self) -> dict:
+    def _json_body(self, limit: int = 1024 * 1024) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 1024 * 1024:
+        if length > limit:
             raise ValueError("request too large")
         body = json.loads(self.rfile.read(length) or b"{}")
         if not isinstance(body, dict): raise ValueError('body must be an object')
@@ -653,10 +733,10 @@ class Api(BaseHTTPRequestHandler):
                 from flowkit import install
                 record = install.create(self._json_body(), registered={w['id'] for w in fleet_registry.load_fleet()})
                 return self._send(200, {'install': install.view(record), 'commands': install.commands(record)}) or True
-            install_match = re.fullmatch(r'/fleet/installs/([A-Za-z0-9_-]{43})', path)
+            install_match = re.fullmatch(r'/fleet/installs/([^/]+)', path)
             if install_match and method == 'DELETE':
                 from flowkit import install
-                return self._send(200, {'install': install.cancel(install_match[1])}) or True
+                return self._send(200, {'install': install.cancel(unquote(install_match[1], errors='strict'))}) or True
             if (method, path) == ('POST', '/fleet/workers'):
                 saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
                 return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
@@ -684,8 +764,55 @@ class Api(BaseHTTPRequestHandler):
             self._send(502, {'error': f'The worker did not answer as expected ({type(exc).__name__})'})
         return True
 
+    def _launch(self, method: str) -> bool:
+        """Uploads, attached sources and schedules behind the board's New card form; False otherwise."""
+        url = urlsplit(self.path)
+        if not re.match(r'/(uploads|schedules|launch/context)(/|$)', url.path):
+            return False
+        from flowkit import launch_context, schedules
+        store = schedules.Schedules(self.host.store.state / 'schedules.json')
+        try:
+            target = (method, url.path)
+            found = re.fullmatch(r'/schedules/([0-9a-f]{32})(?:/(enable|disable|result))?', url.path)
+            upload = re.fullmatch(r'/uploads/([0-9a-f]{32})', url.path)
+            if target == ('POST', '/launch/context'):
+                result = {'context': launch_context.normalize(self._json_body().get('context'))}
+            elif target == ('POST', '/uploads'):
+                body = self._json_body(limit=90 * 1024 * 1024)  # 64 MiB as base64, the transfer limit of a run
+                result = launch_context.save_upload(body.get('name'), body.get('data'), keep=store.referenced_uploads())
+            elif method == 'DELETE' and upload:
+                launch_context.delete_upload(upload[1])
+                result = {'ok': True}
+            elif target == ('GET', '/schedules'):
+                query = parse_qs(url.query)
+                result = {'schedules': store.list(query.get('system', [None])[0], query.get('board', [None])[0])}
+            elif target == ('POST', '/schedules'):
+                result = store.create(self._json_body(limit=256 * 1024))
+            elif target == ('POST', '/schedules/preview'):
+                result = {'next': schedules.upcoming(self._json_body())}
+            elif target == ('POST', '/schedules/claim'):
+                result = {'schedules': store.claim(self._json_body().get('systems') or [])}
+            elif method == 'GET' and found and not found[2]:
+                result = store.get(found[1])
+            elif method == 'DELETE' and found and not found[2]:
+                store.delete(found[1])
+                result = {'ok': True}
+            elif method == 'POST' and found and found[2] in ('enable', 'disable'):
+                result = store.set_enabled(found[1], found[2] == 'enable')
+            elif method == 'POST' and found and found[2] == 'result':
+                body = self._json_body()
+                result = store.record(found[1], run=body.get('run'), error=body.get('error'), skipped=body.get('skipped')) or {'ok': True}
+            else:
+                result = None
+            self._send(*((200, result) if result is not None else (404, {'error': 'not found'})))
+        except LookupError as exc:
+            self._send(404, {'error': str(exc)})
+        except ValueError as exc:
+            self._send(400, {'error': str(exc)})
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("GET") or self._fleet("GET"):
+        if not self._allowed() or self._documents("GET") or self._fleet("GET") or self._launch("GET"):
             return
         if self.path == '/workers':
             from flowkit.workers import catalog
@@ -703,7 +830,7 @@ class Api(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("POST") or self._fleet("POST"):
+        if not self._allowed() or self._documents("POST") or self._fleet("POST") or self._launch("POST"):
             return
         if self.path == '/workers':
             from flowkit.fleet_registry import save_worker
@@ -732,7 +859,7 @@ class Api(BaseHTTPRequestHandler):
                 card = body.get('card')
                 if card is not None:  # a standalone card: {agent, worker}
                     if not isinstance(card, dict) or set(card) - {'agent', 'worker'}: raise ValueError('card must contain agent and worker')
-                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine)))
+                    return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine, card.get('command'))))
                 source = body.get('flow')
                 flow = parse_text(source) if isinstance(source, str) else parse(source)
                 return self._send(200, asyncio.run(validate_flow_launch(flow, body.get('execution'), engine)))
@@ -816,7 +943,7 @@ class Api(BaseHTTPRequestHandler):
             self._send(400, {"error": str(exc)})
 
     def do_DELETE(self) -> None:  # noqa: N802
-        if not self._allowed() or self._documents("DELETE") or self._fleet("DELETE"):
+        if not self._allowed() or self._documents("DELETE") or self._fleet("DELETE") or self._launch("DELETE"):
             return
         match = re.fullmatch(r'/workers/([^/]+)', urlsplit(self.path).path)
         if match:
@@ -847,15 +974,15 @@ def serve(host: Host, bind: str, port: int) -> ThreadingHTTPServer:
 def main() -> None:
     backends = [b.strip() for b in os.environ.get("FLOW_BACKENDS", "hatchet,prefect,trigger").split(",") if b.strip()]
     store = Store()
-    supervisor = Supervisor(backends, store)
+    services = dict(item.split("=", 1) for item in os.environ.get("FLOW_WORKER_SERVICES", "").split(",") if item)
+    supervisor = RemoteSupervisor(services, backends, store) if services else Supervisor(backends, store)
     host = Host(store, supervisor, backends)
     bind, port = os.environ.get("FLOW_HOST_BIND", "127.0.0.1"), int(os.environ.get("FLOW_HOST_PORT", "8095"))
     if bind not in ('127.0.0.1','localhost','::1') and not os.environ.get('FLOW_HOST_TOKEN'):
         raise SystemExit('FLOW_HOST_TOKEN is required for a network flow host')
-    execution = Supervisor((['execution'] if os.environ.get('FLOW_EXECUTION_SERVICE', '1') != '0' else [])
-                           + (['relay'] if os.environ.get('FLOW_RELAY_SERVICE', '1') != '0' else []))
-    execution.restart()
-    threading.Thread(target=execution.watch, daemon=True).start()
+    relay = Supervisor(['relay'] if os.environ.get('FLOW_RELAY_SERVICE', '1') != '0' else [])
+    relay.restart()
+    threading.Thread(target=relay.watch, daemon=True).start()
     host.startup()
     threading.Thread(target=supervisor.watch, daemon=True).start()
     stopping = threading.Event()
@@ -869,7 +996,7 @@ def main() -> None:
     finally:
         stopping.set()
         supervisor.stop()
-        execution.stop()
+        relay.stop()
 
 
 if __name__ == "__main__":

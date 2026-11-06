@@ -1,10 +1,10 @@
-"""Passes a PC's install and relay calls to the relay service on the coordinator.
+"""Passes a PC's install, update and relay calls to the relay service on the coordinator.
 
-The PCs can reach only this board, so `/install/*` (the one-line installer) and `/relay/*` (the
-outbound connector's long poll) are proxied to the relay (env FLOW_RELAY_URL, default
-http://host.docker.internal:8097). These paths skip the board login: they authenticate with the
-install code or the PC's token, which the relay checks. Bodies stream in both directions; a job's
-workspace can be 190 MB, so nothing is buffered and a request body is capped at MAX_BODY.
+The PCs can reach only this board, so `/install/*` (the one-line installer), `/update/*` (one-time
+update links) and `/relay/*` (the outbound connector's long poll) are proxied to the relay (env
+FLOW_RELAY_URL, default http://host.docker.internal:8097). These paths skip the board login: they
+authenticate with the install code, update code or PC's token, which the relay checks. Bodies stream
+in both directions; a job's workspace can be 190 MB, so nothing is buffered and a request body is capped at MAX_BODY.
 """
 import os
 
@@ -14,8 +14,8 @@ from aiohttp import web
 MAX_BODY = 200 * 1024 * 1024
 CHUNK = 64 * 1024
 FORWARD_REQUEST = ('authorization', 'content-type', 'accept', 'x-relay-status', 'x-relay-drop')
-FORWARD_RESPONSE = ('content-type', 'cache-control')
-PREFIXES = ('/install/', '/relay/')
+FORWARD_RESPONSE = ('content-type', 'content-disposition', 'cache-control', 'x-worker-version')
+PREFIXES = ('/install/', '/update/', '/relay/')
 
 
 def relay_url() -> str:

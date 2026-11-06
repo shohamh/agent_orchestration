@@ -11,9 +11,9 @@ class FleetTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {'FLOW_WORKERS_FILE': str(self.path), 'SECRET_TOKEN': 'top-secret'})
         self.env.start(); self.addCleanup(self.env.stop)
 
-    def test_implicit_local_and_migration_is_idempotent(self):
+    def test_no_registry_is_an_empty_fleet_and_migration_is_idempotent(self):
         from flowkit.fleet_registry import load_fleet, migrate_legacy_registry
-        self.assertEqual(load_fleet()[0]['pools'], ['default'])
+        self.assertEqual(load_fleet(), [])
         self.path.write_text('workers:\n- id: pc\n  pool: build\n  url: http://localhost:8096\n  token_env: SECRET_TOKEN\n', encoding='utf-8')
         migrate_legacy_registry(); first = self.path.read_bytes(); migrate_legacy_registry()
         self.assertEqual(first, self.path.read_bytes())
@@ -86,7 +86,7 @@ class FleetConcurrencyTests(unittest.TestCase):
             script="import sys; sys.path.insert(0, 'agents'); from flowkit.fleet_registry import save_worker; save_worker({'id':sys.argv[1]})"
             processes=[subprocess.Popen([sys.executable,'-c',script,'worker'+str(i)],env=env) for i in range(12)]
             self.assertEqual([p.wait(timeout=30) for p in processes],[0]*12)
-            self.assertEqual(len(yaml.safe_load(path.read_text())['workers']),13)
+            self.assertEqual(len(yaml.safe_load(path.read_text())['workers']),12)
 
     def test_migrate_then_restore_protected_backup(self):
         from flowkit.fleet_registry import migrate_legacy_registry

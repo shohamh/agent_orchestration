@@ -1,17 +1,24 @@
-"""The board's pass-through for PCs: /install/* and /relay/* skip the login and stream to the relay."""
+"""The board's pass-through for PCs: install, update and relay credentials never unlock the board."""
 import asyncio
+import hashlib
 import os
 import sys
+import tempfile
+import time
+import uuid
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'agents'))
 sys.path.insert(0, str(Path(__file__).parent))
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 import relay_proxy
 import server
+from flowkit import install as worker_install, update as worker_update
+from flowkit.relay import make_app as make_relay_app
 
 
 def fake_relay(seen):
@@ -95,6 +102,155 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get('/install/CODE/install.sh')
         self.assertEqual(response.status, 502)
         self.assertIn('relay', (await response.json())['error'])
+
+
+class BinaryDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        binaries = root / 'binaries'; binaries.mkdir()
+        self.payloads = {'windows': b'MZ\x00\xff' + bytes(range(256)) * 513,
+                         'linux': b'\x7fELF\x00' + bytes(reversed(range(256))) * 513}
+        for os_name, filename in worker_install.TARGETS.items():
+            (binaries / filename).write_bytes(self.payloads[os_name])
+        env = {'BOARD_PASSWORD': 'correct horse', 'BOARD_SECRET': 's', 'FLOW_RELAY_URL': '',
+               'FLOW_STATE_DIR': str(root / 'state'), 'FLOW_WORKER_BINARIES': str(binaries),
+               'FLOW_WORKERS_FILE': str(root / 'workers.yaml'), 'FLOW_WORKERS_ENV_FILE': str(root / 'workers.env')}
+        for key in ('HATCHET_CLIENT_TOKEN', 'TRIGGER_SECRET_KEY', 'TRIGGER_DEV_SECRET_KEY', 'PREFECT_API_URL'): env[key] = ''
+        patcher = patch.dict(os.environ, env); patcher.start(); self.addCleanup(patcher.stop)
+        for name in ('FAILED_ATTEMPTS', '_binary_versions'):
+            patcher = patch.object(worker_install, name, {}); patcher.start(); self.addCleanup(patcher.stop)
+        self.worker_id = str(uuid.uuid4())
+        self.worker_token = 'download-worker-token-0123456789abcdef'
+        upstream = make_relay_app(token_for=lambda key: self.worker_token if key == self.worker_id else None,
+                                  install=worker_install.add_routes)
+        worker_update.add_routes(upstream)
+        self.upstream_cookies = []
+
+        @web.middleware
+        async def observe_cookies(request, handler):
+            self.upstream_cookies.append(request.headers.get('Cookie'))
+            return await handler(request)
+
+        upstream.middlewares.append(observe_cookies)
+        self.upstream = TestClient(TestServer(upstream)); self.addAsyncCleanup(self.upstream.close)
+        await self.upstream.start_server()
+        os.environ['FLOW_RELAY_URL'] = str(self.upstream.make_url('/')).rstrip('/')
+        self.client = TestClient(TestServer(server.make_app())); self.addAsyncCleanup(self.client.close)
+        await self.client.start_server()
+
+    def create_install(self, os_name, name):
+        return worker_install.create({'id': name, 'os': os_name, 'engines': ['hatchet'], 'pool': 'build',
+                                      'server': 'http://192.0.2.10:8090'})
+
+    async def assert_binary(self, client, path, os_name, headers=None):
+        response = await client.get(path, headers=headers, allow_redirects=False)
+        self.assertEqual(response.status, 200, path)
+        self.assertEqual(await response.read(), self.payloads[os_name])
+        self.assertEqual(response.content_type, 'application/octet-stream')
+        self.assertIsNotNone(response.content_disposition)
+        self.assertEqual(response.content_disposition.type, 'attachment')
+        self.assertEqual(response.content_disposition.filename, worker_install.TARGETS[os_name])
+        self.assertEqual(response.headers.get('Cache-Control'), 'no-store')
+        self.assertEqual(response.headers.get('X-Worker-Version'), hashlib.sha256(self.payloads[os_name]).hexdigest()[:16])
+        self.assertNotIn('Set-Cookie', response.headers)
+
+    async def assert_rejected(self, path, status=404, headers=None):
+        response = await self.client.get(path, headers=headers, allow_redirects=False)
+        self.assertEqual(response.status, status, path)
+        self.assertEqual(response.content_type, 'application/json')
+        self.assertIn('error', await response.json())
+        self.assertNotIn('Content-Disposition', response.headers)
+
+    async def test_install_download_preserves_native_filename_bytes_and_metadata(self):
+        for os_name in self.payloads:
+            record = self.create_install(os_name, f'install-{os_name}')
+            path = f'/install/{record["code"]}/agent-worker'
+            for client in (self.upstream, self.client):
+                with self.subTest(os=os_name, proxied=client is self.client):
+                    await self.assert_binary(client, path, os_name)
+
+    async def test_generated_update_links_download_and_become_unusable_after_done(self):
+        for os_name in self.payloads:
+            record = worker_update.create_link(f'update-{os_name}', os_name)
+            path = f'/update/{record["code"]}/agent-worker'
+            for client in (self.upstream, self.client):
+                with self.subTest(os=os_name, proxied=client is self.client):
+                    await self.assert_binary(client, path, os_name)
+            response = await self.client.post(f'/update/{record["code"]}/done', json={'ok': True}, allow_redirects=False)
+            self.assertEqual(response.status, 204)
+            self.assertEqual(worker_update.read_link(record['code'])['state'], 'done')
+            await self.assert_rejected(path)
+            response = await self.client.post(f'/update/{record["code"]}/done', json={'ok': True}, allow_redirects=False)
+            self.assertEqual(response.status, 404)
+
+    async def test_failed_update_links_cannot_download_again(self):
+        record = worker_update.create_link('failed-update', 'linux')
+        response = await self.client.post(f'/update/{record["code"]}/done', json={'ok': False, 'error': 'interrupted'}, allow_redirects=False)
+        self.assertEqual(response.status, 204)
+        self.assertEqual(worker_update.read_link(record['code'])['state'], 'failed')
+        await self.assert_rejected(f'/update/{record["code"]}/agent-worker')
+
+    async def test_unknown_cancelled_and_expired_install_links_are_denied(self):
+        cancelled = self.create_install('windows', 'cancelled-install')
+        worker_install.cancel(cancelled['code'])
+        expired = self.create_install('linux', 'expired-install')
+        expired['expires_at'] = worker_install.now() - 1; worker_install.write_record(expired)
+        for code in ('invalid', str(uuid.uuid4()), cancelled['code'], expired['code']):
+            with self.subTest(code=code):
+                await self.assert_rejected(f'/install/{code}/agent-worker')
+
+    async def test_update_links_reject_unknown_expired_and_install_uuid_credentials(self):
+        expired = worker_update.create_link('expired-update', 'linux')
+        expired['expires_at'] = time.time() - 1
+        worker_update.atomic_json(worker_update.links_dir() / f'{expired["code"]}.json', expired)
+        # Even a stored record cannot make an install UUID into an update-link credential.
+        install_record = self.create_install('windows', 'different-credential')
+        wrong_domain = {**expired, 'code': install_record['code'], 'expires_at': time.time() + 600}
+        worker_update.atomic_json(worker_update.links_dir() / f'{wrong_domain["code"]}.json', wrong_domain)
+        for code in ('invalid', 'A' * 43, expired['code'], wrong_domain['code']):
+            with self.subTest(code=code):
+                await self.assert_rejected(f'/update/{code}/agent-worker')
+        response = await self.client.post(f'/update/{wrong_domain["code"]}/done', json={'ok': True}, allow_redirects=False)
+        self.assertEqual(response.status, 404)
+
+    async def test_authorized_relay_updates_preserve_native_filename_bytes_and_metadata(self):
+        for os_name in self.payloads:
+            path = f'/relay/{self.worker_id}/update/binary?os={os_name}&arch=x86_64'
+            for client in (self.upstream, self.client):
+                with self.subTest(os=os_name, proxied=client is self.client):
+                    await self.assert_binary(client, path, os_name, {'Authorization': f'Bearer {self.worker_token}'})
+
+    async def test_public_update_download_never_unlocks_board_routes(self):
+        record = worker_update.create_link('public-update', 'windows')
+        await self.assert_binary(self.client, f'/update/{record["code"]}/agent-worker', 'windows')
+        for path in ('/api/systems', '/api/fleet/updates', '/api/fleet/installs'):
+            response = await self.client.get(path, allow_redirects=False)
+            self.assertEqual(response.status, 401, path)
+        self.assertEqual((await self.client.post('/api/fleet/installs', json={}, allow_redirects=False)).status, 401)
+        for path in ('/', '/update', '/updates', '/updater', '/relay', '/installer', '/static/chat.js'):
+            response = await self.client.get(path, allow_redirects=False)
+            self.assertEqual(response.status, 302, path)
+            self.assertEqual(response.headers.get('Location'), '/login')
+
+    async def test_board_session_cookies_never_replace_upstream_worker_authentication_or_leak(self):
+        login = await self.client.post('/login', data={'password': 'correct horse'}, allow_redirects=False)
+        self.assertEqual(login.status, 302)
+        self.assertTrue(login.cookies['board_session']['httponly'])
+        self.assertEqual(login.cookies['board_session']['samesite'], 'Strict')
+        self.assertEqual((await self.client.get('/api/systems')).status, 200)
+        install_record = self.create_install('windows', 'cookie-install')
+        await self.assert_binary(self.client, f'/install/{install_record["code"]}/agent-worker', 'windows')
+        update_record = worker_update.create_link('cookie-update', 'linux')
+        await self.assert_binary(self.client, f'/update/{update_record["code"]}/agent-worker', 'linux')
+        path = f'/relay/{self.worker_id}/update/binary?os=windows'
+        for headers in (None, {'Authorization': 'Bearer wrong'}, {'Authorization': f'Bearer {update_record["code"]}'}):
+            await self.assert_rejected(path, 401, headers)
+        await self.assert_rejected('/relay/unknown/update/binary?os=windows', 401, {'Authorization': f'Bearer {self.worker_token}'})
+        await self.assert_binary(self.client, path, 'windows', {'Authorization': f'Bearer {self.worker_token}'})
+        self.assertTrue(self.upstream_cookies)
+        self.assertEqual(self.upstream_cookies, [None] * len(self.upstream_cookies))
+        self.assertEqual((await self.client.get('/api/systems')).status, 200)
 
 
 if __name__ == '__main__':

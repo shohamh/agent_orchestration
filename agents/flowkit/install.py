@@ -332,7 +332,7 @@ async def agent_binary(request):
     path = binary_path(record['os'])
     if path is None:
         return json_error(404, f"This server has no worker program for {record['os']} yet")
-    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': binary_version(record['os']) or '', 'Cache-Control': 'no-store'})
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{path.name}"', 'X-Worker-Version': binary_version(record['os']) or '', 'Cache-Control': 'no-store'})
 
 
 async def bundle(request):

@@ -1,7 +1,7 @@
 """Placement requirements and matching. Unknown capability or availability is never treated as
 verified absence: only a fresh `absent` result or a selection mismatch makes a worker incompatible.
 
-A requirement object is a worker selector (`id`, `pool`, `tags`) plus the step's detected
+A requirement object is a worker selector (`id`, `pool`, `pools` (any of them), `tags` (all of them)) plus the step's detected
 software (`agent` or `command`), or `ambiguous_command` when a program's executable cannot be
 determined safely, and `engine` when the engine running the task is known: a worker serves only
 the engines registered for it (legacy entries without `engines` serve every engine). Worker objects are the sanitized fleet entries (no URL or credentials) with
@@ -44,7 +44,9 @@ def requirements_for(flow, step_id, configured=None, selection=None):
     return {**{k: v for k, v in wanted.items() if v}, **software_requirement(flow.steps[step_id])}
 
 
-CARD_FIELDS = {'goal', 'agent', 'workspace', 'simulateFailures', 'resumeSessionId'}
+CARD_FIELDS = {'goal', 'agent', 'workspace', 'simulateFailures', 'resumeSessionId', 'programInput', 'attached'}
+PROGRAM = 'program'  # the `agent` of a program card, whose goal is the command it runs
+MAX_CARD_GOAL = 30000  # the board allows 20000; the rest is the note about attached sources
 
 
 def card_session(config):
@@ -53,13 +55,13 @@ def card_session(config):
     workspace) is refused rather than assumed to exist there."""
     from .definition import AGENTS
     if not isinstance(config, dict) or set(config) - CARD_FIELDS:
-        raise ValueError('A card session contains only goal, agent, workspace, simulateFailures and resumeSessionId')
+        raise ValueError('A card session contains only goal, agent, workspace, simulateFailures, resumeSessionId, programInput and attached')
     if config.get('workspace') or config.get('resumeSessionId'):
         raise ValueError('A card placed on a fleet worker runs in a new workspace on that worker; '
                          'clear the workspace (host paths and resumed sessions are not available on other PCs)')
-    if not isinstance(config.get('goal'), str) or not config['goal'].strip() or len(config['goal']) > 20000:
+    if not isinstance(config.get('goal'), str) or not config['goal'].strip() or len(config['goal']) > MAX_CARD_GOAL:
         raise ValueError('A card needs a goal of at most 20000 characters')
-    if config.get('agent', 'codex') not in AGENTS:
+    if config.get('agent', 'codex') not in (*AGENTS, PROGRAM):
         raise ValueError(f"agent must be one of {', '.join(AGENTS)}")
     failures = config.get('simulateFailures', 0)
     if type(failures) is not int or not 0 <= failures <= 20:
@@ -70,7 +72,14 @@ def card_session(config):
 def card_requirements(config, selection):
     """The requirement object of a standalone card: its worker selection plus its agent."""
     card_session(config)
-    return {**{k: v for k, v in selection.items() if v}, 'agent': config.get('agent', 'codex')}
+    return {**{k: v for k, v in selection.items() if v}, **card_software(config.get('agent', 'codex'), config['goal'])}
+
+
+def card_software(agent, command=None):
+    """What a card needs installed: its agent, or the program it runs."""
+    if agent != PROGRAM: return {'agent': agent}
+    from .launch_context import program_requirement
+    return program_requirement(command)
 
 
 def _reason(code, message, **extra):
@@ -94,6 +103,9 @@ def match_worker(worker, requirements, now=None):
     pool = requirements.get('pool')
     if pool and pool not in (worker.get('pools') or []):
         incompatible.append(_reason('pool', f'{wid} is not in pool {pool}', pool=pool))
+    pools = requirements.get('pools') or []
+    if pools and not set(pools) & set(worker.get('pools') or []):
+        incompatible.append(_reason('pool', f"{wid} is not in {'pool' if len(pools) == 1 else 'any of the pools'} {', '.join(pools)}", pools=pools))
     missing = [t for t in requirements.get('tags') or [] if t not in (worker.get('tags') or [])]
     if missing:
         incompatible.append(_reason('tags', f"{wid} lacks tags: {', '.join(missing)}", missing=missing))
@@ -166,7 +178,8 @@ def detected(worker, requirements):
 
 def _resolution(code, requirements):
     if code == 'tags':
-        where = f" in pool {requirements['pool']}" if requirements.get('pool') else ''
+        chosen = [requirements['pool']] if requirements.get('pool') else requirements.get('pools') or []
+        where = f" in {'pool' if len(chosen) == 1 else 'pools'} {', '.join(chosen)}" if chosen else ''
         return f'Add the missing tags to a worker{where}, or remove them from the requirement.'
     if code == 'engine':
         label = ENGINE_LABELS.get(requirements.get('engine'), requirements.get('engine'))

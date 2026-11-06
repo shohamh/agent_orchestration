@@ -1,0 +1,9 @@
+# Used by the root docker-compose.yml: puts the board on the shared network with the flow containers
+# and any engine started with its docker-compose.agents.yml.
+services:
+  board:
+    networks: [default, agents]
+
+networks:
+  agents:
+    name: agent-net

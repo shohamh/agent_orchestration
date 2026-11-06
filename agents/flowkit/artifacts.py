@@ -78,7 +78,8 @@ def ancestor_ids(flow, step):
     return found
 
 
-def ancestor_files(flow, step, root: Path):
+def ancestor_files(flow, step, root: Path, base=None):
+    """The files a step starts with: `base` (what was attached to the run) plus its ancestors' changes."""
     ancestors = ancestor_ids(flow, step)
     history = {}
     for sid in flow.steps:  # definitions are topologically ordered
@@ -89,10 +90,11 @@ def ancestor_files(flow, step, root: Path):
         for name, value in json.loads(path.read_text(encoding='utf-8')).items():
             # Keep causally maximal writers only. A later common descendant can resolve a change.
             history[name] = [(writer, old) for writer, old in history.get(name, []) if writer not in prior] + [(sid, value)]
-    result = {}
+    result = dict(base or {})
     for name, writers in history.items():
         value = writers[0][1]
         if any(other != value for _, other in writers):
             raise ValueError(f'Workspace conflict for {name}: ' + ', '.join(w for w, _ in writers))
         if value is not None: result[name] = value
+        else: result.pop(name, None)
     return validate(result)

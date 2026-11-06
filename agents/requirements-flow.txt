@@ -1,0 +1,6 @@
+# What every flow container needs (see agents/Dockerfile). Versions as in requirements.txt.
+aiohttp==3.14.5
+python-dotenv==1.2.4
+PyYAML==6.0.3
+# Schedules repeat in the user's time zone; the slim image has no system zone data.
+tzdata==2026.6

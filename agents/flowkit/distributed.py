@@ -6,11 +6,12 @@ import os
 import threading
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import aiohttp
 
-from .artifacts import ancestor_files, snapshot, publish
+from .artifacts import ancestor_files, snapshot, publish, validate
 from .definition import FLOWS_DIR
 from .restart import prepare_workspace, read_result, save_result, atomic_json, descendants, workspace_path, pin_definition, publication_lock
 from .fleet_matching import requirements_for, validate_launch, with_engine
@@ -110,6 +111,52 @@ class _Replace(Exception):
         self.reason = reason
 
 
+CONTEXT_KEY = 'context-setup'  # execution records of the jobs that fetch what was attached to a run
+CONFLUENCE_KEY = 'context-confluence'
+CONTEXT_FILE = '.flow-launch-context.json'
+
+
+async def attached_files(root, context, wanted, engine, receive, sink):
+    """The files attached to this run. The first step to get here prepares them, the others wait:
+    every step must see the same files, or parallel clones would conflict where branches join."""
+    from . import launch_context
+    if not launch_context.has_sources(context): return {}
+    path, owner = root / CONTEXT_FILE, None
+    while not path.exists():
+        check_cancelled(root)
+        owner = _try_owner(root, '_context')
+        if owner: break
+        await asyncio.sleep(.5)
+    try:
+        if not path.exists():
+            files = await asyncio.to_thread(launch_context.upload_files, context)
+            remote, chosen = launch_context.remote_sources(context), {k: v for k, v in wanted.items() if v}
+            async def fetch(key, start, needs, relay):
+                payload = {'files': {}, 'assets': {}, 'start': {**start, 'runId': root.name}}
+                await _placed(root, key, with_engine({**chosen, **needs}, engine), wanted, payload, CARD_TIMEOUT, receive,
+                              relay.forward if relay else sink, engine, lambda data: files.update(data['files']), announce=False)
+            try:
+                if remote.get('repositories'):
+                    relay = launch_context.SourceRelay(sink, 'context:repositories', 'Clone repositories', launch_context.targets({'r': remote['repositories']}))
+                    try: await fetch(CONTEXT_KEY, launch_context.clone_job(remote['repositories']), {'command': 'git'}, relay)
+                    except Exception as exc:
+                        await relay.failed(exc, announce=False)
+                        raise
+                    await relay.finished()
+                if remote.get('confluence'):
+                    await fetch(CONFLUENCE_KEY, {'attached': {'confluence': remote['confluence']}}, {}, None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                message = f'Could not prepare what was attached to this run ({launch_context.targets(remote)}): {exc}'
+                await launch_context.Emitter(sink)('error', message=message[:2000], will_retry=False)
+                raise RuntimeError(message) from exc
+            atomic_json(path, validate(files))
+    finally:
+        if owner: _release_owner(owner)
+    return json.loads(await asyncio.to_thread(path.read_text, encoding='utf-8'))
+
+
 def uses_fleet(flow, configured, engine=None):
     return engine is not None or configured is not None or bool(flow.worker) or any(s.worker for s in flow.steps.values()) or bool(getattr(flow, 'environment', None))
 
@@ -159,13 +206,14 @@ async def validate_flow_launch(flow, configured=None, engine=None):
     return {'status': status, 'fleet': True, 'steps': steps}
 
 
-async def validate_card_launch(agent, selection, engine=None):
-    """Launch check for a standalone card placed on the fleet: its selection plus its agent."""
+async def validate_card_launch(agent, selection, engine=None, command=None):
+    """Launch check for a standalone card placed on the fleet: its selection plus its agent or program."""
     from .definition import AGENTS
+    from .fleet_matching import PROGRAM, card_software
     wanted = {k: v for k, v in selector(selection).items() if v}
     if not isinstance(selection, dict) or not selection: raise ValueError('Choose a worker, a pool or tags to place a card on the fleet')
-    if agent not in AGENTS: raise ValueError(f"agent must be one of {', '.join(AGENTS)}")
-    requirements = with_engine({**wanted, 'agent': agent}, engine)
+    if agent not in (*AGENTS, PROGRAM): raise ValueError(f"agent must be one of {', '.join(AGENTS)}")
+    requirements = with_engine({**wanted, **card_software(agent, command)}, engine)
     public, _ = await fleet_status([requirements])
     decision = validate_launch(requirements, with_last_known(public))
     return {'status': decision['status'], 'fleet': True, 'card': decision}
@@ -176,7 +224,8 @@ async def execute_step(flow, step_id, context, run_id, receive, sink, engine=Non
     `engine` names the engine adapter that runs the step's task (hatchet, prefect, trigger)."""
     from .executor import run_step
     configured = context.get('_flow_execution')
-    if not uses_fleet(flow, configured, engine):
+    attached = context.get('_flow_context')
+    if not uses_fleet(flow, configured, engine) and not attached:
         return await run_step(flow, step_id, context, run_id, receive, sink)
     root = prepare_workspace(flow, run_id, context.get('_flow_restart'))
     pin_definition(root, flow)  # one run, one revision, whichever engine worker serves its steps
@@ -191,7 +240,9 @@ async def execute_step(flow, step_id, context, run_id, receive, sink, engine=Non
     requirements = with_engine(requirements_for(flow, step_id, selection=wanted), engine)
     if requirements.get('ambiguous_command'):
         raise ValueError(f'Step {step_id}: the program executable cannot be determined safely; declare requires_command')
-    before = await asyncio.to_thread(ancestor_files, flow, step_id, root)
+    from .launch_context import note
+    base = await attached_files(root, attached, wanted, engine, receive, sink)
+    before = await asyncio.to_thread(ancestor_files, flow, step_id, root, base)
     # One run owns one asset snapshot. Restart copies it with the immutable publications.
     with publication_lock(root, '_assets'):
         asset_path=root/'.flow-assets.json'
@@ -205,7 +256,7 @@ async def execute_step(flow, step_id, context, run_id, receive, sink, engine=Non
             atomic_json(asset_path, assets)
     assets=json.loads(await asyncio.to_thread(asset_path.read_text,encoding='utf-8'))
     # The job carries this exact revision and the run's files: a worker never reads either locally.
-    native_context = {**context, '_flow_restart': None, '_flow_execution': None}
+    native_context = {**context, '_flow_restart': None, '_flow_execution': None, '_flow_context': None, '_context_note': note(attached)}
     payload = {'files': before, 'assets': assets,
                'start': {'flow': flow.to_json(), 'step': step_id, 'context': native_context, 'runId': run_id}}
 
@@ -225,16 +276,42 @@ async def execute_session(config, run_id, receive, sink, engine=None):
     with one it is placed like a flow step: same requirement object, wait, admission gate and
     fencing, and its execution record shows the executing PC, engine and waiting reason. A placed
     card runs in a new workspace on that PC: host paths and resumed sessions are refused."""
-    from .fleet_matching import card_requirements
+    from .fleet_matching import PROGRAM, card_requirements
+    from . import launch_context
     config = dict(config)
     wanted = selector(config.pop('worker', None))
+    attached = config.pop('context', None)
+    program = config.get('agent') == PROGRAM
+    if not program:
+        config.pop('programInput', None)
+        if launch_context.has_sources(attached): config['goal'] += '\n\n' + launch_context.note(attached)
+    root = workspace_path(run_id)
     if not wanted:
         from agentdriver.session import run_session
-        return await run_session(config, receive, sink)
+        if not program and not launch_context.has_sources(attached):
+            return await run_session(config, receive, sink)
+        workspace = Path(config.get('workspace') or root)
+        workspace.mkdir(parents=True, exist_ok=True)
+        if attached: await launch_context.prepare_locally(attached, workspace, sink)
+        if program: return await launch_context.run_program(config, workspace, sink)
+        return await run_session({**config, 'workspace': str(workspace)}, receive, sink)
     requirements = with_engine(card_requirements(config, wanted), engine)
-    root = workspace_path(run_id)
     root.mkdir(parents=True, exist_ok=True)
-    payload = {'files': {}, 'assets': {}, 'start': {'session': config, 'runId': run_id}}
+    files = await attached_files(root, attached, wanted, engine, receive, sink)
+    if program:
+        relay = launch_context.CardRelay(sink, summary=config['goal'])
+        start = {**launch_context.program_job(config['goal'], config.get('programInput') or ''), 'runId': run_id}
+        try:
+            output = await _placed(root, CARD, requirements, wanted, {'files': files, 'assets': {}, 'start': start}, CARD_TIMEOUT,
+                                   receive, relay.forward, engine, lambda data: None, announce=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await relay.failed(exc)
+            raise
+        return await relay.done(output)
+    if launch_context.has_sources(attached): config['attached'] = True
+    payload = {'files': files, 'assets': {}, 'start': {'session': config, 'runId': run_id}}
     return await _placed(root, CARD, requirements, wanted, payload, CARD_TIMEOUT, receive, sink, engine, lambda data: None,
                          announce=False)  # a card transcript keeps its event schema; the PC is in the record
 

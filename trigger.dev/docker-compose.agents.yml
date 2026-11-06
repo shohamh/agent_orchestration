@@ -1,0 +1,9 @@
+# Optional overlay: lets the agent board and flow host reach this stack by service name, without
+# sharing the rest of it. Enable: append :docker-compose.agents.yml to COMPOSE_FILE in .env.
+services:
+  webapp:
+    networks: [webapp, agents]
+
+networks:
+  agents:
+    name: agent-net

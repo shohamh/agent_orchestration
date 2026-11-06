@@ -150,8 +150,8 @@ every waiting reason are described in [Workers and environment context](../docs/
   Agents that ask questions as ordinary prose can be answered through the composer instead.
 - A successful turn goes to **Awaiting your review**, in the Waiting column. **Continue** sends
   another turn; only **Mark done** completes the session.
-- Three consecutive failures go to **Stuck**. Continue retries. **Simulated failures** in the
-  create form exercises this without needing an actual provider error.
+- Three consecutive failures go to **Stuck**. Continue retries. **Simulated failures** under
+  **Advanced** in New card exercises this without needing an actual provider error.
 - **Demo (simulated)** exercises permissions and questions without a model or file changes.
   Codex and Claude are real agents; their availability depends on their CLI login/provider.
 
@@ -174,6 +174,70 @@ Permission prompts come from each agent's own permission settings, not from ACP:
 - **Codex** starts in its read-only mode, so edits and commands ask.
 - **Claude Code** uses its default permission mode.
 
+
+## Claude Desktop ↔ Orca failover bridge (Windows)
+
+This is a separate local process; it does not change Agent Board sessions or turn Claude Code into
+Claude Desktop. A handoff starts a fresh Orca agent or sends a fresh prompt to a configured Claude
+conversation. Context is visible/partial, capped at 48,000 characters, and never persisted in bridge
+state. The source session remains open.
+
+The bridge is deliberately fail-closed. Configure an external absolute-path JSON file and map each
+Claude Desktop executable/window to exactly one existing absolute project root and Orca worktree
+path. Each UIA selector must use exact `automation_id` and `control_type` values (optional exact
+`class_name` and `name`); configure a root control, visible conversation control, explicit limit and
+working notice selectors/strings, and, for Orca→Desktop handoff, unique input and send controls.
+Configure `orca.agent` to an installed supported Orca agent. The `orca.json` fields are RFC 6901
+JSON Pointers for the installed Orca version's `agent launch`, `worktree show`/`worktree ps`, and
+`terminal list` JSON responses; Orca agent-pane `paneKey` and terminal `tabId`/`leafId` pointers
+must correlate the exact session and terminal. Do not guess these pointers: inspect the output of
+the documented commands below. Unknown or ambiguous schemas disable the affected route.
+
+The required `orca.json` keys are `launch_session_pointer`, `worktree_entries_pointer`,
+`worktree_root_pointer`, `worktree_agents_pointer`, `agent_session_pointer`,
+`agent_pane_key_pointer`, `terminal_entries_pointer`, `terminal_id_pointer`,
+`terminal_tab_pointer`, `terminal_leaf_pointer`, and `terminal_screen_pointer`. The external
+document has `version: 1`, `desktop_projects`, `orca`, and `mappings`; each mapping supplies `id`,
+`desktop_id`, absolute `root`, `task`, and `orca_session_id` (an exact existing session handle or
+`"launched"` when the Desktop mapping will create its first Orca session). `orca` supplies the
+executable, supported agent name, JSON pointers, and explicit `limit_markers`/`working_markers`.
+Selectors and marker IDs must be unique within their configured role.
+
+Configure literal, version-appropriate limit/reset and non-limit working strings. A limit must be
+observed twice consecutively; a fresh working marker is required to re-arm after a handoff. A
+missing selector, mismatched project root, unavailable CLI, uncorrelated terminal, or uncertain
+send/launch result is reported and is never retried automatically. The process takes a mutex on its
+state path to prevent duplicate bridge instances.
+
+Check the installed CLI and its JSON shapes before configuring:
+
+```powershell
+orca status --json
+orca worktree show --worktree path:C:\absolute\project --json
+orca worktree ps --json
+orca terminal list --worktree path:C:\absolute\project --json
+orca terminal read --terminal <handle> --screen --json
+```
+
+Run from the `agents` directory using an interactive Windows user session. Install `pywinauto` only
+in the Python environment used for this bridge; it is optional and the bridge reports
+`unsupported_surface` if it is absent:
+
+```powershell
+Push-Location agents
+.\.venv\Scripts\python.exe -m pip install pywinauto
+.\.venv\Scripts\python.exe -m agentdriver.failover_bridge_cli `
+  --config C:\Users\you\AppData\Local\failover\config.json `
+  --state C:\Users\you\AppData\Local\failover\state.json
+Pop-Location
+```
+
+The actual Claude Desktop and Orca windows on the implementation host exposed no accessible
+conversation text, configured project-root control, explicit limit notice, or identifiable send
+control in their UI Automation trees. Therefore automatic switching remains unsupported on that
+surface until a version-specific UIA inspection yields exact, unique selectors. The bridge does not
+use OCR, screenshots, clipboard access, browser storage, hidden windows, or unrelated processes.
+Official interface: [Orca CLI reference](https://www.onorca.dev/docs/cli/reference).
 ## Verify
 
 ```powershell

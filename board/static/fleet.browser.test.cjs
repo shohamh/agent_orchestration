@@ -135,7 +135,7 @@ const installCommands = (record, origin) => {
     bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
 const installView = (r) => { const { commands, ...rest } = r; return rest; };
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -170,7 +170,7 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === '/api/fleet/installs' && request.method === 'POST') {
       if (workers.has(body.id)) return json(400, { error: `${body.id} is already registered; edit it instead` });
       if ([...installs.values()].some((r) => r.id === body.id && r.state === 'pending')) return json(400, { error: `${body.id} already has an install link waiting; cancel it first` });
-      const code = `code${String(++installCount).padStart(39, 'x')}`;
+      const code = `00000000-0000-4000-8000-${String(++installCount).padStart(12, '0')}`;
       const record = { code, id: body.id, os: body.os, autostart: body.autostart, state: 'pending', created_at: Date.now() / 1000, expires_at: Date.now() / 1000 + 1800, step: null, error: null, hostname: null, connected: false, form: body };
       record.commands = installCommands(record, body.server);
       installs.set(code, record);

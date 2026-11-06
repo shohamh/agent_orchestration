@@ -104,7 +104,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       if (url.pathname === '/api/flows') { response.end(JSON.stringify({ flows: [{name:'worker-flow',input:{topic:'test'},steps:{build:{kind:'program',needs:[]},review:{kind:'agent',needs:['build']}}}], broken: {} })); return; }
       if (url.pathname === '/api/workers') { response.end(JSON.stringify({workers:[{id:'pc-a',pool:'builds',tags:['linux'],online:true},{id:'pc-b',pool:'review',tags:[],online:true}]})); return; }
       const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
-      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css'].includes(file)) { response.writeHead(404).end(); return; }
+      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'].includes(file)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
       response.end(fs.readFileSync(path.join(__dirname, file)));
     } catch (error) { response.writeHead(500).end(JSON.stringify({ error: error.message })); }
@@ -298,18 +298,19 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     }
     // Worker selection changes the launch payload for individual steps, including tag filters.
     await evaluate('closeDrawer(); document.querySelector("#new-card").click()');
-    await waitFor(`document.querySelector('#n-kind option[value="flow:worker-flow"]')`);
-    await evaluate(`document.querySelector('#n-kind').value='flow:worker-flow'; document.querySelector('#n-kind').dispatchEvent(new Event('change'))`);
+    await waitFor(`flows.length > 0 && executionWorkers.length > 0`);
+    await evaluate(`document.querySelector('input[name="n-mode"][value="flow"]').click()`);
+    await waitFor(`document.querySelector('input[name="n-flow"][value="flow:worker-flow"]')`);
+    await evaluate(`document.querySelector('input[name="n-flow"][value="flow:worker-flow"]').click()`);
     await waitFor(`document.querySelector('select[aria-label="build"]')`);
-    await evaluate(`document.querySelector('select[aria-label="Default worker / pool"]').value=JSON.stringify({pool:'builds'});
-      document.querySelector('select[aria-label="Default worker / pool"]').dispatchEvent(new Event('change'));
+    await evaluate(`document.querySelector('#n-pools [data-pool="builds"]').click();
       document.querySelector('select[aria-label="review"]').value=JSON.stringify({id:'pc-b'});
       document.querySelector('select[aria-label="review"]').dispatchEvent(new Event('change'));
       document.querySelector('input[aria-label="build tags"]').value='linux, gpu';
       document.querySelector('input[aria-label="build tags"]').dispatchEvent(new Event('input'));
       document.querySelector('#new-form').requestSubmit(document.querySelector('#n-create'))`);
     await waitFor('!document.querySelector("#new-dialog").open');
-    assert.deepEqual(posts.at(-1).body.execution, {default:{pool:'builds'},steps:{review:{id:'pc-b'},build:{tags:['linux','gpu']}}});
+    assert.deepEqual(posts.at(-1).body.execution, {default:{pools:['builds']},steps:{review:{id:'pc-b'},build:{tags:['linux','gpu']}}});
     assert.deepEqual(errors, []);
   } finally {
     if (socket) socket.close();

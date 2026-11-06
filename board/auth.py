@@ -19,9 +19,9 @@ from aiohttp import web
 COOKIE = "board_session"
 LIFETIME = 30 * 24 * 3600
 PUBLIC = {"/login", "/logout"}
-# A PC installing or relaying has no browser session: these paths are proxied to the relay service,
-# which checks the one-time install code or the PC's own token (see relay_proxy.py).
-PUBLIC_PREFIXES = ("/install/", "/relay/")
+# A PC installing, updating or relaying has no browser session: these paths are proxied to the relay
+# service, which checks the one-time install/update code or the PC's own token (see relay_proxy.py).
+PUBLIC_PREFIXES = ("/install/", "/update/", "/relay/")
 
 
 class Auth:

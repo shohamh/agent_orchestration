@@ -26,7 +26,7 @@ LINK_VALID_SECONDS = 30 * 60
 RETRY_AFTER_SECONDS = 600  # a PC still on the old version this long after being told to update is told again
 MAX_ATTEMPTS = 3
 TEMPLATES = Path(__file__).resolve().parent / 'update_templates'
-CODE = install.CODE
+CODE = re.compile(r'[A-Za-z0-9_-]{43}')  # the 256-bit URL-safe update credential, not an install UUID
 
 
 def state_file():
@@ -88,7 +88,7 @@ def create_link(worker_id, os_name):
 
 
 def read_link(code):
-    if not isinstance(code, str) or not CODE.match(code): return None
+    if not isinstance(code, str) or not CODE.fullmatch(code): return None
     try: return json.loads((links_dir() / f'{code}.json').read_text(encoding='utf-8'))
     except (OSError, ValueError): return None
 
@@ -135,7 +135,7 @@ async def pc_binary(request):
     name = requested_os(request)
     path = install.binary_path(name)
     if path is None: raise web.HTTPNotFound(text=json.dumps({'error': f'This server has no worker program for {name} yet'}), content_type='application/json')
-    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': install.binary_version(name), 'Cache-Control': 'no-store'})
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{path.name}"', 'X-Worker-Version': install.binary_version(name), 'Cache-Control': 'no-store'})
 
 
 async def pc_deregister(request):
@@ -168,7 +168,7 @@ async def link_binary(request):
     record = await link_record(request)
     path = install.binary_path(record['os'])
     if path is None: raise web.HTTPNotFound(text=json.dumps({'error': f"This server has no worker program for {record['os']} yet"}), content_type='application/json')
-    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': install.binary_version(record['os']), 'Cache-Control': 'no-store'})
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{path.name}"', 'X-Worker-Version': install.binary_version(record['os']), 'Cache-Control': 'no-store'})
 
 
 async def link_done(request):
