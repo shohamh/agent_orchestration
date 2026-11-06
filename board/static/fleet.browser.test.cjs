@@ -171,7 +171,7 @@ const server = http.createServer(async (request, response) => {
       if (workers.has(body.id)) return json(400, { error: `${body.id} is already registered; edit it instead` });
       if ([...installs.values()].some((r) => r.id === body.id && r.state === 'pending')) return json(400, { error: `${body.id} already has an install link waiting; cancel it first` });
       const code = `code${String(++installCount).padStart(39, 'x')}`;
-      const record = { code, id: body.id, os: body.os, state: 'pending', created_at: Date.now() / 1000, expires_at: Date.now() / 1000 + 1800, step: null, error: null, hostname: null, connected: false, form: body };
+      const record = { code, id: body.id, os: body.os, autostart: body.autostart, state: 'pending', created_at: Date.now() / 1000, expires_at: Date.now() / 1000 + 1800, step: null, error: null, hostname: null, connected: false, form: body };
       record.commands = installCommands(record, body.server);
       installs.set(code, record);
       return json(200, { install: installView(record), commands: record.commands });
@@ -572,7 +572,7 @@ test('install form validation mirrors the server and builds the request only whe
   const valid = { id: 'build-pc', os: 'linux', engines: ['prefect', 'hatchet'], pool: 'build', tags: ['gpu', 'gpu', ' cuda '], slots: '2', cpu_limit: '80', ram_limit: '85.5', server: 'http://192.168.1.10:8090/' };
   const ok = Fleet.validateInstall(valid, { taken: ['pc-a'] });
   assert.deepEqual(ok.errors, {});
-  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090' });
+  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090', autostart: 'logon' });
   const bad = (change, field) => { const r = Fleet.validateInstall({ ...valid, ...change }, { taken: ['pc-a'] }); assert.equal(r.body, null, field); assert.ok(r.errors[field], `${field} has a message`); };
   for (const id of ['', ' ', 'a b', '-x', 'x'.repeat(65), 'a/b', 'pc-a']) bad({ id }, 'id');
   bad({ os: '' }, 'os'); bad({ os: 'beos' }, 'os');
@@ -582,8 +582,25 @@ test('install form validation mirrors the server and builds the request only whe
   for (const slots of ['0', '101', '1.5', '', 'x']) bad({ slots }, 'slots');
   for (const cpu_limit of ['0', '101', '', 'x', '-5']) bad({ cpu_limit }, 'cpu_limit');
   bad({ ram_limit: '0' }, 'ram_limit');
+  for (const autostart of ['startup', 'BOOT', 7]) bad({ autostart }, 'autostart');
+  assert.equal(Fleet.validateInstall({ ...valid, autostart: 'boot' }).body.autostart, 'boot');
+  assert.equal(Fleet.validateInstall({ ...valid, autostart: 'none' }).body.autostart, 'none');
   for (const server of ['', 'localhost:8090', 'http://localhost:8090', 'http://127.0.0.1:8090', 'http://[::1]:8090', 'http://0.0.0.0:8090', 'ftp://h:1', 'http://u:p@h:1', 'http://h:1/path', 'http://h:1?x=1', 'nope']) bad({ server }, 'server');
   assert.equal(Fleet.serverAddress('https://board.example.ts.net/').value, 'https://board.example.ts.net');
+});
+
+test('the start-up choices explain their consequences for the chosen operating system', () => {
+  const windows = Fleet.autostartChoices('windows'), linux = Fleet.autostartChoices('linux');
+  assert.deepEqual(windows.map((c) => c.value), ['logon', 'boot', 'none']);
+  const by = (list, value) => list.find((c) => c.value === value).text;
+  assert.match(by(windows, 'logon'), /not running until someone logs in/);
+  assert.match(by(windows, 'logon'), /offline in the fleet/);
+  assert.match(by(windows, 'boot'), /UAC prompt/);
+  assert.match(by(windows, 'boot'), /without the user.s credentials/);
+  assert.match(by(windows, 'boot'), /can fail until the user logs in/);
+  assert.match(by(linux, 'boot'), /lingering/);
+  assert.doesNotMatch(by(linux, 'boot'), /UAC/);
+  assert.match(by(windows, 'none'), /agent-worker start/);
 });
 
 test('install commands: Windows gets PowerShell and cmd, others get bash, and nobody is told to elevate', () => {
@@ -658,7 +675,7 @@ test('a valid form creates the install link and shows the Windows commands with 
   await submitInstall();
   await waitFor('document.querySelectorAll(".fl-command").length === 2', 'both Windows commands shown');
   const sent = lastCall('POST', '/api/fleet/installs').body;
-  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090' });
+  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090', autostart: 'logon' });
   const record = [...installs.values()][0];
   assert.equal(await text('[data-command="powershell"]'), `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing 'http://192.168.1.10:8090/install/${record.code}/agent-worker' -OutFile $f; & $f install ${record.code} --server 'http://192.168.1.10:8090'`);
   assert.match(await text('[data-command="cmd"]'), /^curl\.exe -fsSL "http:\/\/192\.168\.1\.10:8090\/install\/.+\/agent-worker" -o/);
@@ -689,6 +706,38 @@ test('Linux and macOS get one bash command, no cmd variant', async () => {
     await click('.fl-form-actions button', 'Cancel this install');
     await waitFor('document.querySelector(".fl-form").hidden', 'form closes after cancelling');
   }
+});
+
+test('the form offers logon, boot and no autostart with their consequences, defaults to logon and sends the choice', async () => {
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  assert.equal(await evaluate('document.querySelectorAll(".fl-form input[name=autostart]").length'), 3);
+  assert.equal(await evaluate('document.querySelector(".fl-form input[name=autostart]:checked").value'), 'logon');
+  assert.match(await text('.fl-autostart-choice'), /not running until someone logs in/);
+  assert.match(await text('.fl-autostart-choice'), /UAC prompt/);
+  await click('.fl-form input[name="os"][value="linux"]');
+  assert.match(await text('.fl-autostart-choice'), /lingering/);
+  assert.doesNotMatch(await text('.fl-autostart-choice'), /UAC prompt/);
+  await click('.fl-form input[name="os"][value="windows"]');
+  await fillInstall({ id: 'boot-pc', os: 'windows' });
+  await click('.fl-form input[name="autostart"][value="boot"]');
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'commands shown');
+  assert.equal(lastCall('POST', '/api/fleet/installs').body.autostart, 'boot');
+  assert.match(await text('.fl-boot-note'), /UAC prompt/);
+  assert.match(await text('.fl-boot-note'), /starts at logon instead/);
+  await click('[data-action="cancel-install"]');
+  await openFleet();
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'manual-pc', os: 'linux' });
+  await click('.fl-form input[name="autostart"][value="none"]');
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 1', 'bash command shown');
+  assert.equal(lastCall('POST', '/api/fleet/installs').body.autostart, 'none');
+  assert.equal(await evaluate('!!document.querySelector(".fl-boot-note")'), false);
+  await click('[data-action="cancel-install"]');
 });
 
 test('the install status follows the PC: steps, a failure with its step, registered, then connected with Done', async () => {

@@ -18,6 +18,15 @@ pub async fn run(home: Home) -> Result<(), String> {
     restore_profile(&config);
     let port = port_of(&config);
     let pidfile = home.file("worker.pid");
+    if home.file("stopped").exists() {
+        crate::log!("runner", "not starting: the worker was stopped with agent-worker stop; agent-worker start runs it again");
+        return Ok(());
+    }
+    let other = home.pid();
+    if other != 0 && other != std::process::id() && crate::procutil::pid_alive(other) {
+        crate::log!("runner", "not starting: the worker is already running (pid {other})");
+        return Ok(());
+    }
     std::fs::write(&pidfile, std::process::id().to_string()).map_err(|e| e.to_string())?; // `agent-worker stop` and status find the runner here
     let app = App::new(Config { id: name.clone(), uuid: uuid.clone(), slots: config["slots"].as_u64().unwrap_or(1), token: token.clone(), root: home.file("runtime"), version: config::self_version() });
     service::spawn_background(app.clone());

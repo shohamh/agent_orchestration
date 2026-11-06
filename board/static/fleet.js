@@ -144,7 +144,7 @@
 
   // ------------------------------------------------------------------ One-line install (pure helpers)
   const INSTALL_STEPS = { check: 'Checking the PC', download: 'Downloading the worker', python: 'Installing Python packages', npm: 'Installing the agent adapters',
-    token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection' };
+    token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection', boot: 'Setting up start at boot (approve the administrator prompt on the PC)' };
   const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?)$/i;
 
   /* The server address as the server will accept it: scheme://host[:port] and never a loopback name. */
@@ -157,6 +157,27 @@
     if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) return { error: 'Use only scheme, host and port, for example http://192.168.1.10:8090' };
     if (LOOPBACK.test(url.hostname) || url.hostname.toLowerCase().endsWith('.localhost')) return { error: 'The PC cannot reach this server at localhost; use the name or address the PC can reach' };
     return { value: url.origin };
+  }
+
+  const AUTOSTARTS = ['logon', 'boot', 'none'];
+
+  /* What each way of starting the worker means, with its consequences, for the operating system chosen in the form. */
+  function autostartChoices(os) {
+    const windows = os === 'windows';
+    return [
+      { value: 'logon', label: 'When the user logs in',
+        text: 'The worker starts when the user logs in and runs with that user’s own environment, so tools and agents that rely on the user’s login, credentials and PATH work. '
+          + 'The consequence: after the PC restarts the worker is not running until someone logs in, and the PC shows as offline in the fleet until then.' },
+      { value: 'boot', label: 'When the PC starts, before anyone logs in',
+        text: windows
+          ? 'The worker starts with the PC, even at the logon screen. Windows asks for administrator approval once (a UAC prompt during the install). '
+            + 'The consequence: it runs without the user’s credentials: no saved Windows or network logins, mapped drives, desktop or logged-in sessions, and not the user’s logon environment (the PATH and folders seen at install time are used instead). '
+            + 'Agents and tools that need the user to be signed in can fail until the user logs in.'
+          : 'The worker starts with the PC, before anyone logs in (systemd lingering; it may ask for sudo once). '
+            + 'The consequence: it runs without a login session: no desktop, keyring or agent sessions that depend on the user being logged in, so tools that need those can fail until the user logs in.' },
+      { value: 'none', label: 'Do not start automatically',
+        text: 'The worker runs now but is not set up to start by itself. After the PC restarts it stays off, and shows as offline in the fleet, until you run agent-worker start on the PC.' },
+    ];
   }
 
   /* Check the install form the way the server will; returns {errors: {field: message}, body}. */
@@ -177,9 +198,11 @@
     if (!percent(v.ram_limit)) errors.ram_limit = 'The RAM limit is above 0 and at most 100';
     const server = serverAddress(v.server);
     if (server.error) errors.server = server.error;
+    const autostart = v.autostart || 'logon';
+    if (!AUTOSTARTS.includes(autostart)) errors.autostart = 'Choose when the worker starts';
     if (Object.keys(errors).length) return { errors, body: null };
     return { errors, body: { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
-      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value } };
+      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart } };
   }
 
   /* The commands to show for the chosen operating system, with the elevation note. */
@@ -486,7 +509,8 @@
         h('p', { class: 'fl-hint' }, 'Run one command on the PC. It downloads the worker from this server, installs it for that user and connects back; nothing on the PC needs to be opened.'),
         ...blocks,
         h('p', { class: 'fl-elevation' }, h('strong', {}, 'Run as a normal user. '), 'Do not use Administrator or sudo: everything installs for your own user.'),
-        h('p', { class: 'fl-hint' }, 'The PC needs Python 3.10+ and Node.js 18+. If either is missing the command stops and tells you how to install it.'),
+        record.autostart === 'boot' ? h('p', { class: 'fl-hint fl-boot-note' }, record.os === 'windows' ? 'Starting before anyone logs in needs administrator approval: Windows shows a UAC prompt near the end of the install. Approve it on the PC. If you decline, the worker starts at logon instead and the install says so.' : 'Starting before anyone logs in may ask for your sudo password once (systemd lingering). If it cannot, the worker starts at login instead and the install prints the command for an administrator.') : null,
+        h('p', { class: 'fl-hint' }, 'The PC needs nothing installed first: the command downloads one program from this server.'),
         note, status,
         h('div', { class: 'fl-row fl-form-actions' }, cancel, done)));
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
@@ -514,15 +538,20 @@
       S.form = { install: true, engines: preset.engines || ['hatchet'] };
       const f = S.form;
       const taken = () => S.workers.map((w) => w.id);
-      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])] };
+      const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon' };
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
       const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
       const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
-        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server') };
+        slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
       const osBoxes = h('fieldset', { class: 'fl-os-choice' }, h('legend', {}, 'Operating system of the PC'),
-        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; } }), ` ${label}`)), errors.os);
+        Object.entries(OS_LABELS).map(([value, label]) => h('label', { class: 'fl-check' }, h('input', { type: 'radio', name: 'os', value, checked: value === state.os, onchange: () => { state.os = value; drawAutostart(); } }), ` ${label}`)), errors.os);
+      const autostartBox = h('fieldset', { class: 'fl-autostart-choice' }, h('legend', {}, 'When should the worker start on the PC?'));
+      const drawAutostart = () => autostartBox.replaceChildren(h('legend', {}, 'When should the worker start on the PC?'),
+        ...autostartChoices(state.os).map((c) => h('label', { class: 'fl-check fl-autostart', 'data-autostart': c.value },
+          h('input', { type: 'radio', name: 'autostart', value: c.value, checked: c.value === state.autostart, onchange: () => { state.autostart = c.value; } }),
+          h('span', {}, ` ${c.label}`, h('small', { class: 'fl-hint' }, c.text)))), errors.autostart);
       const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines this PC serves'),
         ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
           onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`)), errors.engines);
@@ -572,7 +601,7 @@
         h('h3', { id: 'fl-form-title' }, 'Register a PC'),
         h('p', { class: 'fl-hint' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
-        osBoxes, engineBoxes,
+        osBoxes, autostartBox, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags (optional)'), chosen, tagInput, tagList, errors.tags),
         h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity'),
@@ -590,7 +619,7 @@
         for (const node of Object.values(errors)) node.textContent = '';
         for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
         const pool = state.newPool ? newPoolInput.value : poolSelect.value;
-        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value }, { taken: taken() });
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart }, { taken: taken() });
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
@@ -607,7 +636,7 @@
         showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
       });
 
-      drawPoolOptions(); drawChosen(); drawServerWarning();
+      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart();
       formPanel.replaceChildren(form);
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
       formPanel.parentElement.scrollTop = 0;
@@ -883,7 +912,7 @@
     };
   }
 
-  const api = { updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
+  const api = { autostartChoices, updateStatusText, MAX_SLOTS, ENGINES, ENGINE_LABELS, config, instructions, serverAddress, validateInstall, installCommands, installProgress, minutesLeft, tagSuggestions, metricView, engineText, syncText, tokenEnvFor, formatTime, validLabel, mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Fleet = api;
 })(typeof window !== 'undefined' ? window : globalThis);

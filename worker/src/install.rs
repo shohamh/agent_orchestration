@@ -26,6 +26,8 @@ pub struct Options {
 pub struct Settings {
     pub name: String,
     pub slots: u64,
+    /// "logon", "boot" or "none": when the worker starts by itself
+    pub autostart: String,
 }
 
 fn origin(options: &Options) -> String {
@@ -248,7 +250,8 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     println!("==> Contacting the server {}", options.server);
     let secret = claim_secret(home)?;
     let given = claim(options, &secret).await?;
-    let settings = Settings { name: given["name"].as_str().ok_or("The server did not name this PC")?.to_string(), slots: given["slots"].as_u64().unwrap_or(1) };
+    let settings = Settings { name: given["name"].as_str().ok_or("The server did not name this PC")?.to_string(), slots: given["slots"].as_u64().unwrap_or(1),
+        autostart: given["autostart"].as_str().filter(|a| ["logon", "boot", "none"].contains(a)).unwrap_or("logon").to_string() };
     println!("    this PC will be {} ({})", settings.name, options.uuid);
     report(options, "check", "running", "").await;
     let download = install_self(home)?;
@@ -264,7 +267,8 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     let token_path = home.file("token");
     std::fs::write(&token_path, &token).map_err(|e| e.to_string())?;
     restrict_token(&token_path)?;
-    let kind = if options.no_service { Kind::Process } else { Kind::detect() };
+    // "none": no startup entry; the worker runs now as a background process and stays off after a restart until `agent-worker start`
+    let kind = if options.no_service || settings.autostart == "none" { Kind::Process } else { Kind::detect() };
     let mut worker = default_config(&settings.name, &uuid, settings.slots, &options.server, options.port);
     worker["service"] = json!(kind.name());
     worker["unit"] = json!(svc::default_unit(&settings.name));
@@ -324,8 +328,25 @@ async fn run(home: &Home, options: &Options, step: &std::sync::Mutex<String>) ->
     if let Some(path) = download.filter(|p| in_temp_dir(p)) {
         remove_download(path);
     }
+    let mut starts = match settings.autostart.as_str() {
+        "none" => "does not start by itself: after the PC restarts, run agent-worker start".to_string(),
+        _ => "starts again when you log in (after a restart it stays offline until then)".to_string(),
+    };
+    if settings.autostart == "boot" && kind != Kind::Process {
+        at("boot", "Setting up start at boot");
+        report(options, "boot", "running", "approve the administrator prompt on this PC").await;
+        let for_home = Home(home.0.clone());
+        match tokio::task::spawn_blocking(move || crate::ctl::boot(&for_home, "enable", None)).await {
+            Ok(Ok(())) => starts = "starts when the PC starts, even before anyone logs in".into(),
+            Ok(Err(why)) => {
+                println!("    Could not set up start at boot: {why}");
+                println!("    The worker starts when you log in instead. To try again later: agent-worker boot enable");
+            }
+            Err(why) => println!("    Could not set up start at boot: {why}"),
+        }
+    }
     println!();
-    println!("Done. {} ({uuid}) is connected and starts again {}.", settings.name, if cfg!(windows) { "when you log in" } else { "when you log in (or at boot, with systemd lingering)" });
+    println!("Done. {} ({uuid}) is connected and {starts}.", settings.name);
     println!("Manage it with: agent-worker status | stop | start | restart | update | uninstall | logs");
     Ok(())
 }

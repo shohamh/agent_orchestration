@@ -38,7 +38,7 @@ pub async fn status(home: &Home, json_output: bool) -> Result<i32, String> {
     let draining = health.as_ref().map(|h| h["draining"] == true).unwrap_or(false);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&json!({"name": config::name_of(&config), "uuid": config::relay_id(&config), "version": installed_version(home), "home": home.0, "server": config["server"], "service": svc.describe(),
-            "service_exists": svc.exists(), "starts_at_boot": svc.starts_at_boot(), "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
+            "service_exists": svc.exists(), "starts_at_boot": svc.starts_at_boot(), "autostart": svc.autostart(), "running": running, "pid": home.pid(), "serving": health.is_some(), "active_jobs": active, "draining": draining, "connected": connected,
             "components": components, "update": update})).unwrap());
     } else {
         println!("Worker      {}  ({})  version {}", config::name_of(&config), config::relay_id(&config), installed_version(home));
@@ -363,20 +363,51 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// `agent-worker boot [enable|disable|status]`: start with the PC, before anyone logs in.
-pub fn boot(home: &Home, action: &str) -> Result<(), String> {
+/// `agent-worker boot [enable|disable|status]`: start with the PC, before anyone logs in. On Windows this needs Administrator
+/// rights once; a normal shell gets the UAC prompt, which is answered on the PC.
+pub fn boot(home: &Home, action: &str, as_user: Option<String>) -> Result<(), String> {
     let mut config = home.config()?;
     let mut svc = Svc::from_config(Home(home.0.clone()), &config);
     match action {
         "status" => {
-            println!("{}", if svc.starts_at_boot() { "Starts when the PC starts, even before anyone logs in" } else { "Starts when you log in (run `agent-worker boot enable` to start with the PC)" });
+            println!("{}", match svc.autostart() {
+                "boot" => "Starts when the PC starts, even before anyone logs in",
+                "none" => "Does not start by itself (run `agent-worker start` after a restart)",
+                _ => "Starts when you log in (run `agent-worker boot enable` to start with the PC)",
+            });
             Ok(())
         }
         "enable" | "disable" => {
             let enable = action == "enable";
-            svc.set_boot(enable)?;
-            config["boot"] = serde_json::json!(enable);
-            home.save_config(&config).map_err(|e| e.to_string())?;
+            if let Some(expected) = &as_user {
+                // the elevated copy: UAC may have been answered with another administrator's credentials, which must not own this worker's task
+                if !expected.eq_ignore_ascii_case(&crate::svc::whoami()) {
+                    return Err(format!("The administrator prompt was approved as {}, but this worker belongs to {expected}. Approve it as {expected}.", crate::svc::whoami()));
+                }
+            }
+            if svc.kind == crate::svc::Kind::Task && !crate::procutil::is_elevated() && svc.starts_at_boot() != enable {
+                if std::env::var_os("AGENT_WORKER_NO_ELEVATE").is_some() {
+                    return Err("Starting before anyone logs in needs Administrator rights. Run this in an Administrator PowerShell: agent-worker boot enable".into());
+                }
+                println!("Windows will ask for administrator approval (UAC)...");
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let args = vec!["--home".into(), home.0.to_string_lossy().to_string(), "boot".into(), action.to_string(), "--as-user".into(), crate::svc::whoami()];
+                let code = crate::procutil::run_elevated(&exe, &args)?;
+                if code != 0 {
+                    return Err(format!("The administrator step did not finish (exit code {code}); the worker keeps starting {}", if enable { "when you log in" } else { "when the PC starts" }));
+                }
+                // The elevated copy only changed the task. The files in the worker's folder are written here, as the user, so they stay the user's.
+                config["boot"] = serde_json::json!(enable);
+                home.save_config(&config).map_err(|e| e.to_string())?;
+                svc = Svc::from_config(Home(home.0.clone()), &config);
+            } else if as_user.is_some() {
+                svc.set_boot(enable)?; // running elevated on behalf of the user's own command: change nothing else
+                return Ok(());
+            } else {
+                svc.set_boot(enable)?;
+                config["boot"] = serde_json::json!(enable);
+                home.save_config(&config).map_err(|e| e.to_string())?;
+            }
             if enable && !svc.running() {
                 svc.start()?;
             }

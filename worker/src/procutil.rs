@@ -304,3 +304,42 @@ pub fn is_elevated() -> bool {
         false
     }
 }
+
+/// Run `program args` with Administrator rights through the Windows UAC prompt, wait for it and return its exit code.
+/// Err(text) when the prompt was declined or Windows could not start it.
+pub fn run_elevated(program: &Path, args: &[String]) -> Result<u32, String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_CANCELLED};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+        use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let quote = |a: &str| if a.contains(' ') || a.is_empty() { format!("\"{a}\"") } else { a.to_string() };
+        let verb = wide("runas");
+        let file = wide(&program.to_string_lossy());
+        let params = wide(&args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" "));
+        // SAFETY: a fully initialised SHELLEXECUTEINFOW whose strings outlive the call; the process handle is closed
+        unsafe {
+            let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+            info.fMask = SEE_MASK_NOCLOSEPROCESS;
+            info.lpVerb = verb.as_ptr();
+            info.lpFile = file.as_ptr();
+            info.lpParameters = params.as_ptr();
+            info.nShow = 0; // hidden: the UAC prompt is the only thing the user needs to see
+            if ShellExecuteExW(&mut info) == 0 {
+                return Err(if GetLastError() == ERROR_CANCELLED { "The administrator (UAC) prompt was declined".into() } else { format!("Windows could not ask for administrator approval (error {})", GetLastError()) });
+            }
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code = 1u32;
+            GetExitCodeProcess(info.hProcess, &mut code);
+            CloseHandle(info.hProcess);
+            Ok(code)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (program, args);
+        Err("Administrator elevation through a prompt is a Windows feature".into())
+    }
+}

@@ -78,6 +78,8 @@ enum Cmd {
         /// enable, disable or status
         #[arg(default_value = "status")]
         action: String,
+        #[arg(long, hide = true)]
+        as_user: Option<String>,
     },
     /// The end of the worker's log
     Logs {
@@ -171,7 +173,7 @@ async fn main() {
         Cmd::Restart { name } => finish(ctl::restart(&home, name.as_deref())),
         Cmd::Update { force, drain_timeout, background: _, from_file, server, code } => finish(ctl::update(&home, force, drain_timeout, from_file, server.zip(code)).await),
         Cmd::Uninstall { yes, keep_registration } => finish(ctl::uninstall(&home, yes, keep_registration).await),
-        Cmd::Boot { action } => finish(ctl::boot(&home, &action)),
+        Cmd::Boot { action, as_user } => finish(ctl::boot(&home, &action, as_user)),
         Cmd::Logs { lines } => finish(ctl::logs(&home, lines)),
         Cmd::Version => {
             println!("{}", config::self_version());

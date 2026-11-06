@@ -60,12 +60,12 @@ class Harness(FleetFixture):
     def new_home(self):
         home = Path(tempfile.mkdtemp(prefix='aw-home-', dir=self.root)); self.homes.append(home); return home
 
-    def record(self, name='pc-x', os_name=TARGET):
-        return install.create({'id': name, 'os': os_name, 'engines': ['hatchet'], 'pool': 'build', 'tags': ['t1'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 70, 'server': 'http://192.168.1.10:8090'})
+    def record(self, name='pc-x', os_name=TARGET, autostart='logon'):
+        return install.create({'id': name, 'os': os_name, 'autostart': autostart, 'engines': ['hatchet'], 'pool': 'build', 'tags': ['t1'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 70, 'server': 'http://192.168.1.10:8090'})
 
     async def run_cli(self, home, *args, timeout=90):
         """Run the worker program; returns (exit code, output)."""
-        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1'}
+        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1', 'AGENT_WORKER_NO_ELEVATE': '1'}  # a test must never raise a UAC prompt
         env.pop('AGENT_WORKER_SERVICE', None)
         if self.SERVICE: env['AGENT_WORKER_SERVICE'] = self.SERVICE
         exe = Path(home)/f'agent-worker{EXE}'  # once installed, the installed copy is the command (it is on the PATH on a real PC)
@@ -190,6 +190,35 @@ class AgentWorkerCliTests(Harness):
     async def test_a_fleet_update_replaces_the_worker_and_a_bad_update_rolls_back(self):
         await self.check_fleet_update()
 
+    async def test_no_autostart_runs_the_worker_without_a_startup_entry(self):
+        record = self.record(autostart='none')
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        self.assertIn('does not start by itself', out)
+        await self.connected(record['code'])
+        state = (await self.status(home))[1]
+        self.assertEqual(state['autostart'], 'none'); self.assertIn('no startup entry', state['service'])
+        self.assertIn('Does not start by itself', (await self.run_cli(home, 'boot', 'status'))[1])
+        # the control commands still work, and a restart of the PC is simulated by stop + start
+        self.assertEqual((await self.run_cli(home, 'stop'))[0], 0)
+        self.assertFalse((await self.status(home))[1]['running'])
+        self.assertEqual((await self.run_cli(home, 'start'))[0], 0)
+        await self.connected(record['code'])
+
+    async def test_a_stopped_worker_is_not_restarted_by_its_own_checks_and_a_second_copy_never_runs(self):
+        record = self.record(autostart='none')
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        # `run` while another copy is alive does nothing (the Windows task checks every minute and must never start a second worker)
+        again = await self.run_cli(home, 'run')
+        self.assertEqual(again[0], 0, again)
+        self.assertEqual((await self.status(home))[1]['pid'] > 0, True)
+        self.assertEqual((await self.run_cli(home, 'stop'))[0], 0)
+        self.assertEqual((await self.run_cli(home, 'start'))[0], 0)
+        self.assertFalse((Path(home)/'stopped').exists())
+
     async def test_uninstall_removes_the_worker_and_deregisters_it(self):
         record = self.record()
         home, code, out = await self.install_pc(record)
@@ -272,6 +301,36 @@ class ServiceManagerTests(Harness):
             code, out = await self.run_cli(home, 'boot', 'disable')
             if code != 0: self.assertIn('sudo loginctl disable-linger', out)   # not allowed for this user: told what an administrator runs
             else: subprocess.run(['loginctl', 'enable-linger', os.environ.get('USER', 'tester')], capture_output=True)
+
+    async def test_logon_start_is_the_default_and_a_stopped_worker_stays_stopped_past_the_next_check(self):
+        record = self.record()   # autostart 'logon'
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'uninstall', '--yes')
+        self.assertEqual(code, 0, out + self.diag(home))
+        self.assertIn('when you log in', out)
+        await until(lambda: self.is_connected(home), timeout=30, message='status shows connected')
+        # lingering is a setting of the user, not of one worker: on Linux a user who has it on starts every worker at boot
+        self.assertIn((await self.status(home))[1]['autostart'], ('logon',) if os.name == 'nt' else ('logon', 'boot'))
+        self.assertEqual((await self.run_cli(home, 'stop'))[0], 0)
+        await asyncio.sleep(80)   # longer than the Windows task's one-minute check
+        self.assertFalse((await self.status(home))[1]['running'], 'a worker stopped on purpose is not brought back')
+        self.assertEqual((await self.run_cli(home, 'start'))[0], 0)
+        await self.connected(record['code'])
+
+    async def test_boot_start_at_install_is_done_when_possible_and_otherwise_falls_back_to_logon_with_a_reason(self):
+        record = self.record(autostart='boot')
+        home, code, out = await self.install_pc(record)
+        self.addAsyncCleanup(self.run_cli, home, 'uninstall', '--yes')
+        self.assertEqual(code, 0, out + self.diag(home))
+        await self.connected(record['code'])
+        if 'starts when the PC starts' in out:
+            self.assertEqual((await self.status(home))[1]['autostart'], 'boot')
+        else:   # a normal Windows shell without the UAC prompt (tests never raise one)
+            self.assertIn('Could not set up start at boot', out)
+            self.assertIn('Administrator', out)
+            self.assertIn('starts when you log in instead', out)
+            self.assertEqual((await self.status(home))[1]['autostart'], 'logon')
+        self.assertTrue((await self.status(home))[1]['running'])
 
     async def test_a_fleet_update_works_under_the_service_manager(self):
         # the updater must survive stopping the service it was started by (systemd kills the whole control group)

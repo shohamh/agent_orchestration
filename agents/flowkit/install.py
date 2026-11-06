@@ -32,9 +32,10 @@ NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
 CODE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')  # a version 4 uuid: the install's id, then the worker's
 OSES = ('windows', 'linux', 'macos')
 ENGINES = ('hatchet', 'prefect', 'trigger')
+AUTOSTARTS = ('logon', 'boot', 'none')  # when the worker starts on the PC: at the user's logon, at PC start-up, or only when told to
 MIN_TOKEN = 32
 WRONG_CODE_DELAY = 0.5  # seconds a wrong code is held before the generic answer
-STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'register', 'connect')
+STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'register', 'connect', 'boot')
 FAILED_ATTEMPTS = {}  # source address -> (count, window start): wrong codes are slowed per source
 
 
@@ -80,7 +81,7 @@ def validate_form(body, registered=(), pending=()):
     from .capacity import MAX_SLOTS
     from .fleet_registry import label
     if not isinstance(body, dict): raise InstallError('The install request must be an object')
-    unknown = set(body) - {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server'}
+    unknown = set(body) - {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart'}
     if unknown: raise InstallError(f'Unknown fields: {", ".join(sorted(unknown))}')
     name = body.get('id')
     if not isinstance(name, str) or not NAME.match(name): raise InstallError('The name is 1 to 64 letters, digits, dashes or underscores, starting with a letter or digit')
@@ -98,7 +99,9 @@ def validate_form(body, registered=(), pending=()):
     except ValueError as exc: raise InstallError(str(exc))
     slots = body.get('slots', 1)
     if isinstance(slots, bool) or not isinstance(slots, int) or not 1 <= slots <= MAX_SLOTS: raise InstallError(f'Slots must be a whole number from 1 to {MAX_SLOTS}')
-    return {'id': name, 'os': body['os'], 'engines': [e for e in ENGINES if e in engines], 'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
+    autostart = body.get('autostart', 'logon')
+    if autostart not in AUTOSTARTS: raise InstallError('Choose when the worker starts: when you log in, when the PC starts, or never automatically')
+    return {'id': name, 'os': body['os'], 'autostart': autostart, 'engines': [e for e in ENGINES if e in engines], 'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
             'cpu_limit': percent(body.get('cpu_limit', 90), 'The CPU limit'), 'ram_limit': percent(body.get('ram_limit', 90), 'The RAM limit'),
             'server': server_address(body.get('server'))}
 
@@ -127,7 +130,7 @@ def view(record):
     state = record['state']
     if state == 'pending' and record['expires_at'] <= now(): state = 'expired'
     return {'code': record['code'], 'id': record['id'], 'uuid': record['code'], 'claimed_host': record.get('claimed_host'), 'os': record['os'], 'state': state, 'created_at': record['created_at'], 'expires_at': record['expires_at'],
-            'step': record.get('step'), 'error': record.get('error'), 'hostname': record.get('hostname'), 'registered_at': record.get('registered_at')}
+            'autostart': record.get('autostart', 'logon'), 'step': record.get('step'), 'error': record.get('error'), 'hostname': record.get('hostname'), 'registered_at': record.get('registered_at')}
 
 
 def all_records():
@@ -319,7 +322,7 @@ async def claim(request):
     clash = next((w['id'] for w in _read() if w.get('uuid') == record['code']), None)
     if clash: return web.json_response({'ok': False, 'error': f'This install is already registered as {clash}.'}, status=409)
     return web.json_response({'ok': True, 'uuid': record['code'], 'name': record['id'], 'os': record['os'], 'engines': record['engines'], 'pool': record['pools'][0],
-                              'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit']})
+                              'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'autostart': record.get('autostart', 'logon')})
 
 
 async def agent_binary(request):

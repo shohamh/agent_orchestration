@@ -117,8 +117,16 @@ impl Svc {
     pub fn running(&self) -> bool {
         match self.kind {
             Kind::Systemd => run("systemctl", &["--user", "is-active", "--quiet", &format!("{}.service", self.unit)]).map(|o| o.0 == 0).unwrap_or(false),
+            // A task that starts at boot runs in a session of its own whose processes this user's shell cannot always see: ask the Task Scheduler as well
+            Kind::Task => pid_alive(self.home.pid()) || self.task_running(),
             _ => pid_alive(self.home.pid()),
         }
+    }
+
+    /// Does the Task Scheduler say the task is running? (The state is read as an enum name, which is not translated.)
+    fn task_running(&self) -> bool {
+        let script = format!("(Get-ScheduledTask -TaskName '{}' -ErrorAction SilentlyContinue).State -eq 'Running'", self.unit.replace("'", "''"));
+        run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]).map(|o| o.1.trim() == "True").unwrap_or(false)
     }
 
     pub fn exists(&self) -> bool {
@@ -127,6 +135,17 @@ impl Svc {
             Kind::Systemd => self.unit_path().exists(),
             Kind::Launchd => self.plist_path().exists(),
             Kind::Process => true,
+        }
+    }
+
+    /// "logon", "boot" or "none": when this worker starts by itself.
+    pub fn autostart(&self) -> &'static str {
+        if self.kind == Kind::Process {
+            "none"
+        } else if self.starts_at_boot() {
+            "boot"
+        } else {
+            "logon"
         }
     }
 
@@ -153,21 +172,24 @@ impl Svc {
             if self.running() {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(if self.kind == Kind::Task { 1000 } else { 500 }));
         }
         self.running()
     }
 
     pub fn start(&self) -> Result<(), String> {
+        let _ = std::fs::remove_file(self.home.file("stopped"));
         if self.running() {
             return Ok(());
         }
         match self.kind {
             Kind::Task => {
+                // A task made by an administrator (boot start) may not let a normal user change or run it: then start the
+                // worker directly. The task's own minute check finds it running and leaves it alone.
                 let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/ENABLE"]);
-                let (code, out, err) = run("schtasks", &["/Run", "/TN", &self.unit]).map_err(|e| e.to_string())?;
-                if code != 0 {
-                    return Err(format!("Could not start the scheduled task {}: {}", self.unit, if err.trim().is_empty() { out.trim() } else { err.trim() }));
+                let ran = run("schtasks", &["/Run", "/TN", &self.unit]).map(|o| o.0 == 0).unwrap_or(false);
+                if !ran || !self.wait_running(10) {
+                    crate::procutil::spawn_detached(&self.home.exe(), &["run".into(), "--home".into(), self.home.0.to_string_lossy().to_string()], Some(&self.home.0), Some(&self.home.file("worker.log"))).map_err(|e| format!("Could not start the worker: {e}"))?;
                 }
             }
             Kind::Systemd => {
@@ -191,6 +213,8 @@ impl Svc {
     pub fn stop(&self) -> Result<(), String> {
         match self.kind {
             Kind::Task => {
+                // the task re-runs every minute; a stopped worker leaves this marker so a re-run exits at once even when the task cannot be disabled
+                let _ = std::fs::write(self.home.file("stopped"), "stopped by agent-worker stop; agent-worker start removes this");
                 // The task re-runs every minute to bring back a worker that was killed; disabled, a stopped worker stays stopped until `start`.
                 let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/DISABLE"]);
                 let _ = run("schtasks", &["/End", "/TN", &self.unit]);
@@ -281,7 +305,7 @@ pub fn default_unit(id: &str) -> String {
     if cfg!(windows) { format!("AgentWorker-{id}") } else { format!("agent-worker-{id}") }
 }
 
-fn whoami() -> String {
+pub fn whoami() -> String {
     std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| run("whoami", &[]).map(|o| o.1.trim().to_string()).unwrap_or_default())
 }
 

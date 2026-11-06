@@ -137,3 +137,7 @@ dialog.fl-dialog[open] { display: flex; flex-direction: column; }
 .fl-update-row.fl-ok .fl-update-state { color: var(--ok); } .fl-update-row.fl-error .fl-update-state { color: var(--danger); }
 .fl-update-row.fl-warn .fl-update-state, .fl-update-row.fl-wait .fl-update-state { color: var(--warn); }
 .fl-update-link { margin-top: 8px; }
+
+.fl-autostart { display: flex; gap: .5rem; align-items: flex-start; margin: .35rem 0; }
+.fl-autostart small { display: block; margin-top: .15rem; max-width: 60ch; }
+.fl-boot-note { border-left: 3px solid var(--warn, #b7791f); padding-left: .6rem; }

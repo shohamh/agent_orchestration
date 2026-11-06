@@ -19,7 +19,8 @@ One registration is one PC, however many engines and pools it serves. In the boa
 
 1. **Fill in the form.** Name, the PC's operating system, the engines it serves, a pool (or a new
    one), optional tags, the slots and the CPU and RAM limits (defaults 1, 90% and 90%), and the
-   address the PC uses to reach this server (pre-filled from the page; it cannot be `localhost`).
+   address the PC uses to reach this server (pre-filled from the page; it cannot be `localhost`), and
+   **when the worker starts** (see below).
    Nothing is created until every field is valid: the page checks them first and the server checks
    them again.
 2. **Copy the command.** The server generates a **uuid** for this install and the board shows one
@@ -67,26 +68,47 @@ The worker needs no Python, Node or other runtime: it is one static program. The
 only this server. To run the agent adapters (Codex, Claude Code and so on) the PC still needs those
 programs, which the capability check reports.
 
+### When the worker starts: logon, boot or never
+
+The form asks, and the PC applies it during `agent-worker install`. The page explains the consequences next to each choice.
+
+| Choice | What happens | Consequence |
+|---|---|---|
+| **When the user logs in** (default) | Windows: a Scheduled Task with a logon trigger, running as that user with their environment. Linux: a `systemd --user` unit. Needs no administrator rights. | After the PC restarts the worker is not running until someone logs in, so the PC shows offline in the fleet until then. Tools and agents that depend on the user's login, credentials and PATH work. |
+| **When the PC starts, before anyone logs in** | Windows: the same task also gets a boot trigger and runs as the user without a stored password (S4U). Linux: `loginctl enable-linger`. | It runs without the user's credentials: no saved Windows or network logins, mapped drives, desktop or logged-in sessions, and not the user's logon environment (the install recorded the PATH and profile folders it saw and the worker restores them). Agents and tools that need the user to be signed in can fail until the user logs in. |
+| **Do not start automatically** | No startup entry; the worker runs now as a background process. | After a restart it stays off, offline in the fleet, until `agent-worker start`. |
+
+Everything works as a normal user, without administrator rights. Starting at boot is the one step that
+needs them, because a boot trigger is machine-wide: **Windows shows a UAC prompt** (during the install, or
+when you run `agent-worker boot enable` in a normal shell), the program re-runs only that step elevated, and
+everything else stays the user's. If the prompt is declined, or the elevated prompt was answered with a
+different administrator account, the worker starts at logon instead and says why; `agent-worker boot enable`
+tries again later. On Linux the step runs `loginctl enable-linger` and prints the exact `sudo` command if it is not allowed.
+Lingering is a setting of the user, not of one worker.
+
 ### How it starts, restarts and stops
 
 | | Windows | Linux |
 |---|---|---|
 | Service | Scheduled Task `AgentWorker-<name>` | `systemd --user` unit `agent-worker-<name>.service` |
-| Starts | at **logon** of that user; at **boot**, before anyone logs in, after `agent-worker boot enable` (Administrator once) | at login; at **boot** after `agent-worker boot enable` (runs `loginctl enable-linger`) |
 | After a crash or kill | the task re-runs every minute and starts the worker if it is not running (at most a minute), plus Task Scheduler's own restart on failure | `Restart=always`, 5 seconds |
-| `agent-worker stop` | disables the task until `agent-worker start` | stops it until the next login or `start` |
+| `agent-worker stop` | disables the task and leaves a marker so a check that still runs does nothing; `start` undoes both | stops it until the next login or `start` |
 | Limits | no time limit, runs on battery | none |
 | macOS | LaunchAgent (`KeepAlive`) | |
 
-Without a per-user service manager the worker falls back to a background process and says so.
-`AGENT_WORKER_SERVICE=process` forces that fallback (used by the tests; no startup entry is created).
+A second copy never runs: `run` exits if a worker is already alive for the folder. The Task Scheduler is asked
+whether the task is running, because a worker started at boot lives in a session the user's shell cannot always inspect.
+`AGENT_WORKER_SERVICE=process` forces the plain background process (used by the tests; no startup entry is created) and
+`AGENT_WORKER_NO_ELEVATE=1` makes `boot enable` refuse instead of showing a UAC prompt.
 
-Tested on both systems with the real program, not mocks: install by uuid, the second install refused,
-the startup entry created and removed, the worker killed with `kill -9` / `taskkill /F` and brought
-back, and a fleet update through the service manager (the updater is started outside the service so
-that stopping the service does not stop it). Run them with
-`AGENT_WORKER_SERVICE_TESTS=1 AGENT_WORKER_BIN=<program> python -m unittest agents.tests.test_agent_worker_cli`
-(the service tests create a real Scheduled Task or systemd user unit for the current user and remove it again).
+Tested on both systems with the real program, not mocks: install by uuid, each of the three start choices, the second install
+refused, the startup entry created and removed, the worker killed with `kill -9` / `taskkill /F` and brought back, a stopped
+worker staying stopped past the next check, and a fleet update through the service manager (the updater is started outside the
+service so that stopping the service does not stop it). On Windows the boot step was run through a real UAC prompt, and
+`status`, `stop`, `start`, `restart` and `uninstall` then worked from a normal shell on the boot task. Not exercised: an actual
+reboot to the logon screen. Run the tests with
+`AGENT_WORKER_SERVICE_TESTS=1 python -m unittest agents.tests.test_agent_worker_cli`
+(the service tests create a real Scheduled Task or systemd user unit for the current user and remove it again; they never raise a UAC prompt).
 
 ### Managing a worker: `agent-worker`
 
@@ -94,7 +116,7 @@ that stopping the service does not stop it). Run them with
 |---|---|
 | `agent-worker status [--json]` | Service, local health, connection to the server, version, components |
 | `agent-worker start`, `stop`, `restart [NAME]` | The worker and its components, or one component |
-| `agent-worker boot [enable\|disable\|status]` | Start with the PC, even at the Windows logon screen. On Windows run `enable` once in an Administrator PowerShell: it adds a boot trigger and runs the task as you without a stored password (S4U), so the worker has no network credentials and none of your logon environment; the install recorded your PATH and profile folders and the worker restores them. On Linux it turns on systemd lingering |
+| `agent-worker boot [enable\|disable\|status]` | Choose when the worker starts after the form's choice: with the PC (even at the Windows logon screen), at logon, or see which. On Windows `enable` and `disable` ask for administrator approval through the UAC prompt |
 | `agent-worker logs` | The worker log |
 | `agent-worker update` | Fetches the version the server serves, waits for running jobs (drain), swaps the program, restarts, and goes back to the previous one if the new one does not come up |
 | `agent-worker uninstall [--yes] [--keep-registration]` | Stops and removes the service, deregisters from the server and deletes the install folder |
