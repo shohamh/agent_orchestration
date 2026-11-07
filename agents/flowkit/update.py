@@ -138,6 +138,17 @@ async def pc_binary(request):
     return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'X-Worker-Version': install.binary_version(name), 'Cache-Control': 'no-store'})
 
 
+async def pc_confluence_runtime(request):
+    """A PC's agent-worker fetches this the first time a run needs Confluence; `have` skips the download."""
+    authorized_pc(request)
+    name = requested_os(request)
+    path = install.runtime_path(name)
+    if path is None: raise web.HTTPNotFound(text=json.dumps({'error': f'This server has no Confluence runtime for {name} yet'}), content_type='application/json')
+    version = await asyncio.to_thread(install.runtime_version, name)
+    if request.query.get('have') == version: return web.Response(status=304)
+    return web.FileResponse(path, headers={'Content-Type': 'application/octet-stream', 'X-Runtime-Version': version})
+
+
 async def pc_deregister(request):
     """`agent-worker uninstall`: the PC asks to be removed from the fleet, authenticated by its own token."""
     authorized_pc(request)
@@ -201,6 +212,7 @@ def add_routes(app):
     from .relay import Relay  # noqa: F401  (the relay app must exist)
     app.router.add_get('/relay/{id}/update/version', pc_version)
     app.router.add_get('/relay/{id}/update/binary', pc_binary)
+    app.router.add_get('/relay/{id}/update/confluence-runtime', pc_confluence_runtime)
     app.router.add_delete('/relay/{id}/registration', pc_deregister)
     app.router.add_get('/update/{code}/agent-worker', link_binary)
     app.router.add_post('/update/{code}/done', link_done)

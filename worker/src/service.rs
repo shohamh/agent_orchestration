@@ -63,6 +63,7 @@ impl App {
         if let Some(home) = config.root.parent() {
             crate::acp::set_adapter_home(home.join("adapters"));
         }
+        crate::confluence::set_cache(config.root.join("confluence-runtime"));
         let gate = Gate::open(config.root.join("gate.json"), config.slots);
         let inventory = read_json(&config.root.join("capabilities.json")).filter(|v| v.is_object()).unwrap_or(json!({}));
         let hostname = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
@@ -211,7 +212,7 @@ fn find(app: &App, id: &str) -> Result<Arc<Job>, ApiError> {
     app.jobs.lock().unwrap().get(id).cloned().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "404: Not Found".into()))
 }
 
-async fn create(State(app): State<Arc<App>>, Json(mut config): Json<Value>) -> ApiResult {
+async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiResult {
     let raw_id = config.get("id").and_then(|i| i.as_str()).ok_or_else(|| bad("'id'"))?.to_string();
     let job_id = valid_uuid(&raw_id).ok_or_else(|| bad("badly formed hexadecimal UUID string"))?;
     for key in ["start", "files", "assets"] {

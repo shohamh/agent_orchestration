@@ -35,6 +35,14 @@ Agents: `agent-worker agents install [--registry URL]` puts the pinned npm adapt
 Code, Codex, opencode v2 and pi next to the worker (needs Node.js). `opencode` and `omp` are found
 on the PATH. `agent-worker agents status` says what this PC can run; set
 `AGENT_WORKER_ACP_<AGENT>` to a JSON list to start an agent another way.
-Confluence pages are exported by a small converter in the worker, with `CONFLUENCE_TOKEN` and
-`CONFLUENCE_EMAIL` when set. It is not equal to the pinned `confluence-markdown-exporter`: macros
-(alerts, Jira, includes, page trees, diagrams) and many attachments are not handled the same way.
+Confluence pages go through the pinned `confluence-markdown-exporter`, the same code a Python worker
+runs, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set. The PC needs no Python: the first run
+that needs it fetches a runtime from the server (a relocatable CPython and the pinned exporter)
+into `confluence-runtime/` next to the worker. Build it with
+`python worker/ci/build-confluence-runtime.py --os windows` and `--os linux` from the repository
+root, using a Python with pip installed; `ci/fetch-release.sh` can fetch published archives instead.
+Both paths put `confluence-runtime-<os>.tar.gz` in `dist/worker/` on the server. The board relay
+preserves its version header, and the worker verifies the archive before using it.
+The Linux runtime requires glibc 2.26 or newer; the worker binary itself remains static.
+For an offline PC, set `AGENT_WORKER_CONFLUENCE_RUNTIME` to an archive or an unpacked runtime
+directory. Neither path installs Python globally or uses a Python already installed on the PC.

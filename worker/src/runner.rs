@@ -28,6 +28,7 @@ pub async fn run(home: Home) -> Result<(), String> {
         return Ok(());
     }
     std::fs::write(&pidfile, std::process::id().to_string()).map_err(|e| e.to_string())?; // `agent-worker stop` and status find the runner here
+    crate::confluence::set_source(home.0.clone(), &server, &uuid, &token);
     let app = App::new(Config { id: name.clone(), uuid: uuid.clone(), slots: config["slots"].as_u64().unwrap_or(1), token: token.clone(), root: home.file("runtime"), version: config::self_version() });
     service::spawn_background(app.clone());
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;

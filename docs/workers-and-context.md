@@ -430,7 +430,7 @@ the run with its error.
 |---|---|---|
 | Files | `context/files/<name>` | Uploaded through the board to the flow host, kept in the coordinators' shared `FLOW_WORKSPACES` volume |
 | GitHub, GitLab or any git repository | `repos/<name>` | Cloned on a worker with its credential helper or SSH, shallow unless the ref is a commit |
-| Confluence page tree | `context/confluence/<page id>` | Exported on a worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there. The `agent-worker` uses a simpler converter than the Python worker's exporter |
+| Confluence page tree | `context/confluence/<page id>` | Exported on a worker by the pinned exporter, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there. An `agent-worker` needs no Python: it fetches a runtime from the server on first use, which needs `dist/worker/confluence-runtime-<os>.tar.gz` there (from a release, or `worker/ci/build-confluence-runtime.py`) |
 
 Sources are prepared once per run, on a worker the run's selection allows, and every step gets the same
 copy, so parallel steps don't conflict where they join. An agent's prompt gets a note listing them.
@@ -498,9 +498,15 @@ including directories; to upload a file for one run, attach it in **New card**
 or SSH, with interactive terminal prompting disabled so failures appear in setup chat. HTTP URLs
 must not contain credentials. Confluence imports use
 [Spenhouet's Confluence Markdown Exporter](https://github.com/Spenhouet/confluence-markdown-exporter),
-pinned to **5.6.0** in `agents/requirements.txt`. Install that requirements file on every setup
-worker. Public sites work anonymously when credential fields are omitted. Each source runs in
-an isolated exporter process; credentials/configuration remain outside the transferable workspace.
+pinned to **5.6.0** in `agents/requirements.txt`. Python setup workers install that requirements
+file. Rust `agent-worker` PCs fetch the bundled CPython/exporter runtime from the server on first
+use; no system Python is needed. Build both OS archives with
+`python worker/ci/build-confluence-runtime.py --os windows` and `--os linux` (the build Python needs
+pip), or fetch release assets into the server's `dist/worker/`. Linux Confluence imports require
+glibc 2.26 or newer. An offline PC can use `AGENT_WORKER_CONFLUENCE_RUNTIME` with an archive or
+unpacked runtime directory. Public sites work anonymously when credential fields are omitted.
+Each source runs in an isolated exporter process; credentials/configuration remain outside the
+transferable workspace.
 
 The default imports the root and all descendants, preserving Markdown formatting and downloading
 referenced attachments. Each page is named `<page-id>.md`; `index.json` maps IDs to titles,

@@ -1,6 +1,7 @@
 """One-line PC install: form validation, one-time records, the command with the form's values as flags, the claim by a PC's
 uuid and the /install routes. No script is served: the command downloads the worker program and runs its `install`."""
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -381,6 +382,27 @@ class BundleTests(unittest.TestCase):
             return {l.split('==')[0].lower(): l.split('==')[1] for l in (ROOT/'agents'/path).read_text().splitlines() if '==' in l and not l.startswith('#')}
         worker, full = pins('requirements-worker.txt'), pins('requirements.txt')
         for name, version in worker.items(): self.assertEqual(full.get(name), version, name)
+
+
+class ConfluenceRuntimeRoute(unittest.IsolatedAsyncioTestCase):
+    async def test_a_registered_pc_fetches_the_runtime_only_when_it_changed(self):
+        from aiohttp.test_utils import TestClient, TestServer
+        from flowkit import update
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'FLOW_WORKER_BINARIES': folder}):
+            app = make_app(token_for=lambda worker_id: GOOD_TOKEN if worker_id == 'pc' else None)
+            update.add_routes(app)
+            async with TestClient(TestServer(app), headers={'Authorization': f'Bearer {GOOD_TOKEN}'}) as client:
+                path = '/relay/pc/update/confluence-runtime?os=windows&arch=x86_64'
+                self.assertEqual((await client.get(path, headers={'Authorization': 'Bearer wrong'})).status, 401)
+                self.assertEqual((await client.get(path.replace('/pc/', '/unknown/'))).status, 401)
+                self.assertEqual((await client.get(path)).status, 404)
+                (Path(folder)/'confluence-runtime-windows.tar.gz').write_bytes(b'runtime bytes')
+                response = await client.get(path)
+                self.assertEqual((response.status, await response.read()), (200, b'runtime bytes'))
+                version = response.headers['X-Runtime-Version']
+                self.assertEqual(version, hashlib.sha256(b'runtime bytes').hexdigest()[:16])
+                self.assertEqual((await client.get(f'{path}&have={version}')).status, 304)
+                self.assertEqual((await client.get(path.replace('windows', 'plan9'))).status, 400)
 
 
 if __name__ == '__main__':
