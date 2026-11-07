@@ -45,9 +45,9 @@ The board can start coding agents that run commands on this PC. Set `BOARD_PASSW
   127.0.0.1.
 - The session cookie is signed and expires after 30 days. It is `HttpOnly` and `SameSite=Strict`,
   and `Secure` on the `*.ts.net` HTTPS name. Failed logins are slowed down.
-- Worker `/install/*` and `/relay/*` endpoints use their install code or worker token instead of
-  the board cookie. The relay proxy streams binary/runtime downloads and preserves their version
-  headers so the worker can verify downloads through the board and Funnel.
+- Worker `/install/*`, `/update/*` and `/relay/*` endpoints use their install/update code or worker
+  token instead of the board cookie. The relay proxy streams binary/runtime downloads and preserves
+  their version headers so the worker can verify downloads through the board and Funnel.
 - Changing `BOARD_PASSWORD` or `BOARD_SECRET` signs everyone out.
 - The scripts in this folder sign in automatically using `board/.env` (`board_http.py`).
 

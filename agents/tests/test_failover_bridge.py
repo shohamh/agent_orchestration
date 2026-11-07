@@ -257,7 +257,7 @@ class FailoverBridgeTests(unittest.TestCase):
                 raise AssertionError(argv)
 
             adapter = OrcaCliAdapter(make_config(project))
-            with patch.object(adapter, "_json_command", side_effect=fake_command):
+            with patch.object(adapter, "_windows_only", False), patch.object(adapter, "_json_command", side_effect=fake_command):
                 observed = adapter.observe(project, "session-old")
             self.assertEqual(observed.status, "ok", observed.reason)
             self.assertEqual(observed.limit_marker_id, "limit")
@@ -277,7 +277,7 @@ class FailoverBridgeTests(unittest.TestCase):
                     {"id": "session-old", "paneKey": "tab:leaf"}]}]}
 
             adapter = OrcaCliAdapter(make_config(project))
-            with patch.object(adapter, "_json_command", side_effect=fake_command):
+            with patch.object(adapter, "_windows_only", False), patch.object(adapter, "_json_command", side_effect=fake_command):
                 observed = adapter.observe(project, "session-old")
             self.assertEqual(observed.status, "root_mismatch", observed.reason)
             self.assertEqual(len(calls), 1)
@@ -339,7 +339,7 @@ class FailoverBridgeTests(unittest.TestCase):
                 raise AssertionError(argv)
 
             adapter = OrcaCliAdapter(make_config(project))
-            with patch.object(adapter, "_json_command", side_effect=fake_command):
+            with patch.object(adapter, "_windows_only", False), patch.object(adapter, "_json_command", side_effect=fake_command):
                 result = adapter.launch(project, "bounded handoff")
             self.assertEqual(result.status, "ok", result.reason)
             self.assertEqual(result.target_session_handle, "session-new")
@@ -361,10 +361,10 @@ class FailoverBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = make_binding(Path(tmp))
             adapter = WindowsDesktopAdapter()
-            with patch.object(adapter, "_resolve_target", side_effect=RuntimeError("no matching UIA window")):
+            with patch.object(adapter, "_uia_desktop", object()), patch.object(adapter, "_resolve_target", side_effect=RuntimeError("no matching UIA window")):
                 observed = adapter.observe(project)
             self.assertEqual(observed.status, "unsupported_surface")
-            self.assertIn(observed.reason, {"pywinauto_uia_unavailable", "uia_observation_failed"})
+            self.assertEqual(observed.reason, "uia_observation_failed")
 
 
 

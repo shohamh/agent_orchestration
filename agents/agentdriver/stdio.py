@@ -6,13 +6,13 @@ import os
 import sys
 import traceback
 
-from acp.stdio import stdio_streams
+from .stdio_io import event_streams
 
 from .session import run_session
 
 
 async def main():
-    reader, _ = await stdio_streams(limit=256 * 1024)
+    reader, sink = await event_streams()
 
     async def receive():
         line = await reader.readline()
@@ -20,9 +20,6 @@ async def main():
             raise EOFError("Agent session input closed")
         return json.loads(line)
 
-    async def sink(event):
-        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
 
     start = await receive()
     if start.pop("type", None) != "start":

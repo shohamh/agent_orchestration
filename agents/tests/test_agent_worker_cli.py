@@ -91,6 +91,11 @@ class Harness(FleetFixture):
         text = log.read_text(errors='replace')[-3000:] if log.exists() else '(no worker.log)'
         update_status = Path(home)/'update-status.json'
         shown = update_status.read_text() if update_status.exists() else '(none)'
+        peer = self.peer(self.last_install[0]['code']) if hasattr(self, 'last_install') else None
+        status = (peer.status or {}) if peer else {}
+        metadata = {key: status.get(key) for key in ('worker_os', 'worker_version', 'draining', 'update_state')}
+        metadata.update(target=update.target(TARGET), attempts=getattr(peer, 'update_attempts', 0))
+        text += '\nrelay update metadata: ' + json.dumps(metadata)
         return '\n'.join(['', '--- worker.log ---', text, '--- update-status.json ---', shown])
 
     def is_connected(self, home):
@@ -125,11 +130,19 @@ class Harness(FleetFixture):
         while await current() != new and asyncio.get_event_loop().time() < deadline: await asyncio.sleep(2)
         self.assertEqual(await current(), new, f'the connected worker updates itself{self.diag(home)}')
         await self.connected(record['code'])
+        await until(lambda: self.peer(record['code']).status.get('worker_version') == new,
+                    timeout=40, message='the restarted worker reports the new executable version')
         # a program that does not run: the worker goes back to what it had
         served.write_bytes(b'this is not a program')
         update.start_fleet_update()
-        await asyncio.sleep(25)
+        def failed_update():
+            path = home/'update-status.json'
+            return path.exists() and json.loads(path.read_text()).get('state') == 'failed'
+        await until(failed_update, timeout=120, message='the malformed executable is attempted and reports failure')
         self.assertEqual(await current(), new, 'a failed update keeps the working version')
+        await until(lambda: self.peer(record['code']).status.get('worker_version') == new
+                    and self.peer(record['code']).status.get('update_state') == 'failed',
+                    timeout=40, message='the rolled-back worker reconnects and reports the failed update')
         await self.connected(record['code'])
 
 

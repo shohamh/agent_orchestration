@@ -4,7 +4,6 @@ use crate::config::{self, port_of, Home};
 use crate::svc::Svc;
 use crate::util::{atomic_json, now_unix, read_json};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 pub const DRAIN_TIMEOUT: u64 = 600;
@@ -357,10 +356,6 @@ pub async fn uninstall(home: &Home, yes: bool, keep_registration: bool) -> Resul
     }
     println!("Worker {id} removed from this PC{}", if keep_registration { "" } else if registered { " and from the fleet" } else { "" });
     Ok(())
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 /// `agent-worker boot [enable|disable|status]`: start with the PC, before anyone logs in. On Windows this needs Administrator

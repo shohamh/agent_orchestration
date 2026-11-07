@@ -213,7 +213,7 @@ class RemoteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status,200)
                 await asyncio.wait_for(app['jobs'][jid].task,30)
                 data=await (await client.get(service.make_url('/jobs/'+jid))).json()
-                self.assertEqual(data['state'],'done')
+                self.assertEqual(data['state'],'done',data.get('error'))
                 self.assertEqual(data['worker']['id'],'verbose')
                 self.assertGreater(data['cursor'],5000)
     @unittest.skipIf(os.name=='nt','POSIX process-group regression')

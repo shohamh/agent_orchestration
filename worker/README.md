@@ -26,5 +26,23 @@ and `SHA256SUMS`. On GitLab set `WINDOWS_RUNNER_TAG` to your Windows runner's ta
 The version a worker reports is the first 16 hex characters of the SHA-256 of its program, so
 the server and a PC always agree on what "the same version" means.
 
-Not built yet: running agent sessions (ACP) and the environment/Confluence setup inside the
-Rust worker. Those still use the Python worker.
+The worker runs what a Python execution worker runs, with nothing else to install but the
+agents themselves: program steps and cards, agent sessions over ACP (permissions, questions,
+terminals, interrupts, retries), the built-in demo agent, environment setup and files,
+repositories and Confluence page trees attached to a run. `git` is needed for repositories.
+
+Agents: `agent-worker agents install [--registry URL]` puts the pinned npm adapters for Claude
+Code, Codex, opencode v2 and pi next to the worker (needs Node.js). `opencode` and `omp` are found
+on the PATH. `agent-worker agents status` says what this PC can run; set
+`AGENT_WORKER_ACP_<AGENT>` to a JSON list to start an agent another way.
+Confluence pages go through the pinned `confluence-markdown-exporter`, the same code a Python worker
+runs, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set. The PC needs no Python: the first run
+that needs it fetches a runtime from the server (a relocatable CPython and the pinned exporter)
+into `confluence-runtime/` next to the worker. Build it with
+`python worker/ci/build-confluence-runtime.py --os windows` and `--os linux` from the repository
+root, using a Python with pip installed; `ci/fetch-release.sh` can fetch published archives instead.
+Both paths put `confluence-runtime-<os>.tar.gz` in `dist/worker/` on the server. The board relay
+preserves its version header, and the worker verifies the archive before using it.
+The Linux runtime requires glibc 2.26 or newer; the worker binary itself remains static.
+For an offline PC, set `AGENT_WORKER_CONFLUENCE_RUNTIME` to an archive or an unpacked runtime
+directory. Neither path installs Python globally or uses a Python already installed on the PC.

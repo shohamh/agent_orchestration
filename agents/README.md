@@ -240,6 +240,14 @@ use OCR, screenshots, clipboard access, browser storage, hidden windows, or unre
 Official interface: [Orca CLI reference](https://www.onorca.dev/docs/cli/reference).
 ## Verify
 
+When a built Rust worker is available, `test_agent_worker_cli.py` also runs native install/update
+lifecycle fixtures. On Windows, process mode avoids startup entries but still adds temporary homes
+to the real user's PATH: run that module only in a disposable environment. Real service-manager
+tests additionally require `AGENT_WORKER_SERVICE_TESTS=1` and create startup entries. The execution
+and bundled-Confluence contracts can be checked separately with
+`python -m unittest agents.tests.test_rust_worker`; build the runtime archives first as described
+in [worker/README.md](../worker/README.md).
+
 ```powershell
 agents/.venv/Scripts/python.exe -m unittest discover -s agents/tests -v
 agents/.venv/Scripts/python.exe -m unittest discover -s agents/integration_tests -v

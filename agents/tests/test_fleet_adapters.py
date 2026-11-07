@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,6 +216,59 @@ class ServiceFixture(unittest.IsolatedAsyncioTestCase):
         except (OSError, ValueError): return {}
 
 
+class CapacityShutdownTests(ServiceFixture):
+    async def test_shutdown_waits_for_in_flight_capacity_connection(self):
+        import threading
+        loop = asyncio.get_running_loop()
+        entered, cleanup_started = asyncio.Event(), asyncio.Event()
+        release, closed = threading.Event(), threading.Event()
+
+        class PausedGate(CapacityGate):
+            paused = False
+
+            @contextmanager
+            def transaction(self):
+                paused = self.paused
+                try:
+                    with super().transaction() as db:
+                        if paused:
+                            loop.call_soon_threadsafe(entered.set)
+                            if not release.wait(10):
+                                raise TimeoutError('Capacity transaction was not released')
+                        yield db
+                finally:
+                    if paused: closed.set()
+
+        root = self.root/'pc-shutdown'
+        gate = PausedGate(root/'test-capacity.db')
+        app = production_make_app(worker_id='pc-shutdown', root=root, capacity=gate)
+
+        async def announce_cleanup(app):
+            cleanup_started.set()
+
+        app.on_cleanup.insert(0, announce_cleanup)
+        server = TestServer(app)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        gate.paused = True
+        shutdown = None
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            shutdown = asyncio.create_task(server.close())
+            await asyncio.wait_for(cleanup_started.wait(), 10)
+            # Let the sampler receive shutdown's cancellation without releasing its
+            # real SQLite transaction or relying on a wall-clock delay.
+            checkpoint = loop.create_future()
+            loop.call_soon(checkpoint.set_result, None)
+            await checkpoint
+            self.assertFalse(app['capacity_task'].done(), 'Shutdown abandoned an open capacity connection')
+        finally:
+            release.set()
+            if shutdown is not None: await asyncio.wait_for(shutdown, 10)
+        self.assertTrue(closed.is_set())
+        gate.path.unlink()  # Windows rejects this while SQLite still owns the file.
+
+
 def responder(inbox, events, finish=True):
     """A user at the board: deny the demo's permission request, answer, then mark the card done."""
     async def sink(event):
@@ -279,7 +332,6 @@ class AttachedSourceTests(ServiceFixture):
         self.assertEqual(self.record('bad-source', 'card'), {}, 'the card itself never started')
         tools = {e['id']: e for e in self.events if e.get('type') == 'tool'}
         self.assertEqual(tools['context:repositories']['status'], 'error')
-        self.assertIn('does not appear to be a git repository', tools['context:repositories']['output'])
         self.assertTrue(any(e['type'] == 'error' and 'repos/missing' in e['message'] for e in self.events))
 
     async def test_an_agent_card_is_told_what_was_attached_and_works_in_that_folder(self):

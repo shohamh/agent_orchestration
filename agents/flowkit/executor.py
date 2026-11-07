@@ -141,16 +141,28 @@ async def _program(step: Step, context: dict, workspace: Path, emit: Emitter) ->
                 del tail[:-STDOUT_TAIL]
             await emit("log", stream=name, text=text)
 
+    async def feed() -> None:
+        try:
+            process.stdin.write(context_json.encode())
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # Programs may exit successfully without consuming their input.
+            pass
+        finally:
+            process.stdin.close()
+
+    tasks = [asyncio.create_task(feed()), asyncio.create_task(pump(process.stdout, "stdout")),
+             asyncio.create_task(pump(process.stderr, "stderr"))]
     try:
-        process.stdin.write(context_json.encode())
-        await process.stdin.drain()
-        process.stdin.close()
-        await asyncio.gather(pump(process.stdout, "stdout"), pump(process.stderr, "stderr"))
+        await asyncio.gather(*tasks)
         code = await process.wait()
     except BaseException:
         _kill(process, tree)
+        await process.wait()
         raise
     finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if tree:
             tree.close()
     if code != 0:

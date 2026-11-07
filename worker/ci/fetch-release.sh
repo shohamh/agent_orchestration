@@ -9,7 +9,7 @@ provider="${1:?usage: fetch-release.sh github <owner/repo> <tag> | gitlab <base-
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 OUT="${OUT:-$ROOT/dist/worker}"
 mkdir -p "$OUT"
-FILES="agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-linux-musl SHA256SUMS"
+FILES="agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-linux-musl confluence-runtime-windows.tar.gz confluence-runtime-linux.tar.gz SHA256SUMS"
 
 case "$provider" in
   github)
@@ -32,5 +32,5 @@ case "$provider" in
 esac
 
 chmod 755 "$OUT/agent-worker-x86_64-unknown-linux-musl" 2>/dev/null || true
-( cd "$OUT" && grep -E 'agent-worker-x86_64' SHA256SUMS | sha256sum -c - )
+( cd "$OUT" && grep -E 'agent-worker-x86_64|confluence-runtime-' SHA256SUMS | sha256sum -c - )
 echo "The coordinator now serves these from $OUT (restart is not needed: versions are read from the files)."

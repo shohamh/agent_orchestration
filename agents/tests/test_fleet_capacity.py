@@ -351,15 +351,25 @@ class RoundTwoTests(unittest.IsolatedAsyncioTestCase):
             now=time.monotonic()
             for i in range(11): gate.observe(1,1,now-10+i)
             gate_id=gate.metrics()['gate_id']
-            with gate.transaction():
-                job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'gate_id':gate_id,'root':Path(directory)},'00000000-0000-4000-8000-000000000002',{'files':{},'assets':{},'runId':'test'})
-                await asyncio.sleep(.04)
-                job.task.cancel()
-                await asyncio.wait_for(asyncio.gather(job.task,return_exceptions=True),.8)
-                self.assertEqual(job.state,'cancelled')
-                self.assertIsNone(job.process)
+            job = None
+            try:
+                with gate.transaction():
+                    job=Job({'slots':asyncio.Semaphore(1),'capacity':gate,'gate_id':gate_id,'root':Path(directory)},'00000000-0000-4000-8000-000000000002',{'files':{},'assets':{},'runId':'test'})
+                    await asyncio.sleep(.04)
+                    job.task.cancel()
+                    async def stopped():
+                        while job.state != 'cancelled': await asyncio.sleep(.01)
+                    await asyncio.wait_for(stopped(), .8)
+                    self.assertIsNone(job.process)
+                    # Execution stops while locked; durable revocation must wait for the writer.
+            finally:
+                if job is not None:
+                    await asyncio.wait_for(asyncio.gather(job.task,return_exceptions=True), .8)
+            from agents.flowkit.worker_service import termination_path
+            self.assertTrue(termination_path(job.app, job.id).is_file())
             with gate.transaction() as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
+                self.assertIsNotNone(db.execute('SELECT 1 FROM revocations WHERE job=?', (job.id,)).fetchone())
 
     @unittest.skipUnless(os.name=='nt','Windows session namespace')
     def test_other_session_absence_is_not_proof_of_tree_death(self):

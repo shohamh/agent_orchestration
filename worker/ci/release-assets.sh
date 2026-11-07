@@ -12,6 +12,10 @@ for name in agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-
   if [ -f "$SRC/$name" ]; then cp "$SRC/$name" "$DEST/$name"; found=$((found + 1)); else echo "missing $SRC/$name" >&2; fi
 done
 [ "$found" -eq 2 ] || { echo "a release needs both binaries (windows and linux); found $found" >&2; exit 1; }
-( cd "$DEST" && sha256sum agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-linux-musl > SHA256SUMS )
+for name in confluence-runtime-windows.tar.gz confluence-runtime-linux.tar.gz; do
+  [ -f "$SRC/$name" ] || { echo "a release needs $SRC/$name (worker/ci/build-confluence-runtime.py)" >&2; exit 1; }
+  cp "$SRC/$name" "$DEST/$name"
+done
+( cd "$DEST" && sha256sum agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-linux-musl confluence-runtime-windows.tar.gz confluence-runtime-linux.tar.gz > SHA256SUMS )
 cat "$DEST/SHA256SUMS"
 echo "Release assets are in $DEST"

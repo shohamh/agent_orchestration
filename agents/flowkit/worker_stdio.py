@@ -5,20 +5,18 @@ import os
 import sys
 import traceback
 
-from acp.stdio import stdio_streams
+from agentdriver.stdio_io import event_streams
 from .definition import parse
 from .executor import run_step
 
 
 async def main():
-    reader, _ = await stdio_streams(limit=256 * 1024)
+    reader, sink = await event_streams()
     start = json.loads(await reader.readline())
     async def receive():
         line = await reader.readline()
         if not line: await asyncio.Event().wait()
         return json.loads(line)
-    async def sink(event):
-        print(json.dumps(event, ensure_ascii=False), flush=True)
     flow = parse(start['flow']) if 'flow' in start else None
     if os.environ.get('FLOW_CAPACITY_HANDSHAKE') == '1':
         await sink({'type':'capacity_ready'})

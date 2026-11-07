@@ -22,10 +22,14 @@ COORDINATOR_STALE = 10  # an authorizing job only seeks admission while its coor
 
 
 async def capacity_call(function, *args, deadline=None, cancelled=None):
-    """SQLite may block briefly; retries never block the event loop."""
+    """Retry SQLite off-loop; cancellation joins the attempt so its connection closes."""
     while True:
         if cancelled is not None and cancelled.is_set(): raise asyncio.CancelledError
-        try: return await asyncio.to_thread(function, *args)
+        operation = asyncio.create_task(asyncio.to_thread(function, *args))
+        try: return await asyncio.shield(operation)
+        except asyncio.CancelledError as exc:
+            try: await finish_despite_cancellation(operation)
+            finally: raise exc
         except sqlite3.OperationalError as exc:
             if 'locked' not in str(exc).lower() and 'busy' not in str(exc).lower(): raise
             if deadline is not None and time.monotonic() >= deadline:
@@ -86,12 +90,12 @@ class Job:
         work = asyncio.create_task(self._run())
         try:
             await asyncio.shield(work)
-            await asyncio.to_thread(record_termination, self.app, self.id)
+            await capacity_call(record_termination, self.app, self.id)
         except asyncio.CancelledError:
             work.cancel()  # Exactly one cancellation reaches execution/cleanup.
             try: await finish_despite_cancellation(work)
             except asyncio.CancelledError: pass
-            await asyncio.to_thread(record_termination, self.app, self.id)
+            await capacity_call(record_termination, self.app, self.id)
             raise
         except Exception as exc:
             self.state, self.error = 'failed', str(exc)[-8000:]
@@ -451,7 +455,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         if not await capacity_call(app['capacity'].revoke_absent, jid, current):
             return web.json_response({'error': 'A previous execution may still be running'}, status=409)
         if item.state in ('queued','running'): item.state, item.error = 'cancelled', 'Execution cancelled'
-        await asyncio.to_thread(record_termination, app, jid)
+        await capacity_call(record_termination, app, jid)
         return web.json_response({'ok': True, 'terminated': True})
     async def reap():
         while True:

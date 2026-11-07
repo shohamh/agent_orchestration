@@ -130,10 +130,11 @@ pub fn probe_command(name: &str) -> Value {
     result(if builtin || which(name).is_some() { "installed" } else { "absent" })
 }
 
-/// Agent sessions are not run by this worker yet (stage 2), so no agent is reported installed: the coordinator then
-/// never places an agent step here instead of failing it in the middle.
 pub fn probe_agent(name: &str) -> Value {
-    result(if AGENTS.contains(&name) { "absent" } else { "unknown" })
+    if !AGENTS.contains(&name) {
+        return result("unknown");
+    }
+    result(if crate::acp::agent_available(name) { "installed" } else { "absent" })
 }
 
 pub fn probe(kind: &str, name: &str) -> Value {

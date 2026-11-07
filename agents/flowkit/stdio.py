@@ -12,14 +12,13 @@ import os
 import sys
 import traceback
 
-from acp.stdio import stdio_streams
+from agentdriver.stdio_io import event_streams
 
-from .definition import parse
 from .distributed import execute_step as run_step
 
 
 async def main() -> None:
-    reader, _ = await stdio_streams(limit=256 * 1024)
+    reader, sink = await event_streams()
 
     async def receive() -> dict:
         line = await reader.readline()
@@ -28,12 +27,6 @@ async def main() -> None:
             await asyncio.Event().wait()
         return json.loads(line)
 
-    def write(event: dict) -> None:
-        sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
-
-    async def sink(event: dict) -> None:
-        write(event)
 
     start = json.loads(await reader.readline())
     if start.get("type") != "start":
@@ -44,7 +37,7 @@ async def main() -> None:
     from .activation import Store
     flow = Store().load_bound_flow(asset_snapshot, definition)
     output = await run_step(flow, start["step"], start["context"], start["runId"], receive, sink, engine="trigger")
-    write({"type": "result", "output": output})
+    await sink({"type": "result", "output": output})
 
 
 if __name__ == "__main__":

@@ -111,6 +111,36 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "code 3: boom"):
             await self.run_flow(f)
 
+    async def test_short_program_ignoring_large_stdin_preserves_output_and_exit_status(self):
+        # More than the stdin transport's high-water mark, but small enough for FLOW_CONTEXT.
+        params = {"topic": "\u20ac" * 24000}
+        for code in (0, 7):
+            with self.subTest(exit_code=code):
+                f = parse(flow(a={"kind": "program", "run":
+                    f'python -c "import sys; print(\'result\'); print(\'diagnostic\', file=sys.stderr); sys.exit({code})"'}))
+                events = []
+
+                async def sink(event):
+                    events.append(event)
+
+                async def never():
+                    await asyncio.Event().wait()
+
+                run = run_step(f, "a", step_context(f, f.steps["a"], params, {}),
+                               f"ignores-stdin-{code}", never, sink)
+                if code:
+                    with self.assertRaisesRegex(RuntimeError, "code 7: result"):
+                        await asyncio.wait_for(run, 10)
+                    self.assertEqual(events[-1]["state"], "failed")
+                    self.assertEqual(events[-1]["exit_code"], code)
+                else:
+                    self.assertEqual(await asyncio.wait_for(run, 10), {"stdout": "result"})
+                    self.assertEqual(events[-1]["state"], "done")
+                self.assertIn(("stdout", "result"),
+                              [(e["stream"], e["text"]) for e in events if e["type"] == "log"])
+                self.assertIn(("stderr", "diagnostic"),
+                              [(e["stream"], e["text"]) for e in events if e["type"] == "log"])
+
     async def test_template_values_reach_a_program_exactly_and_never_run_as_commands(self):
         marker = Path(self.tmp.name) / "injected"
         nasty = f'line one\nline "two" & echo x > "{marker}" | more %PATH% !bang! ^caret tail\\'

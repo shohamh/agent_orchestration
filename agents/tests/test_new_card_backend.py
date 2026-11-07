@@ -332,6 +332,24 @@ class ProgramCard(unittest.IsolatedAsyncioTestCase):
         self.assertIn('boom', tools[-1]['output'])
         self.assertTrue(any(e['type'] == 'error' for e in events))
 
+    async def test_program_can_ignore_input_while_streaming_more_than_a_pipe(self):
+        command = f'"{sys.executable}" -c "import os; os.close(0); [print(i) for i in range(20000)]"'
+        result, events = await asyncio.wait_for(self.run_card({
+            'goal': command, 'agent': 'program', 'worker': None,
+            'programInput': 'x' * 16000,
+        }), 30)
+        self.assertEqual(result['state'], 'done')
+        self.assertEqual(result['output']['stdout'].splitlines(), [str(i) for i in range(19960, 20000)])
+
+    async def test_ignored_input_preserves_a_nonzero_exit(self):
+        command = f'"{sys.executable}" -c "import os; os.close(0); print(\'failed-child\'); raise SystemExit(7)"'
+        result, events = await self.run_card({
+            'goal': command, 'agent': 'program', 'worker': None, 'programInput': 'x' * 16000,
+        })
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn('code 7', str(result))
+        self.assertIn('failed-child', str(result))
+
 
 if __name__ == '__main__':
     unittest.main()

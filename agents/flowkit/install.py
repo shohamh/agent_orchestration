@@ -221,6 +221,7 @@ def bundle_version():
 # --------------------------------------------------------------------------- the Rust worker binaries
 TARGETS = {'windows': 'agent-worker-x86_64-pc-windows-msvc.exe', 'linux': 'agent-worker-x86_64-unknown-linux-musl'}
 _binary_versions = {}
+RUNTIMES = {'windows': 'confluence-runtime-windows.tar.gz', 'linux': 'confluence-runtime-linux.tar.gz'}
 
 
 def binaries_dir():
@@ -232,6 +233,24 @@ def binary_path(os_name):
     name = TARGETS.get(os_name)
     path = binaries_dir() / name if name else None
     return path if path is not None and path.is_file() else None
+
+
+def runtime_path(os_name):
+    """What a PC's agent-worker needs to import Confluence pages (worker/ci/build-confluence-runtime.py)."""
+    name = RUNTIMES.get(os_name)
+    path = binaries_dir() / name if name else None
+    return path if path is not None and path.is_file() else None
+
+
+def runtime_version(os_name):
+    path = runtime_path(os_name)
+    if path is None: return None
+    stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    cached = _binary_versions.get(('runtime', os_name))
+    if cached and cached[0] == stamp: return cached[1]
+    version = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    _binary_versions[('runtime', os_name)] = (stamp, version)
+    return version
 
 
 def binary_version(os_name):

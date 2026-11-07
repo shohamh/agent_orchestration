@@ -154,6 +154,9 @@ PC is told to update and does it itself (drain, swap, restart, roll back on fail
 down updates when it next connects, and **Get update command** gives a one-time command for it (an
 `agent-worker update --server … --code … --force` that downloads the new program and installs it
 over the old one). Put the new programs in `dist/worker/` (see below) before pressing the button.
+Automatic requests are limited to three attempts per target version, at least ten minutes apart.
+The first request is immediate even just after boot; selecting a different target resets that
+version's retry budget.
 
 An update link uses its own one-time authorization token, not the install or worker uuid. Its
 `/update/<token>/agent-worker` download and completion request pass through the board without an
@@ -392,8 +395,14 @@ there) and when **Advanced** has a workspace or resume ID: a placed card runs in
 that PC. The same compatibility panel is shown, and a blocked card cannot be created.
 A program card checks the executable it can read from the command. A pipeline or a variable is not
 checked in advance and fails on the worker if the program is missing. Its workspace stays on the PC.
-Program cards run on every worker, Python or Rust. Agent cards need a Python execution worker.
+Agent cards need the agent on that PC: on the `agent-worker`, `agent-worker agents install` adds the
+adapters (it needs Node.js) and the worker reports what it can run in its capabilities.
 With a blank workspace and no selection, new Hatchet and Prefect cards check all registered workers and run on a compatible one. Cards using an existing workspace or resume ID run locally as before.
+Python execution feeds program input while reading stdout and stderr, so a program can stream
+output without reading its input. Closing stdin does not override the program's actual exit
+status; the default returned stdout remains limited to its last 40 lines.
+Execution bridges apply backpressure to their JSONL events and drain the final frame before
+exiting, preserving complete frames even when a program produces logs faster than they are read.
 
 **Editing a flow (Flows).** Each step's form shows **Where this step can run** for the unsaved
 draft, placed the way **New card** starts it, and where its selection comes from (its own worker
@@ -467,12 +476,11 @@ the run with its error.
 |---|---|---|
 | Files | `context/files/<name>` | Uploaded through the board to the flow host, kept in the coordinators' shared `FLOW_WORKSPACES` volume |
 | GitHub, GitLab or any git repository | `repos/<name>` | Cloned on a worker with its credential helper or SSH, shallow unless the ref is a commit |
-| Confluence page tree | `context/confluence/<page id>` | Exported on a Python execution worker, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there |
+| Confluence page tree | `context/confluence/<page id>` | Exported on a worker by the pinned exporter, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set there. An `agent-worker` needs no Python: it fetches a runtime from the server on first use, which needs `dist/worker/confluence-runtime-<os>.tar.gz` there (from a release, or `worker/ci/build-confluence-runtime.py`) |
 
 Sources are prepared once per run, on a worker the run's selection allows, and every step gets the same
 copy, so parallel steps don't conflict where they join. An agent's prompt gets a note listing them.
-Everything attached must fit the transfer limit of **64 MiB and 10,000 files**. The Rust worker clones
-repositories but does not import Confluence pages: a run that lands on one fails and says so.
+Everything attached must fit the transfer limit of **64 MiB and 10,000 files**.
 
 Uploads the run has not used are removed after 7 days; a schedule keeps the ones it needs.
 
@@ -536,9 +544,15 @@ including directories; to upload a file for one run, attach it in **New card**
 or SSH, with interactive terminal prompting disabled so failures appear in setup chat. HTTP URLs
 must not contain credentials. Confluence imports use
 [Spenhouet's Confluence Markdown Exporter](https://github.com/Spenhouet/confluence-markdown-exporter),
-pinned to **5.6.0** in `agents/requirements.txt`. Install that requirements file on every setup
-worker. Public sites work anonymously when credential fields are omitted. Each source runs in
-an isolated exporter process; credentials/configuration remain outside the transferable workspace.
+pinned to **5.6.0** in `agents/requirements.txt`. Python setup workers install that requirements
+file. Rust `agent-worker` PCs fetch the bundled CPython/exporter runtime from the server on first
+use; no system Python is needed. Build both OS archives with
+`python worker/ci/build-confluence-runtime.py --os windows` and `--os linux` (the build Python needs
+pip), or fetch release assets into the server's `dist/worker/`. Linux Confluence imports require
+glibc 2.26 or newer. An offline PC can use `AGENT_WORKER_CONFLUENCE_RUNTIME` with an archive or
+unpacked runtime directory. Public sites work anonymously when credential fields are omitted.
+Each source runs in an isolated exporter process; credentials/configuration remain outside the
+transferable workspace.
 
 The default imports the root and all descendants, preserving Markdown formatting and downloading
 referenced attachments. Each page is named `<page-id>.md`; `index.json` maps IDs to titles,
@@ -783,6 +797,12 @@ another admission is still starting, during the cooldown (`cooldown`: for 10 sec
 confirmed start, and until a sample taken at least 10 seconds after it exists), while metrics are
 unknown, and while CPU or RAM is at or above its limit. The cooldown and samples survive service
 restarts and reconnects. A lease lasts 30 seconds and is renewed every 5 seconds while the job runs.
+
+The Python execution service waits for in-flight capacity bookkeeping and termination records
+during cancellation and shutdown. Cancelling a coroutine does not abandon its SQLite operation;
+the service releases its connections before teardown completes.
+Execution can stop while the database is locked; termination is acknowledged only after its
+durable revocation is committed.
 
 ## Crash recovery and its limits
 

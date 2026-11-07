@@ -2,6 +2,8 @@
 //! cancellation and the result. The states and reasons match the Python service, so coordinators behave the same.
 use crate::artifacts;
 use crate::capabilities;
+use crate::environment;
+use crate::session::{run_session, Inbox, Trees};
 use crate::gate::Acquire;
 use crate::procutil::Tree;
 use crate::program::{run_program, Emit, Emitter, ProgramRun};
@@ -11,7 +13,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{oneshot, watch, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 const COORDINATOR_STALE: f64 = 10.0;
@@ -73,6 +75,25 @@ pub struct Job {
     cancel: watch::Sender<bool>,
     done: Notify,
     tree: Arc<Mutex<Option<Tree>>>,
+    trees: Trees,
+    inbox: Inbox,
+    input: mpsc::UnboundedSender<Value>,
+}
+
+/// A small project with a failing test: what a card works on when nothing was attached to it.
+fn write_demo_project(workspace: &std::path::Path) -> Result<(), String> {
+    let files = [
+        ("cart.py", "def total(prices):\n    \"\"\"Return the sum, including the last item.\"\"\"\n    return sum(prices[:-1])\n"),
+        ("test_cart.py", "import unittest\nfrom cart import total\n\nclass CartTests(unittest.TestCase):\n    def test_all_items(self):\n        self.assertEqual(total([2, 3, 5]), 10)\n    def test_empty(self):\n        self.assertEqual(total([]), 0)\n"),
+        ("README.md", "# Agent Board demo\n\nFix the failing cart total test. Run `python -m unittest -v`.\n"),
+    ];
+    std::fs::create_dir_all(workspace).map_err(|e| e.to_string())?;
+    files.iter().try_for_each(|(name, text)| std::fs::write(workspace.join(name), text).map_err(|e| e.to_string()))
+}
+
+fn bounded_output(output: &Value) -> Value {
+    let text = crate::template::py_json(output);
+    if text.chars().count() <= 60000 { output.clone() } else { json!({"truncated": true, "preview": text.chars().take(2000).collect::<String>()}) }
 }
 
 struct ActiveGuard(Arc<App>);
@@ -85,6 +106,7 @@ impl Drop for ActiveGuard {
 impl Job {
     pub fn new(app: Arc<App>, id: String, config: Value) -> Arc<Job> {
         let authorize = config.get("authorize").and_then(|a| a.as_bool()).unwrap_or(false);
+        let (input, inbox) = mpsc::unbounded_channel();
         Arc::new(Job {
             app,
             id,
@@ -98,6 +120,9 @@ impl Job {
             cancel: watch::channel(false).0,
             done: Notify::new(),
             tree: Arc::new(Mutex::new(None)),
+            trees: Arc::new(Mutex::new(vec![])),
+            inbox: Arc::new(tokio::sync::Mutex::new(inbox)),
+            input,
         })
     }
 
@@ -122,7 +147,9 @@ impl Job {
         self.inner.lock().unwrap().finished
     }
 
-    pub fn input(&self, _item: Value) {}
+    pub fn input(&self, item: Value) {
+        let _ = self.input.send(item);
+    }
 
     pub fn set_state_error(&self, state: JobState, error: &str) {
         let mut i = self.inner.lock().unwrap();
@@ -231,6 +258,9 @@ impl Job {
         if let Some(tree) = self.tree.lock().unwrap().take() {
             tree.kill();
         }
+        for tree in self.trees.lock().unwrap().drain(..) {
+            tree.kill();
+        }
         if lease.lock().unwrap().take().is_some() {
             if let Err(e) = self.app.gate.finish(&self.id, Some(&self.app.gate_id)) {
                 crate::log!("service", "job {}: {e}", self.id);
@@ -262,6 +292,23 @@ impl Job {
         self.touch();
         self.inner.lock().unwrap().finished = true;
         self.done.notify_waiters();
+    }
+
+    /// A flow's agent step: its prompt, or the setup step that prepares the flow's environment.
+    async fn run_agent_step(&self, step: &Value, context: &Value, workspace: &std::path::Path, assets: &std::path::Path, emitter: Arc<Emitter>) -> Result<Value, String> {
+        if let Some(setup) = step.get("setup").filter(|s| !s.is_null()) {
+            return environment::setup_environment(setup, workspace, self.inbox.clone(), emitter, self.trees.clone()).await;
+        }
+        let prompt = step["prompt"].as_str().ok_or("An agent step needs a prompt")?;
+        let mut goal = crate::template::render(prompt, context, &assets.to_string_lossy(), false, cfg!(windows))?;
+        if let Some(note) = context["_context_note"].as_str().filter(|n| !n.is_empty()) {
+            goal = format!("{goal}\n\n{note}");
+        }
+        let agent = step["agent"].as_str().unwrap_or("demo");
+        let review = step["review"].as_bool().unwrap_or(false);
+        let session = json!({"goal": goal, "agent": agent, "workspace": workspace.display().to_string(), "autoDone": !review, "quietDemo": agent == "demo" && !review});
+        let result = run_session(session, self.inbox.clone(), emitter, self.trees.clone()).await?;
+        Ok(result.get("text").cloned().unwrap_or(json!("")))
     }
 
     async fn missing_software(&self, requirement: &Value) -> Option<String> {
@@ -399,20 +446,47 @@ impl Job {
         let context = start["context"].clone();
         let job = self.clone();
         let sink: Emit = Arc::new(move |event| job.push_event(event));
-        let emitter = Emitter::new(sink);
-        let output = match step["kind"].as_str() {
-            Some("program") => run_program(
-                ProgramRun { step_id: &step_id, step: &step, context: &context, workspace: &workspace, assets: &assets_dir, workspaces: &workspaces, tree: self.tree.clone() },
-                &emitter,
-            )
-            .await
-            .map_err(Stop::Failed)?,
-            Some("agent") => return Err(Stop::Failed("This worker does not run agent steps yet".into())),
-            other => return Err(Stop::Failed(format!("Unknown step kind {other:?}"))),
+        let emitter = Arc::new(Emitter::new(sink));
+        let output = if let Some(sources) = start.get("attached") {
+            environment::prepare_attached(sources, &workspace, &emitter).await.map_err(Stop::Failed)?
+        } else if let Some(session) = start.get("session") {
+            // The files that came with the job are in the run's folder. Without any: a small demo project, as for a blank card.
+            let mut session = session.clone();
+            let attached = session.as_object_mut().and_then(|s| s.remove("attached")).and_then(|a| a.as_bool()).unwrap_or(false);
+            if !attached {
+                write_demo_project(&workspace).map_err(Stop::Failed)?;
+            }
+            std::fs::create_dir_all(&workspace).map_err(|e| Stop::Failed(e.to_string()))?;
+            session["workspace"] = json!(workspace.display().to_string());
+            run_session(session, self.inbox.clone(), emitter.clone(), self.trees.clone()).await.map_err(Stop::Failed)?
+        } else {
+            match step["kind"].as_str() {
+                Some("program") => run_program(
+                    ProgramRun { step_id: &step_id, step: &step, context: &context, workspace: &workspace, assets: &assets_dir, workspaces: &workspaces, tree: self.tree.clone() },
+                    &emitter,
+                )
+                .await
+                .map_err(Stop::Failed)?,
+                Some("agent") => {
+                    std::fs::create_dir_all(&workspace).map_err(|e| Stop::Failed(e.to_string()))?;
+                    let outcome = self.run_agent_step(&step, &context, &workspace, &assets_dir, emitter.clone()).await;
+                    match outcome {
+                        Ok(output) => {
+                            emitter.emit("step", json!({"state": "done", "kind": "agent", "output": bounded_output(&output)}));
+                            output
+                        }
+                        Err(problem) => {
+                            emitter.emit("step", json!({"state": "failed", "kind": "agent", "error": problem.chars().take(2000).collect::<String>()}));
+                            return Err(Stop::Failed(problem));
+                        }
+                    }
+                }
+                other => return Err(Stop::Failed(format!("Unknown step kind {other:?}"))),
+            }
         };
         self.inner.lock().unwrap().output = Some(output);
-        // A program card's workspace stays on this PC, however large it gets; a step hands its files on.
-        let snapshot = if start["discardFiles"].as_bool().unwrap_or(false) {
+        // A card's workspace stays on this PC, however large it gets; a step or source job hands its files on.
+        let snapshot = if start["discardFiles"].as_bool().unwrap_or(false) || start.get("session").is_some() {
             json!({})
         } else {
             let (w, original) = (workspace.clone(), files.clone());
