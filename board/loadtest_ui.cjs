@@ -201,12 +201,12 @@ async function measure(count, page) {
         return found.length === 1 && found[0] === target.id; })()`);
       const toggle = () => browser.evaluate(latency(`document.getElementById('hide-finished').click()`));
       result.hideFinishedMs = [await toggle(), await toggle()];
-      // Scrolling: each step jumps to the bottom of the page, which loads the next page of every
+      // Scrolling: each step jumps every lane to its bottom, which loads the next page of each
       // column that reaches it. Time = scroll to the frame after the new cards are in.
       const loads = [];
       for (let i = 0; i < 20; i++) {
         const r = await browser.evaluate(`new Promise((resolve) => { const before = document.querySelectorAll('#columns .card').length, t = performance.now();
-          scrollTo(0, document.documentElement.scrollHeight);
+          document.querySelectorAll('#columns .column').forEach((lane) => { lane.scrollTop = lane.scrollHeight; });
           const check = () => { const now = document.querySelectorAll('#columns .card').length;
             // A live update can add a card or two to a column: a page load adds tens.
             if (now >= before + 10) requestAnimationFrame(() => resolve(Math.round(performance.now() - t))); else if (performance.now() - t > 1000) resolve(null); else requestAnimationFrame(check); };

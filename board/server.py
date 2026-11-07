@@ -131,18 +131,32 @@ async def label_flows(app: web.Application, cards: list[Any]) -> None:
         card.flow = flow_for_task(card.task, flows)
         card.backend_url = backend_url(card.system, card.id, tenant=tenant_id(app['adapters'].get(card.system)))
     moves.annotate(cards, sort=False)  # the UI sorts each column; no need to sort here too
-    await label_workers(app, [c for c in cards if c.flow])
+    await label_workers(app, [c for c in cards if c.flow or c.task == "agent-session"])
 
 
 async def label_workers(app: web.Application, cards: list[Any]) -> None:
-    """The execution workers that ran each portable-flow card's steps, so the board can search them."""
+    """The execution workers of each flow's steps and each placed session, with their state: the board
+    searches them, and tells work in progress on an offline PC from work that is really live."""
     try:
         found = await asyncio.wait_for(app["flow_host"].executions({c.id: is_final(c.column) for c in cards}), 1)
     except asyncio.TimeoutError:
         return  # labels are extras: the next refresh tries again
     for card in cards:
-        card.workers = [{"step": step, **execution["worker"]} for step, execution in (found.get(card.id) or {}).items()
+        card.workers = [{"step": step, "state": execution.get("state"), **execution["worker"]} for step, execution in (found.get(card.id) or {}).items()
                         if isinstance(execution, dict) and isinstance(execution.get("worker"), dict)]
+
+
+async def fleet_worker_jobs(request: web.Request) -> web.Response:
+    """What ran on a PC, from the flow host's records. The board adds what it knows of each run: its
+    title and where it is, for the boards someone is watching. Others are listed by run id."""
+    status, body = await request.app["flow_host"].worker_jobs(request.match_info["worker_id"])
+    if status != 200:
+        return web.json_response(body, status=status)
+    known = {}
+    for (system, board), watcher in request.app["hub"].watchers.items():
+        for card in (watcher.cards or {}).values():
+            known[card["id"]] = {"title": card.get("title"), "column": card.get("column"), "system": system, "board": board}
+    return web.json_response({"jobs": [{**job, **known.get(job["run"], {})} for job in body.get("jobs", [])]})
 
 
 async def move_card(request: web.Request) -> web.Response:
@@ -932,8 +946,8 @@ async def engine_runs(app: web.Application, engine: str, flows: dict[str, dict])
         return None
 
 
-async def activation_preview(app: web.Application, name: str) -> tuple[int, dict]:
-    status, host = await app["flow_host"].activation(name)
+async def activation_preview(app: web.Application, name: str, disable: bool = False) -> tuple[int, dict]:
+    status, host = await app["flow_host"].activation(name, disable=disable)
     if status != 200:
         return status, host
     # Every flow an engine serves (a removal that failed somewhere included), with its definition.
@@ -951,7 +965,7 @@ async def activation_preview(app: web.Application, name: str) -> tuple[int, dict
 
 
 async def flow_document_activation(request: web.Request) -> web.Response:
-    return passed_through(await activation_preview(request.app, request.match_info["name"]))
+    return passed_through(await activation_preview(request.app, request.match_info["name"], request.query.get("disable") == "1"))
 
 
 async def flow_document_activate(request: web.Request) -> web.Response:
@@ -969,6 +983,24 @@ async def flow_document_activate(request: web.Request) -> web.Response:
     status, result = await request.app["flow_host"].activate(name, preview["revision"])
     if status == 409:  # the draft changed in between: show the board's view of the new draft
         result = {"error": "conflict", "preview": (await activation_preview(request.app, name))[1]}
+    return web.json_response(result, status=status)
+
+
+async def flow_document_deactivate(request: web.Request) -> web.Response:
+    """Stop serving a flow's active version; its draft stays. The same recheck as activating."""
+    body, name = await json_object(request), request.match_info["name"]
+    status, preview = await activation_preview(request.app, name, disable=True)
+    if status != 200:
+        return web.json_response(preview, status=status)
+    if body.get("revision") != preview["activeRevision"]:
+        return web.json_response({"error": "conflict", "preview": preview}, status=409)
+    if body.get("impact") != preview["impact"]:
+        return web.json_response({"error": "impact changed", "preview": preview}, status=409)
+    if preview["disruptive"] and body.get("confirm") is not True:
+        return web.json_response({"error": "confirmation required", "preview": preview}, status=409)
+    status, result = await request.app["flow_host"].deactivate(name, preview["activeRevision"])
+    if status == 409:
+        result = {"error": "conflict", "preview": (await activation_preview(request.app, name, disable=True))[1]}
     return web.json_response(result, status=status)
 
 
@@ -1077,6 +1109,7 @@ def make_app() -> web.Application:
     app.router.add_put("/api/flow-documents/{name}/layout", flow_document_layout)
     app.router.add_get("/api/flow-documents/{name}/activation", flow_document_activation)
     app.router.add_post("/api/flow-documents/{name}/activate", flow_document_activate)
+    app.router.add_post("/api/flow-documents/{name}/deactivate", flow_document_deactivate)
     app.router.add_get('/api/workers', workers_list)
     app.router.add_get('/api/fleet', fleet_list)
     app.router.add_get('/api/fleet/metrics', fleet_metrics)
@@ -1092,6 +1125,7 @@ def make_app() -> web.Application:
     app.router.add_post('/api/fleet/workers', fleet_register)
     app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
     app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)
+    app.router.add_get('/api/fleet/workers/{worker_id}/jobs', fleet_worker_jobs)
     app.router.add_post('/api/launch/validate', launch_validate)
     app.router.add_post('/api/uploads', upload_file)
     app.router.add_delete('/api/uploads/{id}', delete_upload)

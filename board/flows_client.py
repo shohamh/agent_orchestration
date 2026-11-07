@@ -103,8 +103,14 @@ class FlowHost:
     async def delete_document(self, name: str, revision: str) -> tuple[int, Any]:
         return await self._call("DELETE", f"/documents/{quote(name, safe='')}?revision={quote(revision, safe='')}")
 
-    async def activation(self, name: str) -> tuple[int, Any]:
-        return await self._call("GET", f"/documents/{quote(name, safe='')}/activation")
+    async def activation(self, name: str, disable: bool = False) -> tuple[int, Any]:
+        return await self._call("GET", f"/documents/{quote(name, safe='')}/activation{'?disable=1' if disable else ''}")
+
+    async def deactivate(self, name: str, revision: str) -> tuple[int, Any]:
+        self._cache = None
+        result = await self._call("POST", f"/documents/{quote(name, safe='')}/deactivate", {"revision": revision}, timeout=180)
+        self._cache = None
+        return result
 
     async def activate(self, name: str, revision: str | None) -> tuple[int, Any]:
         self._cache = None
@@ -235,6 +241,9 @@ class FlowHost:
     async def set_selection(self, run_id, step, worker, flow=None):
         body = {'step': step, 'worker': worker, **({'flow': self._definition(flow)} if flow is not None else {})}
         return await self._request('POST', f'/execution/{quote(run_id, safe="")}/selection', body)
+
+    async def worker_jobs(self, worker_id: str) -> tuple[int, Any]:
+        return await self._call("GET", f"/fleet/workers/{quote(worker_id, safe='')}/jobs")
 
     async def mark_cancelled(self, run_id):
         return await self._request('POST', f'/execution/{quote(run_id, safe="")}/cancel', {}, timeout=3)

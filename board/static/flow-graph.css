@@ -1,0 +1,92 @@
+/* The shared flow graph (flow-graph.js), the same in the editor and in a run's drawer. Colours come
+   from the board's theme variables, so light and dark both work. */
+.fg-canvas { position: relative; flex: 1; min-height: 240px; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; background: var(--bg) radial-gradient(color-mix(in srgb, var(--muted) 28%, transparent) 1px, transparent 1px) 0 0 / 20px 20px; }
+.fg-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.fg-svg:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+.fg-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; padding: 24px; text-align: center; color: var(--muted); }
+.fg-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Tools float on the canvas, on small raised bars. */
+.fg-tools { position: absolute; z-index: 1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow-hover); }
+.fg-tools-view { right: 10px; bottom: 10px; }
+.fg-tools button.secondary { border-color: transparent; background: transparent; padding: 4px 8px; }
+.fg-tools button.secondary:hover:not(:disabled) { background: var(--chip); border-color: transparent; }
+.fg-tools button.fg-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; }
+.fg-zoom { font-size: 12px; color: var(--muted); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
+.fg-help { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; margin: 0 4px; padding: 0; border-radius: 50%; color: var(--muted); background: transparent; border: 1px solid var(--line-strong); cursor: pointer; font-family: inherit; font-size: 11px; font-weight: 600; }
+.fg-help:hover { color: var(--ink); border-color: var(--muted); }
+
+/* Steps */
+.fg-node { cursor: pointer; outline: none; transition: opacity .12s ease; }
+.fg-node .box { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1; filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .12)); transition: stroke .12s ease; }
+.fg-node:hover .box { stroke: var(--muted); }
+.fg-node.selected .box { stroke: var(--accent); stroke-width: 2.5; }
+.fg-node.has-error .box { stroke: var(--danger); stroke-width: 2.5; }
+.fg-node:focus-visible .box { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 6 3; }
+.fg-node.drop .box { stroke: var(--ok); stroke-width: 3; }
+.fg-node .label { fill: var(--ink); font-size: 13px; font-weight: 600; }
+.fg-node .sub { fill: var(--muted); font-size: 11px; }
+.fg-node .sub.code { font-family: var(--mono); font-size: 10.5px; }
+.fg-node .badge circle { fill: var(--danger); }
+.fg-node .badge text { fill: var(--panel); font-size: 12px; font-weight: 700; }
+/* The icon says what a step is; its colour says what kind, or in a run how it's going. */
+.fg-node { --tint: var(--muted); }
+.fg-node.agent { --tint: var(--accent); }
+.fg-node.unknown { --tint: var(--danger); }
+.fg-node[data-state="pending"], .fg-node[data-state="scheduled"], .fg-node[data-state="queued"] { --tint: var(--muted); }
+.fg-node[data-state="running"] { --tint: var(--accent); }
+.fg-node[data-state="waiting"] { --tint: var(--warn); }
+.fg-node[data-state="done"] { --tint: var(--ok); }
+.fg-node[data-state="stopped"] { --tint: var(--danger); }
+.fg-node .tile { fill: color-mix(in srgb, var(--tint) 16%, transparent); }
+.fg-node .tile-icon { fill: none; stroke: var(--tint); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+.fg-node[data-state="running"] .tile { animation: fg-working 1.8s ease-in-out infinite; }
+@keyframes fg-working { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .fg-node[data-state="running"] .tile { animation: none; } }
+
+/* Connection points appear when they can be used; touch screens always show them. */
+.fg-node .in { fill: var(--panel); stroke: var(--muted); stroke-width: 1.5; }
+.fg-node .handle { cursor: crosshair; }
+.fg-node .handle .hit { fill: transparent; }
+.fg-node .handle .dot { fill: var(--panel); stroke: var(--accent); stroke-width: 2; }
+.fg-node .handle:hover .dot, .fg-node.selected .handle .dot { fill: var(--accent); }
+@media (hover: hover) {
+  .fg-node .in, .fg-node .handle .dot { opacity: 0; transition: opacity .12s ease; }
+  .fg-node:hover .in, .fg-node:hover .handle .dot, .fg-node:focus-visible .handle .dot, .fg-node.selected .handle .dot, .fg-node.selected .in, .connecting .fg-node .in { opacity: 1; }
+}
+
+/* Dependencies */
+.fg-edge { cursor: default; outline: none; }
+.fg-edge[role="button"] { cursor: pointer; }
+.fg-edge .hit { fill: none; stroke: transparent; }
+.fg-edge .line { fill: none; stroke: var(--muted); stroke-width: 1.6; pointer-events: none; transition: opacity .12s ease; }
+.fg-edge.calls .line { stroke: var(--line-strong); }
+.fg-edge.then .line { stroke: var(--accent); stroke-dasharray: 5 4; }
+.fg-edge[role="button"]:hover .line { stroke: var(--ink); }
+.fg-edge:focus-visible .line { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 6 3; }
+.fg-edge.selected .line { stroke: var(--accent); stroke-width: 3; }
+.fg-arrowhead { fill: var(--muted); }
+.fg-arrowhead.calls { fill: var(--line-strong); }
+.fg-arrowhead.then { fill: var(--accent); }
+.fg-preview { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 4; pointer-events: none; }
+
+/* Hovering a step or a dependency lights up what it connects to. */
+.tracing .fg-edge:not(.lit) .line { opacity: .25; }
+.tracing .fg-node:not(.lit) { opacity: .55; }
+.fg-edge.lit .line { stroke: var(--accent); stroke-width: 2; }
+/* Drawing a dependency: the steps it can't reach step back. */
+.connecting { cursor: crosshair; }
+.connecting .fg-node.no-drop { opacity: .3; }
+.connecting.tracing .fg-node:not(.no-drop), .connecting.tracing .fg-edge .line { opacity: 1; }
+
+/* In a run's drawer: as tall as the flow needs, up to a limit; Expand gives it most of the window. */
+#d-dag { display: flex; height: var(--graph-height, 320px); max-height: 460px; transition: height .15s ease; }
+#d-dag.expanded { height: 72vh; max-height: none; }
+@media (prefers-reduced-motion: reduce) { #d-dag { transition: none; } }
+.fg-line { fill: none; stroke: var(--muted); stroke-width: 1.6; }
+.fg-line.calls { stroke: var(--line-strong); }
+.fg-line.then { stroke: var(--accent); stroke-dasharray: 5 4; }
+@media (max-width: 700px) {
+  .fg-canvas { min-height: 200px; }
+  .fg-tools .secondary { padding: 6px 10px; }
+}

@@ -122,7 +122,7 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             cards = await self.adapter.list_cards('demo')
             await server.label_flows(self.app, cards)
-        self.assertEqual(cards[0].workers, [{'step': 'talk', 'id': 'pc-b', 'hostname': 'pc-b.lan', 'pool': 'gpu', 'tags': ['cuda']}])
+        self.assertEqual(cards[0].workers, [{'step': 'talk', 'state': 'done', 'id': 'pc-b', 'hostname': 'pc-b.lan', 'pool': 'gpu', 'tags': ['cuda']}])
         self.app['flow_host'].execution.assert_awaited_once_with('run')
 
     async def test_logical_step_identity_survives_pending_to_started(self):

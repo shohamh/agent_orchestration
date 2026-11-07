@@ -275,6 +275,47 @@ class ActivationTests(HostCase):
         self.assertEqual(self.call("GET", "/documents/new-flow")[0], 404)
         self.assertNotIn("new-flow", self.target.read_text(encoding="utf-8"))
 
+    def test_disable_stops_serving_but_keeps_the_draft(self):
+        self.save(NEW, None, name="new-flow")
+        self.assertEqual(self.activate("new-flow")[0], 200)
+        preview = self.call("GET", "/documents/new-flow/activation?disable=1")[1]
+        self.assertEqual((preview["change"], preview["revision"], preview["activeRevision"]), ("remove", None, revision(NEW)))
+        self.assertEqual(self.call("POST", "/documents/new-flow/deactivate", {"revision": "sha256:stale"})[0], 409)
+        self.assertEqual(self.active_yaml("new-flow"), NEW)
+        status, result = self.call("POST", "/documents/new-flow/deactivate", {"revision": revision(NEW)})
+        self.assertEqual((status, result["activeRevision"]), (200, None))
+        self.assertIsNone(self.active_yaml("new-flow"))
+        doc = self.doc("new-flow")
+        self.assertEqual((doc["state"], doc["yaml"]), ("inactive", NEW))  # the draft is still there
+        self.assertNotIn("new-flow", self.target.read_text(encoding="utf-8"))
+        self.assertEqual(self.call("GET", "/documents/new-flow/activation?disable=1")[1]["change"], "none")
+        self.assertEqual(self.call("POST", "/documents/new-flow/deactivate", {"revision": revision(NEW)})[0], 409)  # already off
+        self.assertEqual(self.activate("new-flow")[0], 200)  # and it can be enabled again
+        self.assertEqual(self.active_yaml("new-flow"), NEW)
+
+    def test_worker_jobs_lists_what_ran_on_a_worker_newest_first(self):
+        import json, os, tempfile, time
+        from pathlib import Path
+        from unittest import mock
+        from flowkit.distributed import worker_jobs
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"FLOW_WORKSPACES": folder}):
+            def record(run, step, worker, state, age):
+                path = Path(folder) / run / ".flow-workers" / f"{step}.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"state": state, "engine": "hatchet", "worker": worker and {"id": worker}}), encoding="utf-8")
+                at = time.time() - age
+                os.utime(path, (at, at))
+            record("run-a", "build", "pc-a", "done", 100)
+            record("run-a", "test", "pc-b", "done", 90)
+            record("run-b", "card", "pc-a", "running", 10)
+            record("run-c", "wait", None, "queued", 5)  # not placed anywhere yet
+            (Path(folder) / "run-d" / ".flow-workers").mkdir(parents=True)
+            (Path(folder) / "run-d" / ".flow-workers" / "bad.json").write_text("{", encoding="utf-8")
+            jobs = worker_jobs("pc-a")
+            self.assertEqual([(j["run"], j["step"], j["state"]) for j in jobs], [("run-b", "card", "running"), ("run-a", "build", "done")])
+            self.assertEqual(worker_jobs("nobody"), [])
+            self.assertEqual(len(worker_jobs("pc-a", limit=1)), 1)
+
     def test_old_delete_is_draft_only(self):
         self.assertEqual(self.call("DELETE", "/flows/hello-flow"), (200, {"ok": True}))
         self.assertEqual(self.active_yaml(), HELLO)

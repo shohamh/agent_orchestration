@@ -724,6 +724,8 @@ class ReviewFixTests(FleetFixture):
 
     async def test_restart_selection_checks_step_software(self):
         import threading, urllib.request, urllib.error, flow_host
+        auth = patch.dict(os.environ, {'FLOW_HOST_TOKEN': 'restart-selection-test-token'})
+        auth.start(); self.addCleanup(auth.stop)
         report = {'commands': {'fleet-test-tool': entry('absent'), 'python': entry('installed')}, 'agents': {}, 'refreshed_at': stamp()}
         app, _ = fake_worker('pc-a', capabilities=report)
         server = await self.serve(app)
@@ -736,7 +738,8 @@ class ReviewFixTests(FleetFixture):
                                               'other': {'kind': 'program', 'run': 'python a.py'}}}
         def select(step, worker, with_flow=True):
             body = json.dumps({'step': step, 'worker': worker, **({'flow': flow} if with_flow else {})}).encode()
-            request = urllib.request.Request(f'http://127.0.0.1:{host.server_address[1]}/execution/sel-run/selection', body, {'Content-Type': 'application/json'})
+            request = urllib.request.Request(f'http://127.0.0.1:{host.server_address[1]}/execution/sel-run/selection', body,
+                                             {'Content-Type': 'application/json', 'Authorization': f'Bearer {os.environ["FLOW_HOST_TOKEN"]}'})
             try:
                 with urllib.request.urlopen(request, timeout=20) as response: return response.status, json.loads(response.read())
             except urllib.error.HTTPError as exc: return exc.code, json.loads(exc.read())

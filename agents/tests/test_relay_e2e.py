@@ -34,7 +34,11 @@ class RelayedPcTests(FleetFixture):
         env = patch.dict(os.environ, {'FLOW_WORKER_BINARIES': str(binaries), 'FLOW_RELAY_LOCAL_URL': f'http://127.0.0.1:{self.relay.port}', 'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env'),
                                       'FLOW_STATE_DIR': str(self.root/'state')})
         env.start(); self.addCleanup(env.stop)
-        for target, value in (('flowkit.relay.ONLINE_WINDOW', 3.0),):
+        # FleetFixture's half-second windows suit direct .2s polls, not the relay's
+        # 1s round trips. Keep the real protocol windows so nonces survive a poll.
+        for target, value in (('flowkit.relay.ONLINE_WINDOW', 3.0),
+                              ('flowkit.worker_service.AUTHORIZATION_TIMEOUT', 10),
+                              ('flowkit.worker_service.COORDINATOR_STALE', 10)):
             patcher = patch(target, value); patcher.start(); self.addCleanup(patcher.stop)
 
     async def start_pc(self, register=True):
@@ -74,9 +78,13 @@ class RelayedPcTests(FleetFixture):
 
     async def test_a_pc_that_goes_offline_makes_the_step_wait_and_it_resumes_when_the_connector_returns(self):
         from flowkit.distributed import execute_step
-        task = await self.start_pc()
-        await self.stop(task)
-        await until(lambda: not self.relay.app['relay'].peers[self.uuid].online(), timeout=10, message='offline')
+        with patch('flowkit.connector.POLL_WAIT', .1):
+            task = await self.start_pc()
+            await self.stop(task)
+        peer = self.relay.app['relay'].peers[self.uuid]
+        # A cancelled client does not join its server-side long poll.
+        await until(lambda: peer.holding == 0, message='last connector poll released')
+        await until(lambda: not peer.online(), timeout=10, message='offline')
         run = asyncio.create_task(execute_step(parse(FLOW), 'go', {'input': {}, 'steps': {}}, 'offline-run', self.receive, self.sink))
         try:
             await until(lambda: info(self.root, 'offline-run', 'go').get('waiting_reason') == 'offline', message='waiting as offline')

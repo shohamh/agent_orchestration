@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 AGENTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENTS))
-from aiohttp import ClientSession
+from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
 from flowkit.capacity import CapacityGate
 from flowkit.definition import parse
@@ -201,11 +201,12 @@ class ServiceFixture(unittest.IsolatedAsyncioTestCase):
 
     async def receive(self): await asyncio.Event().wait()
 
-    async def service(self, name, slots=1, token=None, gate=None):
+    async def service(self, name, slots=1, token=None, gate=None, middlewares=()):
         if gate is not None:
             app = production_make_app(worker_id=name, root=self.root/name, slots=slots, token=token, capacity=gate)
         else:
             app = make_app(worker_id=name, root=self.root/name, slots=slots, token=token)
+        app.middlewares.extend(middlewares)
         server = TestServer(app); await server.start_server()
         self.addAsyncCleanup(server.close)
         return app, server
@@ -559,28 +560,46 @@ class FlowIntegrityTests(ServiceFixture):
 
     async def test_stale_attempt_never_publishes(self):
         from flowkit.distributed import execute_step
-        app_a, a = await self.service('pc-a')
+        result_waiting, deliver_result = asyncio.Event(), asyncio.Event()
+        @web.middleware
+        async def hold_old_result(request, handler):
+            response = await handler(request)
+            if request.method == 'GET' and request.path.startswith('/jobs/') and response.status == 200 and json.loads(response.body).get('state') == 'done':
+                result_waiting.set()
+                await deliver_result.wait()
+            return response
+        _, a = await self.service('pc-a', middlewares=[hold_old_result])
         _, b = await self.service('pc-b')
         write_registry(self.registry, [('pc-a', a.make_url(''), ['pools: [build]']), ('pc-b', b.make_url(''), ['pools: [build]'])])
-        release = self.root/'release-old.txt'
-        script = ("import os,pathlib,time; [time.sleep(.1) for _ in iter(lambda: os.environ.get('SLOW')!='1' or pathlib.Path(r'"
-                  + str(release) + "').exists(), True)]; pathlib.Path('result.txt').write_text(os.environ.get('SLOW','0'))")
+        script = "import os,pathlib; pathlib.Path('result.txt').write_text(os.environ.get('SLOW','0'))"
         flow = parse({'name': 'fenced', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': f'python -c "{script}"'}}})
         selection = lambda wid: {'input': {}, 'steps': {}, '_flow_execution': {'steps': {'go': {'id': wid}}}}
-        with patch.dict(os.environ, {'SLOW': '1'}):
-            old = asyncio.create_task(execute_step(flow, 'go', selection('pc-a'), 'fence-run', self.receive, self.sink, engine='prefect'))
-            await until(lambda: any(j.started for j in app_a['jobs'].values()), message='old attempt started')
-        stale_job = self.record('fence-run', 'go')['job']
-        # The engine retried (or a restart replayed) the step while the old attempt still runs.
-        await execute_step(flow, 'go', selection('pc-b'), 'fence-run', self.receive, self.sink, engine='prefect')
-        current = self.record('fence-run', 'go')
-        release.write_text('go')
-        with self.assertRaisesRegex(RuntimeError, 'superseded'):
-            await asyncio.wait_for(old, 30)
-        self.assertEqual(self.record('fence-run', 'go'), current)  # the stale attempt wrote nothing
-        self.assertNotEqual(current['job'], stale_job)
-        published = json.loads((self.canonical/'fence-run'/'.flow-artifacts'/'go.json').read_text(encoding='utf-8'))
-        self.assertEqual(base64.b64decode(published['result.txt']['data']), b'0')  # the current attempt's file
+        old = current_attempt = None
+        try:
+            with patch.dict(os.environ, {'SLOW': '1'}):
+                old = asyncio.create_task(execute_step(flow, 'go', selection('pc-a'), 'fence-run', self.receive, self.sink, engine='prefect'))
+                await asyncio.wait_for(result_waiting.wait(), 30)
+            stale_job = self.record('fence-run', 'go')['job']
+            fence = self.canonical/'fence-run'/'.flow-attempts'/'go.json'
+            current_attempt = asyncio.create_task(execute_step(flow, 'go', selection('pc-b'), 'fence-run', self.receive, self.sink, engine='prefect'))
+            await until(lambda: json.loads(fence.read_text(encoding='utf-8')) != stale_job, message='replacement claimed the step')
+            # Deliver a successful old result only after it is stale. Otherwise its poll can
+            # legitimately observe cancellation before the replacement has claimed the fence.
+            deliver_result.set()
+            await asyncio.wait_for(current_attempt, 30)
+            current = self.record('fence-run', 'go')
+            with self.assertRaisesRegex(RuntimeError, 'superseded'):
+                await asyncio.wait_for(old, 30)
+            self.assertEqual(self.record('fence-run', 'go'), current)  # the stale attempt wrote nothing
+            self.assertNotEqual(current['job'], stale_job)
+            published = json.loads((self.canonical/'fence-run'/'.flow-artifacts'/'go.json').read_text(encoding='utf-8'))
+            self.assertEqual(base64.b64decode(published['result.txt']['data']), b'0')  # the current attempt's file
+        finally:
+            deliver_result.set()
+            tasks = [task for task in (old, current_attempt) if task is not None]
+            for task in tasks:
+                if not task.done(): task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_restart_reuses_results_and_places_only_the_restarted_subtree(self):
         from flowkit.distributed import execute_step, set_selection

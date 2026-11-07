@@ -114,7 +114,18 @@
     return test ? cards.filter(test) : cards;
   }
 
-  const api = { parse, index, matcher, filter, narrows };
+  // The same query language over any list: fields is { name: [values] }. A word looks in every field.
+  function matchFields(query, fields) {
+    return parse(query).every((term) => {
+      const lists = term.field ? (Object.entries(fields).find(([name]) => name === term.field)?.[1] ?? []) : Object.values(fields).flat();
+      const found = lists.some((value) => value != null && String(value).toLowerCase().includes(term.value));
+      return found !== term.negate;
+    });
+  }
+  // A term for a value that may hold spaces, as a click on a tag or a step's requirements produces.
+  const term = (field, value) => `${field}:${/\s/.test(value) ? `"${value}"` : value}`;
+
+  const api = { parse, index, matcher, filter, narrows, matchFields, term };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.CardSearch = api;
 })(typeof window !== 'undefined' ? window : globalThis);

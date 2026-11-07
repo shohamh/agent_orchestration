@@ -116,10 +116,15 @@ class RelayTests(RelayFixture):
             with self.assertRaises(aiohttp.ClientError):
                 async with self.http.get(f'{self.url}/w/pc/echo/x', headers=self.auth) as response: await response.read()
             if attempt == 0:
-                task = await self.connect()
-                await self.stop(task)
-                self.relay.app['relay'].peer('pc').last_poll = 1.0  # long ago
-                await until(lambda: not self.relay.app['relay'].peer('pc').online(), message='offline')
+                with patch('flowkit.connector.POLL_WAIT', .1):
+                    task = await self.connect()
+                    await self.stop(task)
+                peer = self.relay.app['relay'].peer('pc')
+                # Stopping the connector does not join the relay's held request. Drain it
+                # before ageing the timestamp, otherwise holding keeps the PC online.
+                await until(lambda: peer.holding == 0, message='last connector poll released')
+                peer.last_poll = 1.0  # long ago
+                self.assertFalse(peer.online())
 
     async def test_a_wrong_or_missing_token_is_refused_on_both_faces(self):
         for headers in ({}, {'Authorization': 'Bearer nope'}):

@@ -26,7 +26,7 @@ let workers = fake.fleet();
 let schedules = [];
 const records = {};   // run id -> {step or 'card': execution record}
 const calls = [];
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -523,7 +523,7 @@ test('live waiting: flow steps show waiting, intervention needed and timed out i
   assert.match(await text('#d-placement [data-step="build"]'), /build.*Waiting for a worker: the required software has not been checked/s);
   assert.match(await text('#d-placement [data-step="review"]'), /review.*Queued/s);
   await waitFor(`/waiting for a worker/.test(document.querySelector('[aria-label^="build:"]')?.textContent || '')`, 'the graph shows the wait on the node');
-  await evaluate(`document.querySelector('.dag-node[aria-label^="build:"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  await evaluate(`document.querySelector('.fg-node[aria-label^="build:"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
   await waitFor(`/Waiting for a worker/.test(document.querySelector('#d-node').textContent)`, 'the step panel explains it');
   records['flow-wait'].build = { ...records['flow-wait'].build, waiting_reason: 'intervention_needed', intervention_needed: true,
     message: 'No registered worker can run this step: python is not installed on pc-a', resolution: 'Install the required software on a matching worker, then refresh its capabilities.' };
