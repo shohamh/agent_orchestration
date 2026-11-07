@@ -11,8 +11,10 @@ fn expr() -> &'static Regex {
 
 const CMD_SYNTAX: &str = "&|<>^()";
 pub const CMD_BUILTINS: &[&str] = &[
-    "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir", "echo", "endlocal", "erase", "exit", "for", "ftype", "goto", "if", "md", "mkdir",
-    "mklink", "move", "path", "popd", "prompt", "pushd", "rd", "rem", "ren", "rename", "rmdir", "set", "setlocal", "shift", "start", "time", "title", "type", "ver", "verify", "vol",
+    "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir", "echo",
+    "endlocal", "erase", "exit", "for", "ftype", "goto", "if", "md", "mkdir", "mklink", "move",
+    "path", "popd", "prompt", "pushd", "rd", "rem", "ren", "rename", "rmdir", "set", "setlocal",
+    "shift", "start", "time", "title", "type", "ver", "verify", "vol",
 ];
 
 pub fn lookup<'a>(context: &'a Value, path: &str) -> Result<&'a Value, String> {
@@ -20,7 +22,11 @@ pub fn lookup<'a>(context: &'a Value, path: &str) -> Result<&'a Value, String> {
     for part in path.split('.') {
         match value.get(part) {
             Some(next) if value.is_object() => value = next,
-            _ => return Err(format!("{{{{ {path} }}}} is not available (known: input.*, steps.<needed step>.output)")),
+            _ => {
+                return Err(format!(
+                "{{{{ {path} }}}} is not available (known: input.*, steps.<needed step>.output)"
+            ))
+            }
         }
     }
     Ok(value)
@@ -33,8 +39,17 @@ pub fn py_json(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => serde_json::to_string(s).unwrap(),
-        Value::Array(items) => format!("[{}]", items.iter().map(py_json).collect::<Vec<_>>().join(", ")),
-        Value::Object(map) => format!("{{{}}}", map.iter().map(|(k, v)| format!("{}: {}", serde_json::to_string(k).unwrap(), py_json(v))).collect::<Vec<_>>().join(", ")),
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(py_json).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(k, v)| format!("{}: {}", serde_json::to_string(k).unwrap(), py_json(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -50,7 +65,9 @@ pub fn sh_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".into();
     }
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
+    {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', "'\"'\"'"))
@@ -94,7 +111,13 @@ pub fn list2cmdline(args: &[String]) -> String {
 }
 
 /// Replace expressions. With `shell` a value is quoted for the platform's shell.
-pub fn render(template: &str, context: &Value, flow_dir: &str, shell: bool, windows: bool) -> Result<String, String> {
+pub fn render(
+    template: &str,
+    context: &Value,
+    flow_dir: &str,
+    shell: bool,
+    windows: bool,
+) -> Result<String, String> {
     if shell && windows {
         return Ok(render_cmd(template, context)?.replace("{flow_dir}", flow_dir));
     }
@@ -129,7 +152,11 @@ fn render_cmd(template: &str, context: &Value) -> Result<String, String> {
                 &m[1]
             ));
         }
-        let closing = if quoted { template[whole.end()..].starts_with('"') } else { true };
+        let closing = if quoted {
+            template[whole.end()..].starts_with('"')
+        } else {
+            true
+        };
         if closing {
             let trailing = value.len() - value.trim_end_matches('\\').len();
             value.push_str(&"\\".repeat(trailing));
@@ -156,7 +183,11 @@ pub fn which(name: &str) -> Option<PathBuf> {
             if path.extension().is_some() {
                 out.push(base.clone());
             }
-            out.extend(exts.split(';').filter(|e| !e.is_empty()).map(|e| PathBuf::from(format!("{}{}", base.display(), e))));
+            out.extend(
+                exts.split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(|e| PathBuf::from(format!("{}{}", base.display(), e))),
+            );
             out
         } else {
             vec![base]
@@ -167,7 +198,9 @@ pub fn which(name: &str) -> Option<PathBuf> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::metadata(p).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+                std::fs::metadata(p)
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
             }
             #[cfg(not(unix))]
             {
@@ -191,22 +224,31 @@ pub fn which(name: &str) -> Option<PathBuf> {
 /// Windows: the arguments of a command that can start without cmd.exe, or None. The command is split the way the C
 /// runtime splits a command line and each value becomes part of its argument unchanged, so line breaks and quotes reach
 /// the program exactly and a value can never start another command.
-pub fn command_argv(template: &str, context: &Value, flow_dir: &str) -> Result<Option<Vec<String>>, String> {
+pub fn command_argv(
+    template: &str,
+    context: &Value,
+    flow_dir: &str,
+) -> Result<Option<Vec<String>>, String> {
     static PIECE: OnceLock<Regex> = OnceLock::new();
-    let piece = PIECE.get_or_init(|| Regex::new(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}|\{flow_dir\}").unwrap());
+    let piece =
+        PIECE.get_or_init(|| Regex::new(r"\{\{\s*([a-zA-Z_][\w.]*)\s*\}\}|\{flow_dir\}").unwrap());
     let mut pieces: Vec<(bool, String)> = vec![];
     let mut at = 0;
     for m in piece.captures_iter(template) {
         let whole = m.get(0).unwrap();
         pieces.push((false, template[at..whole.start()].to_string()));
-        pieces.push((true, match m.get(1) {
-            None => flow_dir.to_string(),
-            Some(path) => text(lookup(context, path.as_str())?),
-        }));
+        pieces.push((
+            true,
+            match m.get(1) {
+                None => flow_dir.to_string(),
+                Some(path) => text(lookup(context, path.as_str())?),
+            },
+        ));
         at = whole.end();
     }
     pieces.push((false, template[at..].to_string()));
-    let (mut args, mut current, mut started, mut quoted) = (Vec::<String>::new(), String::new(), false, false);
+    let (mut args, mut current, mut started, mut quoted) =
+        (Vec::<String>::new(), String::new(), false, false);
     for (is_value, chunk) in pieces {
         if is_value {
             current.push_str(&chunk);
@@ -264,8 +306,13 @@ pub fn command_argv(template: &str, context: &Value, flow_dir: &str) -> Result<O
     if args.is_empty() || CMD_BUILTINS.contains(&args[0].to_lowercase().as_str()) {
         return Ok(None);
     }
-    let Some(program) = which(&args[0]) else { return Ok(None) };
-    let ext = program.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let Some(program) = which(&args[0]) else {
+        return Ok(None);
+    };
+    let ext = program
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     if ext != "exe" && ext != "com" {
         return Ok(None);
     }
@@ -285,12 +332,32 @@ mod tests {
 
     #[test]
     fn plain_rendering_uses_python_json_for_non_text() {
-        assert_eq!(render("t={{ input.topic }} n={{input.n}} l={{ input.list }} f={flow_dir}", &ctx(), "/f", false, false).unwrap(), "t=edge caching n=3 l=[\"a\", 1] f=/f");
+        assert_eq!(
+            render(
+                "t={{ input.topic }} n={{input.n}} l={{ input.list }} f={flow_dir}",
+                &ctx(),
+                "/f",
+                false,
+                false
+            )
+            .unwrap(),
+            "t=edge caching n=3 l=[\"a\", 1] f=/f"
+        );
     }
 
     #[test]
     fn posix_shell_values_are_quoted_like_shlex() {
-        assert_eq!(render("echo {{ input.topic }} {{ input.quote }} {{ input.n }}", &ctx(), "", true, false).unwrap(), "echo 'edge caching' 'it'\"'\"'s' 3");
+        assert_eq!(
+            render(
+                "echo {{ input.topic }} {{ input.quote }} {{ input.n }}",
+                &ctx(),
+                "",
+                true,
+                false
+            )
+            .unwrap(),
+            "echo 'edge caching' 'it'\"'\"'s' 3"
+        );
         assert_eq!(sh_quote(""), "''");
         assert_eq!(sh_quote("a.b/c-d"), "a.b/c-d");
     }
@@ -304,8 +371,14 @@ mod tests {
 
     #[test]
     fn cmd_values_are_quoted_and_dangerous_ones_refused() {
-        assert_eq!(render("prog {{ input.topic }}", &ctx(), "", true, true).unwrap(), "prog \"edge caching\"");
-        assert_eq!(render("prog \"{{ input.topic }}\"", &ctx(), "", true, true).unwrap(), "prog \"edge caching\"");
+        assert_eq!(
+            render("prog {{ input.topic }}", &ctx(), "", true, true).unwrap(),
+            "prog \"edge caching\""
+        );
+        assert_eq!(
+            render("prog \"{{ input.topic }}\"", &ctx(), "", true, true).unwrap(),
+            "prog \"edge caching\""
+        );
         let bad = json!({"input": {"v": "a\"b"}});
         assert!(render("prog {{ input.v }}", &bad, "", true, true).is_err());
     }
@@ -313,7 +386,10 @@ mod tests {
     #[test]
     fn list2cmdline_matches_python() {
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(list2cmdline(&args(&["a b", "c", "d\"e", "f\\"])), "\"a b\" c d\\\"e f\\");
+        assert_eq!(
+            list2cmdline(&args(&["a b", "c", "d\"e", "f\\"])),
+            "\"a b\" c d\\\"e f\\"
+        );
         assert_eq!(list2cmdline(&args(&["", "x y\\"])), "\"\" \"x y\\\\\"");
     }
 
@@ -324,7 +400,11 @@ mod tests {
         // a program found on PATH with a .exe extension (Windows) is started directly
         let direct = command_argv(&format!("{program} /c {{{{ input.v }}}}"), &c, "");
         assert!(direct.is_ok());
-        assert_eq!(command_argv("echo hi", &c, "").unwrap(), None, "builtins need cmd.exe");
+        assert_eq!(
+            command_argv("echo hi", &c, "").unwrap(),
+            None,
+            "builtins need cmd.exe"
+        );
         assert_eq!(command_argv("a | b", &c, "").unwrap(), None);
         assert_eq!(command_argv("a %PATH%", &c, "").unwrap(), None);
     }

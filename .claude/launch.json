@@ -1,0 +1,21 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "board-loadtest",
+      "runtimeExecutable": "agents/.venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-u",
+        "board/server.py"
+      ],
+      "env": {
+        "BOARD_HOST": "127.0.0.1",
+        "BOARD_PORT": "8097",
+        "BOARD_LOADTEST_CARDS": "10000",
+        "FLOW_HOST_URL": "http://127.0.0.1:9",
+        "BOARD_PASSWORD": ""
+      },
+      "port": 8097
+    }
+  ]
+}

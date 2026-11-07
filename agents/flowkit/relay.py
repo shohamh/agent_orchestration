@@ -9,6 +9,7 @@ An unreachable PC is reported by dropping the coordinator's connection, never wi
 the coordinator already reads a dropped connection as "worker offline" and a status as a failure.
 """
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -72,6 +73,7 @@ class Peer:
         self.holding = 0
         self.last_poll = 0.0
         self.status, self.status_at = None, 0.0
+        self.revoked = False
 
     def online(self, now=None):
         return self.holding > 0 or (self.last_poll and (now or time.monotonic()) - self.last_poll < ONLINE_WINDOW)
@@ -81,14 +83,26 @@ class Peer:
 
 
 class Relay:
-    def __init__(self, token_for):
+    def __init__(self, token_for, revoked_for=None):
         self.peers = {}
         self.closing = False  # held long polls return at once so the service can stop
         self.token_for = token_for  # worker id -> token (None when unknown)
+        self.revoked_for = revoked_for or (lambda worker_id: None)
 
     def peer(self, worker_id):
         return self.peers.setdefault(worker_id, Peer())
 
+    def revoke_peer(self, worker_id):
+        """Stop queued deliveries; already picked calls retain their existing cleanup behavior."""
+        peer = self.peers.pop(worker_id, None)
+        if peer is None: return
+        peer.revoked = True
+        for call in peer.pending:
+            call.closed = True
+            call.picked.set()
+            if not call.response.done(): call.response.set_result(None)
+        peer.pending.clear()
+        peer.wake.set()
     def queue_control(self, worker_id, action):
         """Ask a PC's connector to do something about itself (see connector.control); nobody waits for the answer."""
         peer = self.peer(worker_id)
@@ -116,33 +130,79 @@ class Relay:
         return out
 
 
-def registry_token_for():
-    """Tokens come from the registry's `token_env`, resolved from workers.local.env and the environment."""
+def registry_auth_for():
+    """Resolve active tokens and revocation tombstones from one current registry snapshot."""
     from dotenv import dotenv_values
-    from .fleet_registry import _read, env_path, relay_key
-    cache = {'at': 0.0, 'tokens': {}}
-    def lookup(worker_id):
-        now = time.monotonic()
-        # a worker registered a moment ago is not in the cache yet: look again, but not more than once a second
-        if now - cache['at'] > 3.0 or (worker_id not in cache['tokens'] and now - cache['at'] > 1.0):
-            try:
-                values = {**dotenv_values(env_path()), **os.environ}
-                cache['tokens'] = {relay_key(w): values.get(w.get('token_env', ''), '') for w in _read()}
-            except (OSError, ValueError): cache['tokens'] = {}
-            cache['at'] = now
-        return cache['tokens'].get(worker_id) or None
-    return lookup
+    from .fleet_registry import _load, _path, env_path, relay_key
+    cache = {'at': 0.0, 'signature': None, 'tokens': {}, 'tombstones': {}}
 
+    def signature(path):
+        try:
+            stat = path.stat()
+            return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        except OSError:
+            return (str(path), None, None, None)
+
+    def refresh():
+        now = time.monotonic()
+        registry_path, credentials_path = _path(), env_path()
+        current = (signature(registry_path), signature(credentials_path))
+        if current != cache['signature'] or now - cache['at'] > 3.0:
+            try:
+                doc = _load()
+                values = {**dotenv_values(credentials_path), **os.environ}
+                cache['tokens'] = {relay_key(w): values.get(w.get('token_env', ''), '') for w in doc['workers']}
+                cache['tombstones'] = doc['tombstones']
+            except (OSError, ValueError):
+                cache['tokens'], cache['tombstones'] = {}, {}
+            cache['signature'], cache['at'] = current, now
+        return cache
+
+    def token_for(worker_id):
+        return refresh()['tokens'].get(worker_id) or None
+
+    def revoked_for(worker_id):
+        return refresh()['tombstones'].get(worker_id)
+
+    return token_for, revoked_for
+
+
+def registry_token_for():
+    return registry_auth_for()[0]
+
+
+def registry_revocation_for():
+    return registry_auth_for()[1]
 
 def bearer(request):
     value = request.headers.get('Authorization', '')
     return value[7:] if value.startswith('Bearer ') else ''
 
 
-def authorized(relay, request, worker_id):
-    token = relay.token_for(worker_id)
-    return bool(token) and hmac.compare_digest(bearer(request).encode(), token.encode())
+def authorization_status(relay, request, worker_id):
+    token = bearer(request)
+    tombstone = relay.revoked_for(worker_id)
+    if tombstone is not None:
+        digest = hashlib.sha256(token.encode('utf-8')).hexdigest()
+        return 'revoked' if token and hmac.compare_digest(digest, tombstone['token_sha256']) else 'unauthorized'
+    registered = relay.token_for(worker_id)
+    return 'active' if registered and hmac.compare_digest(token.encode(), registered.encode()) else 'unauthorized'
 
+
+
+
+def revoked_payload():
+    from .fleet_registry import REVOCATION_MESSAGE
+    return {'error': 'worker_revoked', 'message': REVOCATION_MESSAGE}
+
+
+def revoked_response():
+    return web.json_response(revoked_payload(), status=410)
+
+
+def authorization_error(status):
+    if status == 'revoked': return revoked_response()
+    return json_error(401, 'Unauthorized')
 
 def drop(request):
     """Report the PC as unreachable by closing the coordinator's connection without answering."""
@@ -157,7 +217,8 @@ def json_error(status, message):
 # --------------------------------------------------------------------------- coordinator face
 async def coordinator_call(request):
     relay, worker_id = request.app['relay'], request.match_info['id']
-    if not authorized(relay, request, worker_id): return json_error(401, 'Unauthorized')
+    auth = authorization_status(relay, request, worker_id)
+    if auth != 'active': return authorization_error(auth)
     peer = relay.peer(worker_id)
     tail = request.match_info.get('tail', '')
     if request.method == 'GET' and tail == 'health':
@@ -191,7 +252,10 @@ async def coordinator_call(request):
 # --------------------------------------------------------------------------- PC face
 def pc_peer(request):
     relay, worker_id = request.app['relay'], request.match_info['id']
-    if not authorized(relay, request, worker_id): raise web.HTTPUnauthorized(text=json.dumps({'error': 'Unauthorized'}), content_type='application/json')
+    auth = authorization_status(relay, request, worker_id)
+    if auth == 'revoked':
+        raise web.HTTPGone(text=json.dumps(revoked_payload()), content_type='application/json')
+    if auth != 'active': raise web.HTTPUnauthorized(text=json.dumps({'error': 'Unauthorized'}), content_type='application/json')
     return relay.peer(worker_id)
 
 
@@ -204,6 +268,9 @@ async def next_calls(request):
     try:
         deadline = time.monotonic() + wait
         while True:
+            auth = authorization_status(request.app['relay'], request, request.match_info['id'])
+            if auth != 'active': return authorization_error(auth)
+            if peer.revoked: return revoked_response()
             batch = []
             while peer.pending and len(batch) < MAX_BATCH:
                 call = peer.pending.popleft()
@@ -259,6 +326,8 @@ async def push_status(request):
     try: body = await request.json()
     except ValueError: return json_error(400, 'Invalid JSON')
     if not isinstance(body, dict): return json_error(400, 'Status must be an object')
+    auth = authorization_status(request.app['relay'], request, request.match_info['id'])
+    if auth != 'active': return authorization_error(auth)
     peer.status, peer.status_at = body, time.monotonic()
     peer.last_poll = peer.last_poll or time.monotonic()
     hook = request.app.get('on_status')
@@ -270,10 +339,27 @@ async def relay_state(request):
     return web.json_response(request.app['relay'].state())
 
 
-def make_app(token_for=None, install=None):
+async def internal_unregister_peer(request):
+    """Drop relay memory after the authenticated FlowHost removes a Fleet registration."""
+    expected = os.environ.get('FLOW_HOST_TOKEN', '')
+    if expected:
+        if not hmac.compare_digest(bearer(request).encode(), expected.encode()):
+            raise web.HTTPUnauthorized(text=json.dumps({'error': 'unauthorized'}), content_type='application/json')
+    elif request.remote not in ('127.0.0.1', '::1'):
+        raise web.HTTPUnauthorized(text=json.dumps({'error': 'unauthorized'}), content_type='application/json')
+    request.app['relay'].revoke_peer(request.match_info['id'])
+    return web.json_response({'ok': True})
+
+
+def make_app(token_for=None, install=None, revoked_for=None):
     """`install`: a callable that adds the /install routes (see flowkit.install)."""
     app = web.Application(client_max_size=MAX_BODY)
-    app['relay'] = Relay(token_for or registry_token_for())
+    if token_for is None:
+        token_for, registry_revoked_for = registry_auth_for()
+        if revoked_for is None: revoked_for = registry_revoked_for
+    elif revoked_for is None:
+        revoked_for = lambda worker_id: None
+    app['relay'] = Relay(token_for, revoked_for)
     async def release_polls(app):
         app['relay'].closing = True
         for peer in app['relay'].peers.values(): peer.wake.set()
@@ -284,5 +370,6 @@ def make_app(token_for=None, install=None):
     app.router.add_put('/relay/{id}/calls/{cid}/response', call_response)
     app.router.add_post('/relay/{id}/status', push_status)
     app.router.add_get('/relay-state', relay_state)
+    app.router.add_delete('/internal/relay/{id}/unregister', internal_unregister_peer)
     if install is not None: install(app)
     return app

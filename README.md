@@ -28,7 +28,7 @@ Beyond the three stacks, the repo now holds a layer that runs the same agent wor
 | **ACP coding sessions** | Codex, Claude Code, OpenCode and others run as cards through ACP: permissions and question forms, interrupt and Continue, slash commands, model and mode settings, usage and cost, attachments, resume and confirmed terminal commands. | [agents/](agents/README.md) |
 | **Workers and environment context** | Per-step workers with pools and tags, transferred workspaces, an interactive context-setup agent, and Confluence pages exported as Markdown. | [docs/workers-and-context.md](docs/workers-and-context.md) |
 | **Declarative worker fleet** | A Fleet tab to register execution PCs once. Steps and cards declare what they need (software, pool, tags) and are placed on a compatible PC, or wait visibly with the reason. Shared CPU, RAM and slot limits per PC, capability detection with last-checked times, launch checks, immutable per-revision flow assets, and cancel and settings changes that cannot race a start. Works the same on all three engines and offline. | [Execution PCs](agents/README.md#execution-pcs-fleet) |
-| **One-line PC install and `agent-worker`** | Register a PC with a validated form and paste one command (PowerShell, cmd or bash, no Administrator or sudo). The server issues a uuid for the install and the single static `agent-worker` binary (Windows and Linux x86_64, no Python or Node on the PC) claims it, receives its settings and refuses a second PC with the same command. The form chooses when the worker starts (at logon, at boot before anyone logs in, or never) and explains the consequences; everything works without administrator rights, and starting at boot asks for UAC approval on Windows. The PC connects out to the server, so no inbound port or firewall rule is needed. `agent-worker status/start/stop/restart/logs/update/uninstall/component` manage it, and Fleet → Update workers updates the whole fleet (drain, swap, roll back). GitHub Actions and GitLab CI build and release the binaries from the same scripts. | [Register a PC](docs/workers-and-context.md#register-a-pc) |
+| **One-line PC install and `agent-worker`** | Register a PC with a validated form and paste one command (PowerShell, cmd or bash, no Administrator or sudo). The server issues a uuid for the install and the single static `agent-worker` binary (Windows and Linux x86_64, no Python or Rust on the PC) claims it, receives its settings and refuses a second PC with the same command. Node.js/npm are required for the pinned ACP adapters. The form chooses when the worker starts (at logon, at boot before anyone logs in, or never) and explains the consequences; everything works without administrator rights, and starting at boot asks for UAC approval on Windows. The worker PC connects out to the server, so it needs no inbound port or firewall rule. `agent-worker status/start/stop/restart/logs/update/uninstall/component` manage it, and Fleet → Update workers updates the whole fleet (drain, swap, roll back). GitHub Actions and GitLab CI build and release the binaries from the same scripts. | [Register a PC](docs/workers-and-context.md#register-a-pc) |
 
 The board's tests (Python, Node and headless-Chrome) and the agent tests are listed under [Verify](agents/README.md#verify).
 
@@ -70,57 +70,100 @@ cp .env.example .env && docker compose up -d --build
 docker compose exec example-worker python demo.py
 ```
 
-## The board and flow host
+## Offline deployment
 
-The root [docker-compose.yml](docker-compose.yml) runs the board and the flow host. Hatchet, Trigger.dev and Prefect are
-optional and separate: start any of them from their own folders, and the board reaches them through their published ports.
+**Connected computer:** clone the repository, install the Trigger CLI's locked dependencies,
+and run `./offline/bundle.sh`. The bundle contains the engine and Board images, source, npm
+adapter packages, Python wheels, worker binaries/runtime archives, and portable Node.js archives.
+It contains no `.env` files or credentials. See [OFFLINE.md](OFFLINE.md) for the exact prerequisites
+and the Windows build steps.
+
+**Offline Docker host:** copy the complete `dist/offline-bundle/` directory, then run
+`./load.sh install /opt/agent_orchestration`. Configure Hatchet as the selected engine, start it
+with the root Board/flow-host stack using preloaded images (`docker compose --no-build`), then use
+**Admin** to check the engine API and dashboard URLs. **Fleet** registers the worker; install the
+bundle's Node.js archive and configure npm to use the local mirror before running its generated
+command. For a first execution, launch a `demo` coding-agent card on that worker. This needs no model
+credentials. [OFFLINE.md](OFFLINE.md) separates each connected-side and offline-side step.
+
+## Board, flows, and worker PCs
+
+The root [docker-compose.yml](docker-compose.yml) runs the Board, flow host, and Hatchet/Prefect
+flow-worker containers on the shared `agent-net`. Engine servers run from their own folders and
+join that network with their `docker-compose.agents.yml` overlay. Flow steps run on registered PCs;
+the containers coordinate and dispatch work, but do not execute agent steps themselves.
+
+For the simplest offline deployment, use **Hatchet only**. It is the smallest engine setup here
+and does not need Trigger.dev's image registry/build pipeline. In the root `.env`, set:
+
+```dotenv
+FLOW_HOST_TOKEN=<one shared random secret>
+COMPOSE_PROFILES=hatchet
+FLOW_BACKENDS=hatchet
+ENGINES=hatchet
+HATCHET_GRPC=hatchet-engine:7070
+HATCHET_URL=http://hatchet-dashboard:80
+```
+
+Also set `COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml` in `hatchet/.env` so the
+Hatchet API and dashboard join `agent-net`. Set `HATCHET_HOST` there to the server's offline-network
+DNS name or IP. Start Hatchet, create its client token, then start the root stack. The offline
+procedure, including bundle transfer, is in [OFFLINE.md](OFFLINE.md).
+
+For a connected development stack, copy `.env.example` to `.env`, set the same engine selections
+and secrets, then run:
 
 ```bash
-cp .env.example .env    # set FLOW_HOST_TOKEN, ENGINES and FLOW_BACKENDS
 docker compose up -d --build
 ```
 
-- **An engine appears on the board** when `board/.env` has its credential or URL: `HATCHET_CLIENT_TOKEN`,
-  `TRIGGER_SECRET_KEY` / `TRIGGER_DEV_SECRET_KEY`, or `PREFECT_API_URL`. With none set, the board runs with no tabs.
-- **`ENGINES`** picks the SDKs built into the shared image (`hatchet`, `prefect`). Trigger.dev needs none.
-- **`FLOW_BACKENDS`** picks the engines the flow host keeps flows active on. Empty means none.
-- **The flow host runs on Linux** with the repository mounted at `/repo`. Agent steps on its `local` worker can't run:
-  the image has no agent adapters, Node or CLI logins, and no Confluence exporter. Register this PC in the board's
-  **Fleet** tab and place agent and Confluence steps there.
-- **Still native:** the coding agent workers (`agents/hatchet_worker.py`, `agents/prefect_worker.py`, `trigger dev`).
-- **Not offline yet:** the offline bundle ships the board image but not `agents/`, `flows/` or this compose file.
+`COMPOSE_PROFILES` starts the Hatchet/Prefect flow-worker containers; `FLOW_BACKENDS` tells the
+flow host which engines to activate flows on; `ENGINES` selects the SDKs built into the Board image.
+Keep these aligned. **For offline Fleet execution, use Hatchet.** Prefect is also available when its
+server and credentials are configured. Trigger.dev uses a separate `trigger dev` worker for local
+development; do not select Trigger production as a Fleet execution engine.
 
-## The board and flow containers
+Engine selection for the Board and flow host:
 
-The root [docker-compose.yml](docker-compose.yml) runs the board and the flow containers on a shared network, `agent-net`.
-Hatchet, Trigger.dev and Prefect are optional and separate. Start the ones you want from their own folders, with
-`docker-compose.agents.yml` added to `COMPOSE_FILE` in their `.env`, so the board reaches them by service name.
+| Engine | Enable it | What runs the flows | Use |
+|---|---|---|---|
+| Hatchet | `HATCHET_CLIENT_TOKEN` in `board/.env`; `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`, `ENGINES=hatchet` | Hatchet server plus `flow-worker-hatchet` | Recommended offline Fleet path |
+| Prefect | `PREFECT_API_URL`; `COMPOSE_PROFILES=prefect`, `FLOW_BACKENDS=prefect` | Prefect server plus `flow-worker-prefect` | Supported Fleet alternative; offline wheelhouse included |
+| Trigger.dev · production | `TRIGGER_SECRET_KEY` in `board/.env` | Trigger's own server/worker stack | Production cards/deploys; not the offline Fleet path |
+| Trigger.dev · local | `TRIGGER_DEV_SECRET_KEY` in `board/.env` | Native `trigger dev` process | Connected local development only |
 
-```bash
-cp .env.example .env    # set FLOW_HOST_TOKEN and choose the engines
-docker compose up -d --build
-```
+Only Hatchet and Prefect have flow-worker containers in the root Compose file. Start the matching
+engine server with its `docker-compose.agents.yml` overlay so it joins `agent-net`. Trigger.dev
+production/local are separate engine integrations, not a substitute for a registered Fleet worker.
 
-| Container | Image | Job |
-|---|---|---|
-| `board` | `agent-board` | The web UI. Holds the Hatchet SDK only with `ENGINES=hatchet`. |
-| `flow-host` | `agent-flow-host` | Drafts, activation, the API the board calls, and the relay PCs connect through. |
-| `flow-worker-hatchet` | `agent-flow-worker-hatchet` | Registers active flows with Hatchet and sends each step to a PC. Profile `hatchet`. |
-| `flow-worker-prefect` | `agent-flow-worker-prefect` | The same for Prefect. Profile `prefect`. |
 
-- **Steps run on registered PCs, never in these containers.** There is no built-in worker: register a PC in the
-  board's **Fleet** tab, including this one if it should run steps. Until then flows wait for a worker.
-- **An engine appears on the board** when `board/.env` has its credential or URL: `HATCHET_CLIENT_TOKEN`,
-  `TRIGGER_SECRET_KEY` / `TRIGGER_DEV_SECRET_KEY`, or `PREFECT_API_URL`.
-- **Activating a flow** restarts the worker process inside each engine's flow worker container, through
-  `agents/flow_worker_service.py`. The containers themselves keep running.
-- **Trigger.dev flows are not covered yet.** `trigger dev` runs on this PC and can't resolve the `flow-host` address
-  stored for a registered PC, so flow steps on Trigger.dev can't reach PCs in this setup.
-- **Registering a PC needs the worker program** in `dist/worker` (`worker/ci/build.sh`, `worker/ci/build.ps1` or
-  `worker/ci/fetch-release.sh`).
-- **Still native:** `agents/hatchet_worker.py`, `agents/prefect_worker.py` and `trigger dev`, which run coding agent
-  cards with this PC's CLI logins.
-- **Not offline yet:** the offline bundle ships the board image but not these images, `agents/`, `flows/` or this file.
+To verify execution, open the Hatchet tab, choose **New card → Coding agent session → demo**,
+then **More placement options → Run on one specific worker** and select the registered PC. The
+demo is simulated and makes no model request; it verifies the worker route without API credentials.
+
+### Admin and worker setup
+
+In the Board, **Admin** edits each engine's API URL (reachable from the Board container) and
+dashboard URL (reachable from the user's browser). Use **Check now** to verify the API. Credentials
+remain in the Board environment, never in the browser. In this one-network Hatchet setup, the API
+URL is `http://hatchet-dashboard:80`; the dashboard URL is `http://<server-name-or-ip>:8080`.
+Hatchet's SDK captures its endpoint at Board startup, so restart the Board after changing its API
+URL. Settings persist in the `board_data` volume.
+
+In **Fleet → Register PC**, select the engine(s) and worker capacity/tags, then run the generated
+PowerShell or shell install command on the target PC as a normal user. The worker connects outbound
+to the server; no worker port needs to be opened. See
+[worker registration and lifecycle](docs/workers-and-context.md#register-a-pc).
+
+The built-in `demo` agent needs no model or CLI. The Fleet installer runs `npm ci` to install the
+pinned ACP adapters, so **Node.js and npm are required on the worker before install**. The offline
+bundle includes portable Node.js archives for Windows and Linux x64; extraction and PATH setup are in
+[OFFLINE.md](OFFLINE.md#offline-side-hatchet-board-and-a-fleet-worker). Configure npm to use the
+server's bundled mirror before running the Fleet-generated command:
+`npm config set registry 'http://<server>:4873/'`. The mirror contains adapter dependencies, not a
+coding-agent CLI or model. A real agent also needs its CLI and authentication/model configuration on
+the worker. `agent-worker agents install --registry URL` can install or refresh adapters later; keep
+provider credentials off the Board.
 
 ## Secrets and local files
 

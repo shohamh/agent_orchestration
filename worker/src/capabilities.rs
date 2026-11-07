@@ -3,11 +3,20 @@ use crate::template::{which, CMD_BUILTINS};
 use crate::util::iso_now;
 use serde_json::{json, Map, Value};
 
-pub const AGENTS: &[&str] = &["demo", "codex", "claude", "opencode", "opencode2", "omp", "pi"];
+pub const AGENTS: &[&str] = &[
+    "demo",
+    "codex",
+    "claude",
+    "opencode",
+    "opencode2",
+    "omp",
+    "pi",
+];
 const COMMON_BUILTINS: &[&str] = &["echo", "cd"];
 const POSIX_BUILTINS: &[&str] = &[
-    "alias", "bg", "break", "cd", "command", "continue", "echo", "eval", "exec", "exit", "export", "false", "fg", "getopts", "hash", "jobs", "pwd", "read", "readonly", "return", "set",
-    "shift", "test", "times", "trap", "true", "type", "ulimit", "umask", "unalias", "unset", "wait",
+    "alias", "bg", "break", "cd", "command", "continue", "echo", "eval", "exec", "exit", "export",
+    "false", "fg", "getopts", "hash", "jobs", "pwd", "read", "readonly", "return", "set", "shift",
+    "test", "times", "trap", "true", "type", "ulimit", "umask", "unalias", "unset", "wait",
 ];
 
 pub fn result(status: &str) -> Value {
@@ -93,12 +102,16 @@ pub fn first_word(run: &str, windows: bool) -> Option<String> {
 }
 
 pub fn shell_builtin(run: &str, windows: bool) -> bool {
-    first_word(run, windows).map(|w| COMMON_BUILTINS.contains(&w.as_str())).unwrap_or(false)
+    first_word(run, windows)
+        .map(|w| COMMON_BUILTINS.contains(&w.as_str()))
+        .unwrap_or(false)
 }
 
 pub fn infer_command(run: &str, windows: bool) -> Option<String> {
     let name = first_word(run, windows)?;
-    if ["command", "exec", "eval", "call", "start"].contains(&name.to_lowercase().as_str()) || shell_builtin(run, windows) {
+    if ["command", "exec", "eval", "call", "start"].contains(&name.to_lowercase().as_str())
+        || shell_builtin(run, windows)
+    {
         return None;
     }
     Some(name)
@@ -109,7 +122,11 @@ pub fn software_requirement(step: &Value, windows: bool) -> Value {
     if step["kind"] == "agent" {
         return json!({"agent": step.get("agent").and_then(|a| a.as_str()).unwrap_or("demo")});
     }
-    if let Some(command) = step.get("requires_command").and_then(|c| c.as_str()).filter(|c| !c.is_empty()) {
+    if let Some(command) = step
+        .get("requires_command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
         return json!({"command": command});
     }
     let run = step.get("run").and_then(|r| r.as_str()).unwrap_or("");
@@ -126,32 +143,59 @@ pub fn probe_command(name: &str) -> Value {
     if name.is_empty() || name.contains(['\0', '\r', '\n']) {
         return result("unknown");
     }
-    let builtin = if cfg!(windows) { CMD_BUILTINS.contains(&name.to_lowercase().as_str()) } else { POSIX_BUILTINS.contains(&name) };
-    result(if builtin || which(name).is_some() { "installed" } else { "absent" })
+    let builtin = if cfg!(windows) {
+        CMD_BUILTINS.contains(&name.to_lowercase().as_str())
+    } else {
+        POSIX_BUILTINS.contains(&name)
+    };
+    result(if builtin || which(name).is_some() {
+        "installed"
+    } else {
+        "absent"
+    })
 }
 
 pub fn probe_agent(name: &str) -> Value {
     if !AGENTS.contains(&name) {
         return result("unknown");
     }
-    result(if crate::acp::agent_available(name) { "installed" } else { "absent" })
+    result(if crate::acp::agent_available(name) {
+        "installed"
+    } else {
+        "absent"
+    })
 }
 
 pub fn probe(kind: &str, name: &str) -> Value {
-    if kind == "agent" { probe_agent(name) } else { probe_command(name) }
+    if kind == "agent" {
+        probe_agent(name)
+    } else {
+        probe_command(name)
+    }
 }
 
 pub fn refresh(commands: &std::collections::BTreeSet<String>) -> Value {
-    let agents: Map<String, Value> = AGENTS.iter().map(|a| (a.to_string(), probe_agent(a))).collect();
-    let commands: Map<String, Value> = commands.iter().map(|c| (c.clone(), probe_command(c))).collect();
+    let agents: Map<String, Value> = AGENTS
+        .iter()
+        .map(|a| (a.to_string(), probe_agent(a)))
+        .collect();
+    let commands: Map<String, Value> = commands
+        .iter()
+        .map(|c| (c.clone(), probe_command(c)))
+        .collect();
     json!({"agents": agents, "commands": commands, "refreshed_at": iso_now()})
 }
 
 pub fn overdue(inventory: &Value) -> bool {
-    inventory.get("refreshed_at").and_then(|t| t.as_str()).and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map(|t| {
-        let age = (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds();
-        !(0..86400).contains(&age)
-    }).unwrap_or(true)
+    inventory
+        .get("refreshed_at")
+        .and_then(|t| t.as_str())
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| {
+            let age = (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds();
+            !(0..86400).contains(&age)
+        })
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -160,29 +204,76 @@ mod tests {
 
     #[test]
     fn first_word_reads_one_literal_command_and_refuses_shell_syntax() {
-        assert_eq!(first_word("python script.py --x", false).as_deref(), Some("python"));
-        assert_eq!(first_word("  'my tool' a b", false).as_deref(), Some("my tool"));
-        for run in ["a | b", "a && b", "echo $(x)", "a `b`", "a; b", "a > f", "echo 'open", "{{ input.cmd }} x", "A=1 run", "x\ny"] {
+        assert_eq!(
+            first_word("python script.py --x", false).as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            first_word("  'my tool' a b", false).as_deref(),
+            Some("my tool")
+        );
+        for run in [
+            "a | b",
+            "a && b",
+            "echo $(x)",
+            "a `b`",
+            "a; b",
+            "a > f",
+            "echo 'open",
+            "{{ input.cmd }} x",
+            "A=1 run",
+            "x\ny",
+        ] {
             assert_eq!(first_word(run, false), None, "{run}");
         }
-        assert_eq!(first_word("\"C:\\Program Files\\x.exe\" /y", true).as_deref(), Some("C:\\Program Files\\x.exe"));
+        assert_eq!(
+            first_word("\"C:\\Program Files\\x.exe\" /y", true).as_deref(),
+            Some("C:\\Program Files\\x.exe")
+        );
     }
 
     #[test]
     fn requirements_name_agents_commands_builtins_or_ambiguity() {
         use serde_json::json;
-        assert_eq!(software_requirement(&json!({"kind": "agent", "agent": "codex"}), false), json!({"agent": "codex"}));
-        assert_eq!(software_requirement(&json!({"kind": "program", "run": "git status"}), false), json!({"command": "git"}));
-        assert_eq!(software_requirement(&json!({"kind": "program", "run": "x", "requires_command": "tool"}), false), json!({"command": "tool"}));
-        assert_eq!(software_requirement(&json!({"kind": "program", "run": "echo hi"}), false), json!({}));
-        assert_eq!(software_requirement(&json!({"kind": "program", "run": "a | b"}), false), json!({"ambiguous_command": true}));
-        assert_eq!(software_requirement(&json!({"kind": "program", "run": "exec foo"}), false), json!({"ambiguous_command": true}));
+        assert_eq!(
+            software_requirement(&json!({"kind": "agent", "agent": "codex"}), false),
+            json!({"agent": "codex"})
+        );
+        assert_eq!(
+            software_requirement(&json!({"kind": "program", "run": "git status"}), false),
+            json!({"command": "git"})
+        );
+        assert_eq!(
+            software_requirement(
+                &json!({"kind": "program", "run": "x", "requires_command": "tool"}),
+                false
+            ),
+            json!({"command": "tool"})
+        );
+        assert_eq!(
+            software_requirement(&json!({"kind": "program", "run": "echo hi"}), false),
+            json!({})
+        );
+        assert_eq!(
+            software_requirement(&json!({"kind": "program", "run": "a | b"}), false),
+            json!({"ambiguous_command": true})
+        );
+        assert_eq!(
+            software_requirement(&json!({"kind": "program", "run": "exec foo"}), false),
+            json!({"ambiguous_command": true})
+        );
     }
 
     #[test]
     fn a_builtin_is_installed_and_a_missing_program_absent() {
-        assert_eq!(probe_command(if cfg!(windows) { "dir" } else { "cd" })["status"], "installed");
-        assert_eq!(probe_command("definitely-not-a-real-program-xyz")["status"], "absent");
+        assert_eq!(
+            probe_command(if cfg!(windows) { "dir" } else { "cd" })["status"],
+            "installed"
+        );
+        assert_eq!(
+            probe_command("definitely-not-a-real-program-xyz")["status"],
+            "absent"
+        );
         assert_eq!(probe_command("a\nb")["status"], "unknown");
     }
 
@@ -190,6 +281,8 @@ mod tests {
     fn an_old_inventory_is_overdue() {
         assert!(overdue(&serde_json::json!({})));
         assert!(!overdue(&serde_json::json!({"refreshed_at": iso_now()})));
-        assert!(overdue(&serde_json::json!({"refreshed_at": "2020-01-01T00:00:00+00:00"})));
+        assert!(overdue(
+            &serde_json::json!({"refreshed_at": "2020-01-01T00:00:00+00:00"})
+        ));
     }
 }

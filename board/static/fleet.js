@@ -291,6 +291,7 @@
     const live = h('p', { class: 'fl-live fl-sr', 'aria-live': 'polite' });
     const stale = h('p', { class: 'fl-stale', hidden: true });
     const list = h('div', { class: 'fl-list', role: 'list', 'aria-label': 'Registered PCs' });
+    const unregisterDialog = h('dialog', { class: 'fl-unregister', 'aria-labelledby': 'fl-unregister-title', 'aria-describedby': 'fl-unregister-message' });
     const filterInput = h('input', { type: 'search', class: 'fl-filter-input', placeholder: 'Filter PCs', 'aria-label': 'Filter PCs', autocomplete: 'off', spellcheck: 'false',
       title: 'Words match a PC\'s name, pools, tags, engines, state and installed software.\nid: pool: tag: engine: status: agent: command: narrow to one, for example tag:gpu or agent:codex.\n-word excludes.',
       oninput: (e) => { S.filter = e.target.value; render(); } });
@@ -318,10 +319,59 @@
         iconButton('update', 'Update workers', { 'data-action': 'updates', onclick: () => openUpdates() }),
         iconButton('reload', 'Reload', { onclick: () => load(true) }),
         h('button', { type: 'button', class: 'close', 'aria-label': 'Close fleet', onclick: () => options.onClose?.() }, '×')));
-    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, pending, filterBar, list), live));
+    container.replaceChildren(h('div', { class: 'fl' }, top, stale, h('div', { class: 'fl-body' }, formPanel, pending, filterBar, list), live, unregisterDialog));
 
     const say = (text, error = false) => { status.textContent = text; status.classList.toggle('error', error); };
     const announce = (text) => { live.textContent = ''; setTimeout(() => { live.textContent = text; }, 30); };
+
+    function confirmUnregister(id) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (confirmed) => {
+          if (done) return;
+          done = true;
+          unregisterDialog.removeEventListener('cancel', onCancel);
+          unregisterDialog.removeEventListener('click', onBackdrop);
+          unregisterDialog.close();
+          resolve(confirmed);
+        };
+        const onCancel = (e) => { e.preventDefault(); finish(false); };
+        const onBackdrop = (event) => {
+          if (event.target === unregisterDialog) unregisterDialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+        };
+        unregisterDialog.addEventListener('click', onBackdrop);
+        unregisterDialog.addEventListener('cancel', onCancel);
+        unregisterDialog.replaceChildren(
+          h('h3', { id: 'fl-unregister-title' }, `Unregister ${id}?`),
+          h('p', { id: 'fl-unregister-message' }, `This removes ${id} from Fleet, revokes its server connection, and frees its name for a new worker. Already-running work is not canceled synchronously.`),
+          h('div', { class: 'fl-row fl-unregister-actions' },
+            h('button', { type: 'button', class: 'secondary', onclick: () => finish(false) }, 'Cancel'),
+            h('button', { type: 'button', class: 'danger', onclick: () => finish(true) }, `Unregister ${id}`)));
+        unregisterDialog.showModal();
+        unregisterDialog.querySelector('button').focus();
+      });
+    }
+
+    async function unregisterWorker(id) {
+      if (!await confirmUnregister(id)) return;
+      const r = await request('DELETE', `/api/fleet/workers/${enc(id)}`);
+      if (!r.ok) {
+        if (r.status === 404) {
+          const refreshed = await load();
+          S.workers = S.workers.filter((w) => w.id !== id);
+          if (S.form?.detail === id) closeForm();
+          else render();
+          say(refreshed ? `${id} was already unregistered from Fleet; the list was refreshed.` : `${id} was already unregistered from Fleet; its card was removed, but the list could not be refreshed.`, true);
+        } else say(`Could not unregister ${id}: ${errorText(r)}`, true);
+        return;
+      }
+      S.workers = S.workers.filter((w) => w.id !== id);
+      if (S.form?.detail === id) closeForm();
+      else render();
+      await load();
+      say(`${id} was removed from Fleet.`);
+      announce(`${id} was removed from Fleet`);
+    }
 
     // ---- worker list
     function resultRow(kind, name, entry) {
@@ -410,6 +460,7 @@
       const act = (name) => () => list.querySelector(`.fl-worker[data-worker="${CSS.escape(worker.id)}"] [data-action="${name}"]`)?.click();
       window.Overlays.menu(e, [{ label: 'Jobs and history', onSelect: () => openWorker(worker.id) }, { label: 'Edit settings', onSelect: act('edit') },
         { label: 'Refresh capabilities', disabled: !worker.online, title: worker.online ? '' : 'The PC must be connected', onSelect: act('refresh') }, null,
+        { label: 'Unregister from Fleet', onSelect: () => unregisterWorker(worker.id) }, null,
         { label: 'Copy name', disabled: !navigator.clipboard, onSelect: () => navigator.clipboard.writeText(worker.id) }]);
     }
 
@@ -425,7 +476,8 @@
             iconButton('history', 'Jobs and history', { 'data-action': 'jobs', onclick: () => openWorker(worker.id) }),
             iconButton('edit', 'Edit settings', { 'data-action': 'edit', onclick: () => openForm(worker) }),
             h('button', { type: 'button', class: 'secondary fl-icon', 'data-action': 'refresh', disabled: !worker.online, title: worker.online ? 'Refresh capabilities: check installed agents and commands now' : 'Refresh capabilities: the PC must be connected',
-              onclick: (e) => refresh(worker.id, e.currentTarget) }, flIcon('refresh'), h('span', { class: 'fl-sr' }, 'Refresh capabilities')))),
+              onclick: (e) => refresh(worker.id, e.currentTarget) }, flIcon('refresh'), h('span', { class: 'fl-sr' }, 'Refresh capabilities')),
+            h('button', { type: 'button', class: 'secondary fl-unregister-button', 'data-action': 'unregister', onclick: () => unregisterWorker(worker.id) }, 'Unregister'))),
         (worker.warnings || []).map((w) => h('p', { class: 'fl-warning' }, `Warning: ${w}`)),
         h('div', { class: 'fl-live-parts' }, liveParts(worker)),
         versionLine(worker),
@@ -531,7 +583,7 @@
     }
 
     function drawInstalls() {
-      const open = S.installs.filter((i) => !(i.state === 'registered' && i.connected) && i.state !== 'cancelled' && i.state !== 'expired');
+      const open = S.installs.filter((i) => !(i.state === 'registered' && i.connected) && !['cancelled', 'expired', 'unregistered'].includes(i.state));
       pending.hidden = !open.length || !!S.form;
       pending.replaceChildren(...(open.length ? [h('h3', { class: 'fl-installs-title' }, 'Waiting to be installed')] : []),
         ...open.map((record) => {
@@ -540,7 +592,8 @@
             h('div', { class: 'fl-install-head' }, h('strong', {}, record.id), h('span', { class: `fl-install-state fl-${progress.level}` }, progress.text)),
             h('div', { class: 'fl-row' },
               record.commands ? h('button', { type: 'button', class: 'secondary', 'data-action': 'show-command', onclick: () => showInstall(record) }, 'Show command') : null,
-              record.state === 'pending' ? h('button', { type: 'button', class: 'secondary', 'data-action': 'cancel-install', onclick: () => cancelInstall(record) }, 'Cancel') : null));
+              record.state === 'pending' ? h('button', { type: 'button', class: 'secondary', 'data-action': 'cancel-install', onclick: () => cancelInstall(record) }, 'Cancel')
+                : record.state === 'registered' && !record.connected ? h('button', { type: 'button', class: 'secondary', 'data-action': 'unregister-install', onclick: () => unregisterInstall(record) }, 'Unregister') : null));
         }));
     }
 
@@ -551,6 +604,11 @@
       announce(`Install link for ${record.id} cancelled`);
       await loadInstalls();
       return true;
+    }
+
+    async function unregisterInstall(record) {
+      await unregisterWorker(record.id);
+      await loadInstalls();
     }
 
     function copyText(text) {

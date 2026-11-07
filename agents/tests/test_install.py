@@ -133,6 +133,19 @@ class FormTests(Isolated):
         install.cancel(record['code'])
         self.assertEqual(install.create(FORM)['state'], 'pending')
 
+    def test_unregistration_releases_name_and_marks_the_old_install_inactive(self):
+        import flow_host
+        from flowkit.fleet_registry import save_worker
+        worker_uuid = '90b96c8e-0210-420c-a6b1-586d54d79a02'
+        install.write_record({'code': worker_uuid, 'id': FORM['id'], 'state': 'registered',
+                              'created_at': install.now(), 'expires_at': install.now() + install.VALID_SECONDS})
+        save_worker({'id': FORM['id'], 'uuid': worker_uuid}, create=True)
+
+        self.assertEqual(flow_host.unregister_fleet_worker(FORM['id'])['id'], FORM['id'])
+        self.assertEqual(install.read_record(worker_uuid)['state'], 'unregistered')
+        replacement = install.create(FORM)
+        self.assertEqual((replacement['id'], replacement['state']), (FORM['id'], 'pending'))
+
     def test_a_link_needs_a_worker_program_for_the_chosen_os(self):
         for name in install.TARGETS.values(): (Path(os.environ['FLOW_WORKER_BINARIES']) / name).unlink()
         with self.assertRaisesRegex(install.InstallError, 'no worker program for windows'): install.create(FORM)
@@ -322,7 +335,19 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         status, body = await self.claim(record)
         self.assertEqual(status, 409)
         self.assertIn('already registered as build-pc', body['error'])
+        self.assertIsNone(install.read_record(record['code']).get('claim_hash'))
 
+    async def test_a_registered_fleet_name_is_refused_before_claiming_a_new_link(self):
+        active = self.make()
+        install.register(active, GOOD_TOKEN)
+        replacement = self.make(id='next-pc')
+        replacement['id'] = active['id']
+        install.write_record(replacement)
+
+        status, body = await self.claim(replacement)
+        self.assertEqual(status, 409)
+        self.assertIn('Fleet name build-pc is already registered', body['error'])
+        self.assertIsNone(install.read_record(replacement['code']).get('claim_hash'))
     async def test_unknown_wrong_expired_cancelled_and_used_codes_all_look_the_same(self):
         record = self.make()
         install.cancel(record['code'])

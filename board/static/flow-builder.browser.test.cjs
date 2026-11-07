@@ -108,7 +108,7 @@ function previewOf(name) {
   return { name, revision, activeRevision: entry.active ? revisionOf(entry.active) : null, change, engines, disruptive,
     impact: crypto.createHash('sha256').update(JSON.stringify([revision, engines])).digest('hex').slice(0, 16) };
 }
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'admin.js', 'admin.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -1003,4 +1003,32 @@ test('a step shows how many workers can take it, and clicking opens the fleet fi
   await evaluate('document.querySelector(\'[aria-label="Close fleet"]\').click()');
   await waitFor('!document.querySelector("#fleet-dialog").open', 'back to the editor');
   store.delete('count-flow');
+});
+test('mobile Flow Builder keeps its filter usable and navigation icons visible', async () => {
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await evaluate('document.querySelector("#flows-btn").click()');
+  await waitFor('document.querySelector("#flows-dialog").open && document.querySelector(".fb-filter")', 'the mobile flow editor');
+  const mobile = await evaluate(`(() => {
+    const filter = document.querySelector('.fb-filter');
+    return {
+      filterWidth: filter.getBoundingClientRect().width,
+      iconDisplay: ['#flows-btn', '#fleet-btn', '#admin-btn'].map((selector) => getComputedStyle(document.querySelector(selector + ' svg')).display),
+      dialog: document.querySelector('#flows-dialog').getBoundingClientRect().toJSON()
+    };
+  })()`);
+  assert.ok(mobile.filterWidth >= 120, `flow filter should have a usable width, got ${mobile.filterWidth}px`);
+  assert.ok(mobile.iconDisplay.every((display) => display !== 'none'), 'all top-level navigation icons remain visible on phones');
+  assert.equal(mobile.dialog.width, 390);
+  await evaluate('document.querySelector(".fb-tab").click()');
+  await waitFor('document.querySelector(".fg-help")', 'the graph controls');
+  const graph = await evaluate(`(() => {
+    const help = document.querySelector('.fg-help').getBoundingClientRect();
+    return { helpWidth: help.width, helpHeight: help.height, canvasWidth: document.querySelector('.fg-canvas').getBoundingClientRect().width };
+  })()`);
+  assert.equal(graph.helpWidth, 44, 'touch help control is round and meets the 44px target');
+  assert.equal(graph.helpHeight, 44);
+  assert.ok(graph.canvasWidth <= 390, 'graph fits the phone viewport');
+  await evaluate('document.querySelector("#flows-dialog").close()');
+  await waitFor('!document.querySelector("#flows-dialog").open');
 });

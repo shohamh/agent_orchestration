@@ -42,6 +42,18 @@ from the form stay on the server, and the PC receives them when it checks in.
 **Cancel** immediately invalidates that install uuid for both downloads and claims, and frees the
 name for a new install link. A new link always gets a new uuid.
 
+### Unregistering a worker
+
+In **Fleet**, choose **Unregister** on the worker card or **Unregister from Fleet** in its
+context menu, then confirm the removal. The server removes the registration, closes its old install
+record, revokes its relay authorization, and makes the name immediately available for a new worker.
+It will not dispatch new work to that PC. Already-running jobs are not synchronously canceled; the
+existing worker lease cleanup handles work whose coordinator connection disappears.
+
+Unregistration does not uninstall the local service or erase its files. When it learns about the
+cutoff, the worker records it and `agent-worker status` explains that it is no longer registered.
+To use the PC again, run a new Fleet install command with the same name; it replaces the local worker identity in place.
+
 Opening the binary download URL in a browser supplies the platform's release filename:
 `agent-worker-x86_64-pc-windows-msvc.exe` on Windows or
 `agent-worker-x86_64-unknown-linux-musl` on Linux. The board preserves this filename when proxying
@@ -58,22 +70,23 @@ An operating system that differs from the one in the form is refused too.
 
 ### What `agent-worker install <uuid>` does
 
-1. Refuses if a worker is already installed for this user (an `installed.json` marker, a
-   scheduled task, systemd unit or LaunchAgent). To install again, run `agent-worker uninstall` first.
-2. Contacts the server (`POST /install/<uuid>/claim`). This is also the proof that the PC can reach
-   it, and every failure is explained: DNS, connection refused, a timeout, a TLS problem, a link that
-   is unknown, expired or already used, a server that is not this board, a server where the relay is
-   down.
-3. Receives its settings from the server (name, engines, pool, tags, slots, CPU and RAM limits), so
+1. Contacts the server (`POST /install/<uuid>/claim`) before changing an existing local install.
+   A new install link creates a new worker identity. If the same name is still registered, the
+   server refuses the claim; unregister it in Fleet first.
+2. Receives its settings from the server (name, engines, pool, tags, slots, CPU and RAM limits), so
    what runs on the PC is what was saved from the form.
-4. Copies itself into the install folder (`%LOCALAPPDATA%\AgentWorker` or `~/.agent-worker`),
-   creates its token (a file only that user can read), adds an `agent-worker` command to the PATH
-   (`~/.local/bin` on Linux), installs a per-user service and starts it.
-5. Registers the PC with the server and waits until it is connected.
+3. If this user already has a worker, waits for its running jobs to finish, stops it, then replaces its
+   configuration, token and executable in the existing install folder. Adapter packages and other
+   local files remain there; no separate `agent-worker uninstall` is needed.
+4. Installs or updates the per-user service, registers the new UUID with the server and waits until
+   it is connected.
 
-The worker needs no Python, Node or other runtime: it is one static program. The PC needs to reach
-only this server. To run the agent adapters (Codex, Claude Code and so on) the PC still needs those
-programs, which the capability check reports.
+The `agent-worker` executable is static and needs no Python. The Fleet install also runs `npm ci`
+for the pinned ACP adapters, so Node.js and npm must be available on the PC before installation.
+For offline PCs, point npm at the bundled server mirror before running the generated command:
+`npm config set registry http://<server>:4873/`. The worker connects outbound to the Board/relay
+server and the mirror; it does not need an inbound port. Real agents additionally need their CLI
+and model credentials/configuration. The built-in `demo` agent requires no model.
 
 ### When the worker starts: logon, boot or never
 

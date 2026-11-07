@@ -15,7 +15,10 @@ pub fn mono() -> f64 {
 }
 
 pub fn now_unix() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 pub fn iso_now() -> String {
@@ -66,7 +69,12 @@ pub fn init_log(path: Option<&Path>) {
 }
 
 pub fn log_line(component: &str, message: &str) {
-    let line = format!("{} {} {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), component, message);
+    let line = format!(
+        "{} {} {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        component,
+        message
+    );
     let logged = match LOG.lock().unwrap().as_mut() {
         Some(file) => file.write_all(line.as_bytes()).is_ok(),
         None => false,

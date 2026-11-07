@@ -40,13 +40,19 @@ impl Kind {
     /// The best startup mechanism on this PC.
     pub fn detect() -> Kind {
         // For tests and PCs where a startup entry is unwanted: AGENT_WORKER_SERVICE=process runs the worker as a plain background process.
-        if std::env::var("AGENT_WORKER_SERVICE").map(|v| v == "process").unwrap_or(false) {
+        if std::env::var("AGENT_WORKER_SERVICE")
+            .map(|v| v == "process")
+            .unwrap_or(false)
+        {
             Kind::Process
         } else if cfg!(windows) {
             Kind::Task
         } else if cfg!(target_os = "macos") {
             Kind::Launchd
-        } else if run("systemctl", &["--user", "show-environment"]).map(|o| o.0 == 0).unwrap_or(false) {
+        } else if run("systemctl", &["--user", "show-environment"])
+            .map(|o| o.0 == 0)
+            .unwrap_or(false)
+        {
             Kind::Systemd
         } else {
             Kind::Process
@@ -61,7 +67,11 @@ pub fn run(program: &str, args: &[&str]) -> std::io::Result<(i32, String, String
     #[cfg(windows)]
     command.creation_flags(crate::procutil::CREATE_NO_WINDOW);
     let out = command.output()?;
-    Ok((out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).to_string(), String::from_utf8_lossy(&out.stderr).to_string()))
+    Ok((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    ))
 }
 
 pub struct Svc {
@@ -77,14 +87,28 @@ pub struct Svc {
 impl Svc {
     pub fn from_config(home: Home, config: &Value) -> Svc {
         let name = crate::config::name_of(config);
-        Svc { auto_restart: config["auto_restart"] != false, boot: config["boot"] == true, kind: Kind::parse(config["service"].as_str().unwrap_or("process")), unit: config["unit"].as_str().map(String::from).unwrap_or_else(|| default_unit(&name)), home }
+        Svc {
+            auto_restart: config["auto_restart"] != false,
+            boot: config["boot"] == true,
+            kind: Kind::parse(config["service"].as_str().unwrap_or("process")),
+            unit: config["unit"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| default_unit(&name)),
+            home,
+        }
     }
 
     /// Does the worker start when the PC starts, without anyone logging in?
     pub fn starts_at_boot(&self) -> bool {
         match self.kind {
             Kind::Task => self.boot,
-            Kind::Systemd => run("loginctl", &["show-user", &whoami(), "-p", "Linger", "--value"]).map(|o| o.1.trim() == "yes").unwrap_or(false),
+            Kind::Systemd => run(
+                "loginctl",
+                &["show-user", &whoami(), "-p", "Linger", "--value"],
+            )
+            .map(|o| o.1.trim() == "yes")
+            .unwrap_or(false),
             _ => false,
         }
     }
@@ -118,7 +142,17 @@ impl Svc {
 
     pub fn running(&self) -> bool {
         match self.kind {
-            Kind::Systemd => run("systemctl", &["--user", "is-active", "--quiet", &format!("{}.service", self.unit)]).map(|o| o.0 == 0).unwrap_or(false),
+            Kind::Systemd => run(
+                "systemctl",
+                &[
+                    "--user",
+                    "is-active",
+                    "--quiet",
+                    &format!("{}.service", self.unit),
+                ],
+            )
+            .map(|o| o.0 == 0)
+            .unwrap_or(false),
             // A task that starts at boot runs in a session of its own whose processes this user's shell cannot always see: ask the Task Scheduler as well
             Kind::Task => pid_alive(self.home.pid()) || self.task_running(),
             _ => pid_alive(self.home.pid()),
@@ -127,13 +161,23 @@ impl Svc {
 
     /// Does the Task Scheduler say the task is running? (The state is read as an enum name, which is not translated.)
     fn task_running(&self) -> bool {
-        let script = format!("(Get-ScheduledTask -TaskName '{}' -ErrorAction SilentlyContinue).State -eq 'Running'", self.unit.replace("'", "''"));
-        run("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script]).map(|o| o.1.trim() == "True").unwrap_or(false)
+        let script = format!(
+            "(Get-ScheduledTask -TaskName '{}' -ErrorAction SilentlyContinue).State -eq 'Running'",
+            self.unit.replace("'", "''")
+        );
+        run(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+        )
+        .map(|o| o.1.trim() == "True")
+        .unwrap_or(false)
     }
 
     pub fn exists(&self) -> bool {
         match self.kind {
-            Kind::Task => run("schtasks", &["/Query", "/TN", &self.unit]).map(|o| o.0 == 0).unwrap_or(false),
+            Kind::Task => run("schtasks", &["/Query", "/TN", &self.unit])
+                .map(|o| o.0 == 0)
+                .unwrap_or(false),
             Kind::Systemd => self.unit_path().exists(),
             Kind::Launchd => self.plist_path().exists(),
             Kind::Process => true,
@@ -153,19 +197,52 @@ impl Svc {
 
     pub fn describe(&self) -> String {
         match self.kind {
-            Kind::Task => format!("Windows scheduled task {} (starts {}; {})", self.unit, if self.boot { "when the PC starts, even before anyone logs in" } else { "when you log in" }, if self.auto_restart { "checked every minute and restarted if it is not running" } else { "not restarted if it stops" }),
-            Kind::Systemd => format!("systemd user service {} ({})", self.unit, if self.auto_restart { "restarted if it fails" } else { "not restarted if it stops" }),
-            Kind::Launchd => format!("launchd agent {} ({})", self.unit, if self.auto_restart { "restarted if it fails" } else { "not restarted if it stops" }),
+            Kind::Task => format!(
+                "Windows scheduled task {} (starts {}; {})",
+                self.unit,
+                if self.boot {
+                    "when the PC starts, even before anyone logs in"
+                } else {
+                    "when you log in"
+                },
+                if self.auto_restart {
+                    "checked every minute and restarted if it is not running"
+                } else {
+                    "not restarted if it stops"
+                }
+            ),
+            Kind::Systemd => format!(
+                "systemd user service {} ({})",
+                self.unit,
+                if self.auto_restart {
+                    "restarted if it fails"
+                } else {
+                    "not restarted if it stops"
+                }
+            ),
+            Kind::Launchd => format!(
+                "launchd agent {} ({})",
+                self.unit,
+                if self.auto_restart {
+                    "restarted if it fails"
+                } else {
+                    "not restarted if it stops"
+                }
+            ),
             Kind::Process => "background process (no startup entry)".into(),
         }
     }
 
     fn unit_path(&self) -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/systemd/user").join(format!("{}.service", self.unit))
+        PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".config/systemd/user")
+            .join(format!("{}.service", self.unit))
     }
 
     fn plist_path(&self) -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/LaunchAgents").join(format!("{}.plist", self.unit))
+        PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join("Library/LaunchAgents")
+            .join(format!("{}.plist", self.unit))
     }
 
     fn wait_running(&self, timeout: u64) -> bool {
@@ -174,7 +251,11 @@ impl Svc {
             if self.running() {
                 return true;
             }
-            std::thread::sleep(Duration::from_millis(if self.kind == Kind::Task { 1000 } else { 500 }));
+            std::thread::sleep(Duration::from_millis(if self.kind == Kind::Task {
+                1000
+            } else {
+                500
+            }));
         }
         self.running()
     }
@@ -189,43 +270,91 @@ impl Svc {
                 // A task made by an administrator (boot start) may not let a normal user change or run it: then start the
                 // worker directly. The task's own minute check finds it running and leaves it alone.
                 let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/ENABLE"]);
-                let ran = run("schtasks", &["/Run", "/TN", &self.unit]).map(|o| o.0 == 0).unwrap_or(false);
+                let ran = run("schtasks", &["/Run", "/TN", &self.unit])
+                    .map(|o| o.0 == 0)
+                    .unwrap_or(false);
                 if !ran || !self.wait_running(10) {
-                    crate::procutil::spawn_detached(&self.home.exe(), &["run".into(), "--home".into(), self.home.0.to_string_lossy().to_string()], Some(&self.home.0), Some(&self.home.file("worker.log"))).map_err(|e| format!("Could not start the worker: {e}"))?;
+                    crate::procutil::spawn_detached(
+                        &self.home.exe(),
+                        &[
+                            "run".into(),
+                            "--home".into(),
+                            self.home.0.to_string_lossy().to_string(),
+                        ],
+                        Some(&self.home.0),
+                        Some(&self.home.file("worker.log")),
+                    )
+                    .map_err(|e| format!("Could not start the worker: {e}"))?;
                 }
             }
             Kind::Systemd => {
-                let (code, _, err) = run("systemctl", &["--user", "start", &format!("{}.service", self.unit)]).map_err(|e| e.to_string())?;
+                let (code, _, err) = run(
+                    "systemctl",
+                    &["--user", "start", &format!("{}.service", self.unit)],
+                )
+                .map_err(|e| e.to_string())?;
                 if code != 0 {
                     return Err(format!("systemctl start failed: {}", err.trim()));
                 }
             }
             Kind::Launchd => {
                 let domain = format!("gui/{}", unsafe_uid());
-                let _ = run("launchctl", &["bootstrap", &domain, &self.plist_path().to_string_lossy()]);
-                let _ = run("launchctl", &["kickstart", &format!("{domain}/{}", self.unit)]);
+                let _ = run(
+                    "launchctl",
+                    &["bootstrap", &domain, &self.plist_path().to_string_lossy()],
+                );
+                let _ = run(
+                    "launchctl",
+                    &["kickstart", &format!("{domain}/{}", self.unit)],
+                );
             }
             Kind::Process => {
-                spawn_detached(&self.home.exe(), &["run".into(), "--home".into(), self.home.0.to_string_lossy().to_string()], Some(&self.home.0), Some(&self.home.file("worker.log"))).map_err(|e| e.to_string())?;
+                spawn_detached(
+                    &self.home.exe(),
+                    &[
+                        "run".into(),
+                        "--home".into(),
+                        self.home.0.to_string_lossy().to_string(),
+                    ],
+                    Some(&self.home.0),
+                    Some(&self.home.file("worker.log")),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
-        if self.wait_running(40) { Ok(()) } else { Err(format!("The worker did not start; see {}", self.home.file("worker.log").display())) }
+        if self.wait_running(40) {
+            Ok(())
+        } else {
+            Err(format!(
+                "The worker did not start; see {}",
+                self.home.file("worker.log").display()
+            ))
+        }
     }
 
     pub fn stop(&self) -> Result<(), String> {
         match self.kind {
             Kind::Task => {
                 // the task re-runs every minute; a stopped worker leaves this marker so a re-run exits at once even when the task cannot be disabled
-                let _ = std::fs::write(self.home.file("stopped"), "stopped by agent-worker stop; agent-worker start removes this");
+                let _ = std::fs::write(
+                    self.home.file("stopped"),
+                    "stopped by agent-worker stop; agent-worker start removes this",
+                );
                 // The task re-runs every minute to bring back a worker that was killed; disabled, a stopped worker stays stopped until `start`.
                 let _ = run("schtasks", &["/Change", "/TN", &self.unit, "/DISABLE"]);
                 let _ = run("schtasks", &["/End", "/TN", &self.unit]);
             }
             Kind::Systemd => {
-                let _ = run("systemctl", &["--user", "stop", &format!("{}.service", self.unit)]);
+                let _ = run(
+                    "systemctl",
+                    &["--user", "stop", &format!("{}.service", self.unit)],
+                );
             }
             Kind::Launchd => {
-                let _ = run("launchctl", &["bootout", &format!("gui/{}/{}", unsafe_uid(), self.unit)]);
+                let _ = run(
+                    "launchctl",
+                    &["bootout", &format!("gui/{}/{}", unsafe_uid(), self.unit)],
+                );
             }
             Kind::Process => {}
         }
@@ -244,12 +373,23 @@ impl Svc {
                 let _ = run("schtasks", &["/Delete", "/TN", &self.unit, "/F"]);
             }
             Kind::Systemd => {
-                let _ = run("systemctl", &["--user", "disable", "--now", &format!("{}.service", self.unit)]);
+                let _ = run(
+                    "systemctl",
+                    &[
+                        "--user",
+                        "disable",
+                        "--now",
+                        &format!("{}.service", self.unit),
+                    ],
+                );
                 let _ = std::fs::remove_file(self.unit_path());
                 let _ = run("systemctl", &["--user", "daemon-reload"]);
             }
             Kind::Launchd => {
-                let _ = run("launchctl", &["bootout", &format!("gui/{}/{}", unsafe_uid(), self.unit)]);
+                let _ = run(
+                    "launchctl",
+                    &["bootout", &format!("gui/{}/{}", unsafe_uid(), self.unit)],
+                );
                 let _ = std::fs::remove_file(self.plist_path());
             }
             Kind::Process => {}
@@ -262,16 +402,38 @@ impl Svc {
         let home = self.home.0.to_string_lossy().to_string();
         match self.kind {
             Kind::Task => {
-                let user = run("whoami", &[]).map_err(|e| e.to_string())?.1.trim().to_string();
+                let user = run("whoami", &[])
+                    .map_err(|e| e.to_string())?
+                    .1
+                    .trim()
+                    .to_string();
                 let xml = task_xml(&user, &exe, &home, self.boot, self.auto_restart);
                 let path = self.home.file("task.xml");
                 let mut bytes = vec![0xFF, 0xFE];
                 bytes.extend(xml.encode_utf16().flat_map(|u| u.to_le_bytes()));
                 std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
-                let (code, out, err) = run("schtasks", &["/Create", "/TN", &self.unit, "/XML", &path.to_string_lossy(), "/F"]).map_err(|e| e.to_string())?;
+                let (code, out, err) = run(
+                    "schtasks",
+                    &[
+                        "/Create",
+                        "/TN",
+                        &self.unit,
+                        "/XML",
+                        &path.to_string_lossy(),
+                        "/F",
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
                 let _ = std::fs::remove_file(&path);
                 if code != 0 {
-                    return Err(format!("Could not create the scheduled task: {}", if err.trim().is_empty() { out.trim() } else { err.trim() }));
+                    return Err(format!(
+                        "Could not create the scheduled task: {}",
+                        if err.trim().is_empty() {
+                            out.trim()
+                        } else {
+                            err.trim()
+                        }
+                    ));
                 }
             }
             Kind::Systemd => {
@@ -284,7 +446,11 @@ impl Svc {
                 std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
                 std::fs::write(&path, unit).map_err(|e| e.to_string())?;
                 run("systemctl", &["--user", "daemon-reload"]).map_err(|e| e.to_string())?;
-                let (code, _, err) = run("systemctl", &["--user", "enable", &format!("{}.service", self.unit)]).map_err(|e| e.to_string())?;
+                let (code, _, err) = run(
+                    "systemctl",
+                    &["--user", "enable", &format!("{}.service", self.unit)],
+                )
+                .map_err(|e| e.to_string())?;
                 if code != 0 {
                     return Err(format!("systemctl enable failed: {}", err.trim()));
                 }
@@ -306,11 +472,21 @@ impl Svc {
 }
 
 pub fn default_unit(id: &str) -> String {
-    if cfg!(windows) { format!("AgentWorker-{id}") } else { format!("agent-worker-{id}") }
+    if cfg!(windows) {
+        format!("AgentWorker-{id}")
+    } else {
+        format!("agent-worker-{id}")
+    }
 }
 
 pub fn whoami() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_else(|_| run("whoami", &[]).map(|o| o.1.trim().to_string()).unwrap_or_default())
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| {
+            run("whoami", &[])
+                .map(|o| o.1.trim().to_string())
+                .unwrap_or_default()
+        })
 }
 
 fn unsafe_uid() -> u32 {
@@ -326,11 +502,23 @@ fn unsafe_uid() -> u32 {
 /// limit and keeps going on battery. Runs as the user with ordinary rights, so no administrator is needed.
 fn task_xml(user: &str, exe: &str, home: &str, boot: bool, auto_restart: bool) -> String {
     // auto_restart off: no one-minute check and no restart on failure; the logon and boot triggers still start it
-    let (check_trigger, restart_on_failure) = if auto_restart { ("<TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>", "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>") } else { ("", "") };
+    let (check_trigger, restart_on_failure) = if auto_restart {
+        ("<TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2020-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>", "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>")
+    } else {
+        ("", "")
+    };
     // boot: also start when the PC starts, before anyone logs in. S4U runs the task as this user without a stored password
     // (and without network credentials, which the worker does not need: it only connects out to the server).
-    let (boot_trigger, logon_type) = if boot { ("<BootTrigger><Enabled>true</Enabled></BootTrigger>", "S4U") } else { ("", "InteractiveToken") };
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let (boot_trigger, logon_type) = if boot {
+        ("<BootTrigger><Enabled>true</Enabled></BootTrigger>", "S4U")
+    } else {
+        ("", "InteractiveToken")
+    };
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -368,17 +556,32 @@ mod tests {
     #[test]
     fn the_task_starts_at_logon_and_every_minute_and_only_with_boot_also_at_startup() {
         let normal = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, true);
-        assert!(normal.contains("<LogonTrigger>") && normal.contains("<TimeTrigger>") && normal.contains("InteractiveToken"));
+        assert!(
+            normal.contains("<LogonTrigger>")
+                && normal.contains("<TimeTrigger>")
+                && normal.contains("InteractiveToken")
+        );
         assert!(!normal.contains("BootTrigger") && !normal.contains("S4U"));
         let boot = task_xml("PC-me", "C:/w/x.exe", "C:/w", true, true);
-        assert!(boot.contains("<BootTrigger>") && boot.contains("<LogonType>S4U</LogonType>") && !boot.contains("InteractiveToken"));
-        assert!(boot.contains("<LogonTrigger>"), "still starts at logon if the boot start was missed");
+        assert!(
+            boot.contains("<BootTrigger>")
+                && boot.contains("<LogonType>S4U</LogonType>")
+                && !boot.contains("InteractiveToken")
+        );
+        assert!(
+            boot.contains("<LogonTrigger>"),
+            "still starts at logon if the boot start was missed"
+        );
     }
 
     #[test]
     fn without_auto_restart_the_task_has_no_minute_check_and_no_restart_on_failure() {
         let off = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, false);
-        assert!(off.contains("<LogonTrigger>") && !off.contains("TimeTrigger") && !off.contains("RestartOnFailure"));
+        assert!(
+            off.contains("<LogonTrigger>")
+                && !off.contains("TimeTrigger")
+                && !off.contains("RestartOnFailure")
+        );
         let on = task_xml("PC-me", "C:/w/x.exe", "C:/w", false, true);
         assert!(on.contains("TimeTrigger") && on.contains("RestartOnFailure"));
         let boot_off = task_xml("PC-me", "C:/w/x.exe", "C:/w", true, false);

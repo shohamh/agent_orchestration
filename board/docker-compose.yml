@@ -42,5 +42,12 @@ services:
       HATCHET_DASHBOARD_URL: ${HATCHET_DASHBOARD_URL:-http://localhost:8080}
       TRIGGER_DASHBOARD_URL: ${TRIGGER_DASHBOARD_URL:-http://localhost:8030}
       TRIGGER_DASHBOARD_PATH: ${TRIGGER_DASHBOARD_PATH:-}
-      TRIGGER_DEV_DASHBOARD_PATH: ${TRIGGER_DEV_DASHBOARD_PATH:-}
       PREFECT_DASHBOARD_URL: ${PREFECT_DASHBOARD_URL:-http://localhost:4200}
+      BOARD_ENGINE_SETTINGS_PATH: /data/engine-settings.json
+      # Backend Python source watcher (development only; off unless explicitly enabled).
+      BOARD_AUTO_RELOAD: ${BOARD_AUTO_RELOAD:-0}
+    volumes:
+      - board_data:/data
+
+volumes:
+  board_data:

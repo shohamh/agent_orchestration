@@ -228,6 +228,7 @@ dialog.fb-ask { width: min(580px, 94vw); max-height: 86vh; overflow-y: auto; }
   .fb-flow-list { flex-direction: row; }
   .fb-flow-item { white-space: nowrap; width: auto; flex-wrap: nowrap; }
   .fb-new { flex-shrink: 0; white-space: nowrap; }
+  .fb-filter { flex: 0 0 min(180px, 38vw); width: min(180px, 38vw); }
   .fb-main { flex: 1; }
   .fb-inspector { display: none; border-left: 0; padding: 12px; }
   .fb.fb-inspecting .fb-inspector { display: flex; flex: 1; }

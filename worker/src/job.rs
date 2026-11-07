@@ -3,11 +3,11 @@
 use crate::artifacts;
 use crate::capabilities;
 use crate::environment;
-use crate::session::{run_session, Inbox, Trees};
 use crate::gate::Acquire;
 use crate::procutil::Tree;
 use crate::program::{run_program, Emit, Emitter, ProgramRun};
 use crate::service::App;
+use crate::session::{run_session, Inbox, Trees};
 use crate::util::{atomic_json, eq_const, mono, random_hex, read_json};
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -88,12 +88,18 @@ fn write_demo_project(workspace: &std::path::Path) -> Result<(), String> {
         ("README.md", "# Agent Board demo\n\nFix the failing cart total test. Run `python -m unittest -v`.\n"),
     ];
     std::fs::create_dir_all(workspace).map_err(|e| e.to_string())?;
-    files.iter().try_for_each(|(name, text)| std::fs::write(workspace.join(name), text).map_err(|e| e.to_string()))
+    files.iter().try_for_each(|(name, text)| {
+        std::fs::write(workspace.join(name), text).map_err(|e| e.to_string())
+    })
 }
 
 fn bounded_output(output: &Value) -> Value {
     let text = crate::template::py_json(output);
-    if text.chars().count() <= 60000 { output.clone() } else { json!({"truncated": true, "preview": text.chars().take(2000).collect::<String>()}) }
+    if text.chars().count() <= 60000 {
+        output.clone()
+    } else {
+        json!({"truncated": true, "preview": text.chars().take(2000).collect::<String>()})
+    }
 }
 
 struct ActiveGuard(Arc<App>);
@@ -105,7 +111,10 @@ impl Drop for ActiveGuard {
 
 impl Job {
     pub fn new(app: Arc<App>, id: String, config: Value) -> Arc<Job> {
-        let authorize = config.get("authorize").and_then(|a| a.as_bool()).unwrap_or(false);
+        let authorize = config
+            .get("authorize")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false);
         let (input, inbox) = mpsc::unbounded_channel();
         Arc::new(Job {
             app,
@@ -113,8 +122,19 @@ impl Job {
             authorize,
             config: Mutex::new(config),
             inner: Mutex::new(Inner {
-                state: JobState::Queued, error: None, reason: None, waiting_reason: None, events: vec![], dropped: 0, output: None, nonce: None, confirm: None,
-                started: false, result_path: None, lease_loss: None, finished: false,
+                state: JobState::Queued,
+                error: None,
+                reason: None,
+                waiting_reason: None,
+                events: vec![],
+                dropped: 0,
+                output: None,
+                nonce: None,
+                confirm: None,
+                started: false,
+                result_path: None,
+                lease_loss: None,
+                finished: false,
             }),
             last_seen: Mutex::new(mono()),
             cancel: watch::channel(false).0,
@@ -199,7 +219,11 @@ impl Job {
         });
         if i.state == JobState::Done {
             out["output"] = i.output.clone().unwrap_or(Value::Null);
-            out["files"] = i.result_path.as_ref().and_then(|p| read_json(p)).unwrap_or(json!({}));
+            out["files"] = i
+                .result_path
+                .as_ref()
+                .and_then(|p| read_json(p))
+                .unwrap_or(json!({}));
         }
         out
     }
@@ -245,7 +269,11 @@ impl Job {
     }
 
     fn end_state(&self) -> JobState {
-        if self.authorize { JobState::Rejected } else { JobState::Failed }
+        if self.authorize {
+            JobState::Rejected
+        } else {
+            JobState::Failed
+        }
     }
 
     async fn run(self: Arc<Self>) {
@@ -275,12 +303,25 @@ impl Job {
             Some(Err(Stop::Failed(message))) => {
                 let mut i = self.inner.lock().unwrap();
                 i.state = JobState::Failed;
-                i.error = Some(message.chars().rev().take(8000).collect::<Vec<_>>().into_iter().rev().collect());
+                i.error = Some(
+                    message
+                        .chars()
+                        .rev()
+                        .take(8000)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect(),
+                );
             }
             Some(Err(Stop::Ended)) => {}
             None => {
                 let mut i = self.inner.lock().unwrap();
-                i.error = Some(i.lease_loss.clone().unwrap_or_else(|| "Execution cancelled".into()));
+                i.error = Some(
+                    i.lease_loss
+                        .clone()
+                        .unwrap_or_else(|| "Execution cancelled".into()),
+                );
                 i.state = JobState::Cancelled;
             }
         }
@@ -295,12 +336,34 @@ impl Job {
     }
 
     /// A flow's agent step: its prompt, or the setup step that prepares the flow's environment.
-    async fn run_agent_step(&self, step: &Value, context: &Value, workspace: &std::path::Path, assets: &std::path::Path, emitter: Arc<Emitter>) -> Result<Value, String> {
+    async fn run_agent_step(
+        &self,
+        step: &Value,
+        context: &Value,
+        workspace: &std::path::Path,
+        assets: &std::path::Path,
+        emitter: Arc<Emitter>,
+    ) -> Result<Value, String> {
         if let Some(setup) = step.get("setup").filter(|s| !s.is_null()) {
-            return environment::setup_environment(setup, workspace, self.inbox.clone(), emitter, self.trees.clone()).await;
+            return environment::setup_environment(
+                setup,
+                workspace,
+                self.inbox.clone(),
+                emitter,
+                self.trees.clone(),
+            )
+            .await;
         }
-        let prompt = step["prompt"].as_str().ok_or("An agent step needs a prompt")?;
-        let mut goal = crate::template::render(prompt, context, &assets.to_string_lossy(), false, cfg!(windows))?;
+        let prompt = step["prompt"]
+            .as_str()
+            .ok_or("An agent step needs a prompt")?;
+        let mut goal = crate::template::render(
+            prompt,
+            context,
+            &assets.to_string_lossy(),
+            false,
+            cfg!(windows),
+        )?;
         if let Some(note) = context["_context_note"].as_str().filter(|n| !n.is_empty()) {
             goal = format!("{goal}\n\n{note}");
         }
@@ -313,15 +376,21 @@ impl Job {
 
     async fn missing_software(&self, requirement: &Value) -> Option<String> {
         for kind in ["agent", "command"] {
-            let Some(name) = requirement.get(kind).and_then(|n| n.as_str()) else { continue };
+            let Some(name) = requirement.get(kind).and_then(|n| n.as_str()) else {
+                continue;
+            };
             let (k, n) = (kind.to_string(), name.to_string());
-            let result = tokio::task::spawn_blocking(move || capabilities::probe(&k, &n)).await.ok()?;
+            let result = tokio::task::spawn_blocking(move || capabilities::probe(&k, &n))
+                .await
+                .ok()?;
             let status = result["status"].as_str().unwrap_or("unknown").to_string();
             if status != "installed" {
                 if kind == "command" {
                     self.app.refresh_inventory(&[name.to_string()]).await;
                 }
-                return Some(format!("Required software '{name}' is {status} on this worker"));
+                return Some(format!(
+                    "Required software '{name}' is {status} on this worker"
+                ));
             }
         }
         None
@@ -330,14 +399,26 @@ impl Job {
     async fn execute(self: Arc<Self>, lease_slot: Arc<Mutex<Option<String>>>) -> Result<(), Stop> {
         let (files, assets, start, requirement, gate_id, revision) = {
             let c = self.config.lock().unwrap();
-            (c["files"].clone(), c["assets"].clone(), c["start"].clone(), c["requirement"].clone(), c.get("gate_id").and_then(|g| g.as_str()).map(String::from), c.get("settings_revision").and_then(|r| r.as_i64()))
+            (
+                c["files"].clone(),
+                c["assets"].clone(),
+                c["start"].clone(),
+                c["requirement"].clone(),
+                c.get("gate_id").and_then(|g| g.as_str()).map(String::from),
+                c.get("settings_revision").and_then(|r| r.as_i64()),
+            )
         };
         let run_id = start["runId"].as_str().unwrap_or("").to_string();
         let directory = self.app.root.join(&self.id);
         let (workspaces, assets_dir) = (directory.join("workspaces"), directory.join("assets"));
         let workspace = workspaces.join(&run_id);
         {
-            let (w, a, f, af) = (workspace.clone(), assets_dir.clone(), files.clone(), assets.clone());
+            let (w, a, f, af) = (
+                workspace.clone(),
+                assets_dir.clone(),
+                files.clone(),
+                assets.clone(),
+            );
             tokio::task::spawn_blocking(move || {
                 artifacts::restore(&f, &w)?;
                 artifacts::restore(&af, &a)
@@ -362,10 +443,18 @@ impl Job {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
-            match self.app.gate.try_acquire(&self.id, gate_id.as_deref(), revision) {
+            match self
+                .app
+                .gate
+                .try_acquire(&self.id, gate_id.as_deref(), revision)
+            {
                 Acquire::Refused(reason) => {
                     if ["revoked", "gate_changed", "settings_changed"].contains(&reason) {
-                        self.reject(JobState::Rejected, "Job was revoked or worker settings changed before execution", reason);
+                        self.reject(
+                            JobState::Rejected,
+                            "Job was revoked or worker settings changed before execution",
+                            reason,
+                        );
                         return Err(Stop::Ended);
                     }
                     self.set_waiting(Some(reason));
@@ -415,7 +504,8 @@ impl Job {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     if !job.app.gate.renew(&job.id, &fence) {
-                        job.inner.lock().unwrap().lease_loss = Some("Capacity lease expired".into());
+                        job.inner.lock().unwrap().lease_loss =
+                            Some("Capacity lease expired".into());
                         job.request_cancel();
                         return;
                     }
@@ -432,7 +522,10 @@ impl Job {
         self.app.active.fetch_add(1, Ordering::SeqCst);
         let _active = ActiveGuard(self.app.clone());
         self.set_waiting(Some("starting"));
-        self.app.gate.confirm_started(&self.id, &fence).map_err(Stop::Failed)?;
+        self.app
+            .gate
+            .confirm_started(&self.id, &fence)
+            .map_err(Stop::Failed)?;
         {
             let mut i = self.inner.lock().unwrap();
             i.waiting_reason = None;
@@ -448,28 +541,51 @@ impl Job {
         let sink: Emit = Arc::new(move |event| job.push_event(event));
         let emitter = Arc::new(Emitter::new(sink));
         let output = if let Some(sources) = start.get("attached") {
-            environment::prepare_attached(sources, &workspace, &emitter).await.map_err(Stop::Failed)?
+            environment::prepare_attached(sources, &workspace, &emitter)
+                .await
+                .map_err(Stop::Failed)?
         } else if let Some(session) = start.get("session") {
             // The files that came with the job are in the run's folder. Without any: a small demo project, as for a blank card.
             let mut session = session.clone();
-            let attached = session.as_object_mut().and_then(|s| s.remove("attached")).and_then(|a| a.as_bool()).unwrap_or(false);
+            let attached = session
+                .as_object_mut()
+                .and_then(|s| s.remove("attached"))
+                .and_then(|a| a.as_bool())
+                .unwrap_or(false);
             if !attached {
                 write_demo_project(&workspace).map_err(Stop::Failed)?;
             }
             std::fs::create_dir_all(&workspace).map_err(|e| Stop::Failed(e.to_string()))?;
             session["workspace"] = json!(workspace.display().to_string());
-            run_session(session, self.inbox.clone(), emitter.clone(), self.trees.clone()).await.map_err(Stop::Failed)?
+            run_session(
+                session,
+                self.inbox.clone(),
+                emitter.clone(),
+                self.trees.clone(),
+            )
+            .await
+            .map_err(Stop::Failed)?
         } else {
             match step["kind"].as_str() {
                 Some("program") => run_program(
-                    ProgramRun { step_id: &step_id, step: &step, context: &context, workspace: &workspace, assets: &assets_dir, workspaces: &workspaces, tree: self.tree.clone() },
+                    ProgramRun {
+                        step_id: &step_id,
+                        step: &step,
+                        context: &context,
+                        workspace: &workspace,
+                        assets: &assets_dir,
+                        workspaces: &workspaces,
+                        tree: self.tree.clone(),
+                    },
                     &emitter,
                 )
                 .await
                 .map_err(Stop::Failed)?,
                 Some("agent") => {
                     std::fs::create_dir_all(&workspace).map_err(|e| Stop::Failed(e.to_string()))?;
-                    let outcome = self.run_agent_step(&step, &context, &workspace, &assets_dir, emitter.clone()).await;
+                    let outcome = self
+                        .run_agent_step(&step, &context, &workspace, &assets_dir, emitter.clone())
+                        .await;
                     match outcome {
                         Ok(output) => {
                             emitter.emit("step", json!({"state": "done", "kind": "agent", "output": bounded_output(&output)}));
@@ -486,15 +602,22 @@ impl Job {
         };
         self.inner.lock().unwrap().output = Some(output);
         // A card's workspace stays on this PC, however large it gets; a step or source job hands its files on.
-        let snapshot = if start["discardFiles"].as_bool().unwrap_or(false) || start.get("session").is_some() {
-            json!({})
-        } else {
-            let (w, original) = (workspace.clone(), files.clone());
-            tokio::task::spawn_blocking(move || artifacts::snapshot(&w, Some(&original))).await.map_err(|e| Stop::Failed(e.to_string()))?.map_err(Stop::Failed)?
-        };
+        let snapshot =
+            if start["discardFiles"].as_bool().unwrap_or(false) || start.get("session").is_some() {
+                json!({})
+            } else {
+                let (w, original) = (workspace.clone(), files.clone());
+                tokio::task::spawn_blocking(move || artifacts::snapshot(&w, Some(&original)))
+                    .await
+                    .map_err(|e| Stop::Failed(e.to_string()))?
+                    .map_err(Stop::Failed)?
+            };
         let path = directory.join("result-files.json");
         let target = path.clone();
-        let published = self.app.gate.publish(&self.id, &fence, move || atomic_json(&target, &snapshot));
+        let published = self
+            .app
+            .gate
+            .publish(&self.id, &fence, move || atomic_json(&target, &snapshot));
         match published {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(Stop::Failed(e.to_string())),

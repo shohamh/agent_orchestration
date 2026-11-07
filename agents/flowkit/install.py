@@ -127,6 +127,21 @@ def write_record(record):
     atomic_json(record_path(record['code']), record)
 
 
+def mark_unregistered(worker):
+    """Close the consumed install record for a worker removed from the fleet."""
+    if not isinstance(worker, dict): return False
+    code = worker.get('uuid')
+    record = read_record(code)
+    if record is None or record.get('id') != worker.get('id') or record.get('state') not in ('pending', 'registered'):
+        return False
+    record.update(state='unregistered', error=None, unregistered_at=now())
+    try:
+        write_record(record)
+    except OSError:
+        return False
+    return True
+
+
 def view(record):
     """What the Fleet tab may see: never the code's secret parts beyond the code itself, no token."""
     state = record['state']
@@ -337,11 +352,16 @@ async def claim(request):
     if host_os and host_os != record['os']:
         return web.json_response({'ok': False, 'error': f"The form says this PC runs {record['os']} but it runs {host_os}. Create a new link for this PC in the Fleet tab and choose {host_os}."}, status=409)
     from .fleet_registry import _read
+    workers = _read()
+    uuid_clash = next((w.get('id') for w in workers if w.get('uuid') == record['code']), None)
+    if uuid_clash:
+        return web.json_response({'ok': False, 'error': f'This install is already registered as {uuid_clash}.'}, status=409)
+    name_clash = next((w.get('id') for w in workers if w.get('id') == record['id']), None)
+    if name_clash:
+        return web.json_response({'ok': False, 'error': f'The Fleet name {name_clash} is already registered. Unregister that worker in the Fleet tab before using this name, or create the install link with a different name.'}, status=409)
     if not taken:
         record.update(claim_hash=claim_hash(secret), claimed_host=host, claimed_at=now())
         write_record(record)
-    clash = next((w['id'] for w in _read() if w.get('uuid') == record['code']), None)
-    if clash: return web.json_response({'ok': False, 'error': f'This install is already registered as {clash}.'}, status=409)
     return web.json_response({'ok': True, 'uuid': record['code'], 'name': record['id'], 'os': record['os'], 'engines': record['engines'], 'pool': record['pools'][0],
                               'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'autostart': record.get('autostart', 'logon'), 'auto_restart': record.get('auto_restart', True)})
 

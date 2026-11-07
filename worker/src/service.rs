@@ -65,7 +65,9 @@ impl App {
         }
         crate::confluence::set_cache(config.root.join("confluence-runtime"));
         let gate = Gate::open(config.root.join("gate.json"), config.slots);
-        let inventory = read_json(&config.root.join("capabilities.json")).filter(|v| v.is_object()).unwrap_or(json!({}));
+        let inventory = read_json(&config.root.join("capabilities.json"))
+            .filter(|v| v.is_object())
+            .unwrap_or(json!({}));
         let hostname = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
         Arc::new(App {
             identity: json!({"id": config.id, "uuid": config.uuid, "hostname": hostname, "pool": "default", "tags": []}),
@@ -92,14 +94,32 @@ impl App {
         if !self.gate.revoke_absent(job_id, Some(&self.gate_id)) {
             return Err("The job still has an active capacity lease".into());
         }
-        atomic_json(&self.termination_path(job_id), &json!({"terminated": true, "gate_id": self.gate_id})).map_err(|e| e.to_string())
+        atomic_json(
+            &self.termination_path(job_id),
+            &json!({"terminated": true, "gate_id": self.gate_id}),
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub async fn refresh_inventory(&self, extra: &[String]) -> Value {
         let _guard = self.inventory_lock.lock().await;
-        let mut names: BTreeSet<String> = self.inventory.lock().unwrap().get("commands").and_then(|c| c.as_object()).map(|c| c.keys().filter(|k| !k.is_empty() && k.len() <= 260).cloned().collect()).unwrap_or_default();
+        let mut names: BTreeSet<String> = self
+            .inventory
+            .lock()
+            .unwrap()
+            .get("commands")
+            .and_then(|c| c.as_object())
+            .map(|c| {
+                c.keys()
+                    .filter(|k| !k.is_empty() && k.len() <= 260)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         names.extend(extra.iter().cloned());
-        let updated = tokio::task::spawn_blocking(move || capabilities::refresh(&names)).await.unwrap();
+        let updated = tokio::task::spawn_blocking(move || capabilities::refresh(&names))
+            .await
+            .unwrap();
         let _ = atomic_json(&self.root.join("capabilities.json"), &updated);
         *self.inventory.lock().unwrap() = updated.clone();
         updated
@@ -107,7 +127,9 @@ impl App {
 }
 
 fn valid_uuid(text: &str) -> Option<String> {
-    uuid::Uuid::parse_str(text).ok().map(|u| u.hyphenated().to_string())
+    uuid::Uuid::parse_str(text)
+        .ok()
+        .map(|u| u.hyphenated().to_string())
 }
 
 // --------------------------------------------------------------------------- routes
@@ -129,7 +151,11 @@ pub fn router(app: Arc<App>) -> Router {
 
 async fn auth(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
     if !app.token.is_empty() {
-        let given = request.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let given = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         if !eq_const(given, &format!("Bearer {}", app.token)) {
             return (StatusCode::UNAUTHORIZED, "401: Unauthorized").into_response();
         }
@@ -157,7 +183,9 @@ async fn drain(State(app): State<Arc<App>>, Json(body): Json<Value>) -> ApiResul
         _ => return Err(bad("Body must be {\"drain\": true|false}")),
     };
     app.draining.store(on, Ordering::SeqCst);
-    Ok(Json(json!({"draining": on, "active": app.active.load(Ordering::SeqCst)})))
+    Ok(Json(
+        json!({"draining": on, "active": app.active.load(Ordering::SeqCst)}),
+    ))
 }
 
 async fn inventory(State(app): State<Arc<App>>) -> ApiResult {
@@ -174,46 +202,99 @@ async fn refresh_capabilities(State(app): State<Arc<App>>, body: Option<Json<Val
         return Err(bad("Body must be an object"));
     }
     let commands = data.get("commands").cloned().unwrap_or(json!([]));
-    let list: Vec<String> = commands.as_array().ok_or_else(|| bad("commands must be a list of executable names"))?.iter().map(|c| c.as_str().map(String::from)).collect::<Option<_>>().ok_or_else(|| bad("commands must be a list of executable names"))?;
-    if list.iter().any(|c| c.is_empty() || c.len() > 260 || c.contains(['\0', '\r', '\n'])) {
+    let list: Vec<String> = commands
+        .as_array()
+        .ok_or_else(|| bad("commands must be a list of executable names"))?
+        .iter()
+        .map(|c| c.as_str().map(String::from))
+        .collect::<Option<_>>()
+        .ok_or_else(|| bad("commands must be a list of executable names"))?;
+    if list
+        .iter()
+        .any(|c| c.is_empty() || c.len() > 260 || c.contains(['\0', '\r', '\n']))
+    {
         return Err(bad("commands must be a list of executable names"));
     }
     Ok(Json(app.refresh_inventory(&list).await))
 }
 
 /// The coordinator's registry pushes this PC's admission limits (and nothing else).
-async fn configure(State(app): State<Arc<App>>, headers: HeaderMap, body: bytes::Bytes) -> ApiResult {
+async fn configure(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> ApiResult {
     let data: Value = serde_json::from_slice(&body).map_err(|_| bad("Invalid JSON body"))?;
-    let map = data.as_object().filter(|m| m.len() == 3 && ["slots", "cpu_limit", "ram_limit"].iter().all(|k| m.contains_key(*k))).ok_or_else(|| bad("Body must contain exactly slots, cpu_limit and ram_limit"))?;
-    let slots = map["slots"].as_u64().filter(|s| (1..=MAX_SLOTS).contains(s) && map["slots"].is_u64()).ok_or_else(|| bad(format!("slots must be a whole number from 1 to {MAX_SLOTS}")))?;
+    let map = data
+        .as_object()
+        .filter(|m| {
+            m.len() == 3
+                && ["slots", "cpu_limit", "ram_limit"]
+                    .iter()
+                    .all(|k| m.contains_key(*k))
+        })
+        .ok_or_else(|| bad("Body must contain exactly slots, cpu_limit and ram_limit"))?;
+    let slots = map["slots"]
+        .as_u64()
+        .filter(|s| (1..=MAX_SLOTS).contains(s) && map["slots"].is_u64())
+        .ok_or_else(|| {
+            bad(format!(
+                "slots must be a whole number from 1 to {MAX_SLOTS}"
+            ))
+        })?;
     let percent = |key: &str| map[key].as_f64().filter(|v| *v > 0.0 && *v <= 100.0);
     let (cpu, ram) = (percent("cpu_limit"), percent("ram_limit"));
-    let (Some(cpu), Some(ram)) = (cpu, ram) else { return Err(bad("cpu_limit and ram_limit must be percentages above 0 and at most 100")) };
+    let (Some(cpu), Some(ram)) = (cpu, ram) else {
+        return Err(bad(
+            "cpu_limit and ram_limit must be percentages above 0 and at most 100",
+        ));
+    };
     let expected = headers.get("x-flow-gate-id").and_then(|v| v.to_str().ok());
     if let Some(expected) = expected {
         if expected != app.gate_id {
             return Err(bad("Worker capacity gate identity changed"));
         }
     }
-    let revision = match headers.get("x-flow-settings-revision").and_then(|v| v.to_str().ok()) {
+    let revision = match headers
+        .get("x-flow-settings-revision")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(raw) => {
-            if !raw.is_ascii() || raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) || raw.len() > 30 {
+            if !raw.is_ascii()
+                || raw.is_empty()
+                || !raw.bytes().all(|b| b.is_ascii_digit())
+                || raw.len() > 30
+            {
                 return Err(bad("Invalid worker settings revision"));
             }
-            Some(raw.parse::<i64>().map_err(|_| bad("Invalid worker settings revision"))?)
+            Some(
+                raw.parse::<i64>()
+                    .map_err(|_| bad("Invalid worker settings revision"))?,
+            )
         }
         None => None,
     };
-    app.gate.configure(slots, cpu, ram, expected, revision).map_err(bad)?;
+    app.gate
+        .configure(slots, cpu, ram, expected, revision)
+        .map_err(bad)?;
     Ok(Json(json!({"settings": app.gate.metrics()["settings"]})))
 }
 
 fn find(app: &App, id: &str) -> Result<Arc<Job>, ApiError> {
-    app.jobs.lock().unwrap().get(id).cloned().ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "404: Not Found".into()))
+    app.jobs
+        .lock()
+        .unwrap()
+        .get(id)
+        .cloned()
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "404: Not Found".into()))
 }
 
 async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiResult {
-    let raw_id = config.get("id").and_then(|i| i.as_str()).ok_or_else(|| bad("'id'"))?.to_string();
+    let raw_id = config
+        .get("id")
+        .and_then(|i| i.as_str())
+        .ok_or_else(|| bad("'id'"))?
+        .to_string();
     let job_id = valid_uuid(&raw_id).ok_or_else(|| bad("badly formed hexadecimal UUID string"))?;
     for key in ["start", "files", "assets"] {
         if config.get(key).is_none() {
@@ -230,11 +311,22 @@ async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiRe
             return Err(bad("A terminated job ID cannot be reused"));
         }
         if app.jobs.lock().unwrap().len() >= 100 {
-            return Err(bad("Execution worker has too many retained jobs; retry later"));
+            return Err(bad(
+                "Execution worker has too many retained jobs; retry later",
+            ));
         }
         let start = config["start"].clone();
-        let run_id = start.get("runId").and_then(|r| r.as_str()).ok_or_else(|| bad("'runId'"))?.to_string();
-        if run_id.is_empty() || run_id.len() > 150 || !run_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        let run_id = start
+            .get("runId")
+            .and_then(|r| r.as_str())
+            .ok_or_else(|| bad("'runId'"))?
+            .to_string();
+        if run_id.is_empty()
+            || run_id.len() > 150
+            || !run_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
             return Err(bad("Invalid run id"));
         }
         if let Some(session) = start.get("session") {
@@ -248,8 +340,15 @@ async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiRe
             return admit(&app, job_id, config, json!({}), run_id).await;
         }
         let flow = start.get("flow").ok_or_else(|| bad("'flow'"))?;
-        let step_id = start.get("step").and_then(|s| s.as_str()).ok_or_else(|| bad("'step'"))?;
-        let step = flow.get("steps").and_then(|s| s.get(step_id)).ok_or_else(|| bad("Unknown step"))?.clone();
+        let step_id = start
+            .get("step")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| bad("'step'"))?;
+        let step = flow
+            .get("steps")
+            .and_then(|s| s.get(step_id))
+            .ok_or_else(|| bad("Unknown step"))?
+            .clone();
         let kind = step.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let requirement = capabilities::software_requirement(&step, cfg!(windows));
         if kind != "program" && kind != "agent" {
@@ -263,7 +362,15 @@ async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiRe
 /// A standalone card, as a placed worker accepts it. It runs in a new workspace here, so a host path or a resumed
 /// session (bound to its original workspace) is refused rather than assumed to exist.
 fn card_agent(start: &Value, session: &Value) -> Result<String, String> {
-    const FIELDS: [&str; 7] = ["goal", "agent", "workspace", "simulateFailures", "resumeSessionId", "programInput", "attached"];
+    const FIELDS: [&str; 7] = [
+        "goal",
+        "agent",
+        "workspace",
+        "simulateFailures",
+        "resumeSessionId",
+        "programInput",
+        "attached",
+    ];
     if start.as_object().map(|s| s.len()).unwrap_or(0) != 2 {
         return Err("Invalid card job".into());
     }
@@ -271,24 +378,51 @@ fn card_agent(start: &Value, session: &Value) -> Result<String, String> {
     if fields.keys().any(|key| !FIELDS.contains(&key.as_str())) {
         return Err("A card session contains only goal, agent, workspace, simulateFailures, resumeSessionId, programInput and attached".into());
     }
-    let filled = |key: &str| fields.get(key).and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false);
+    let filled = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    };
     if filled("workspace") || filled("resumeSessionId") {
         return Err("A card placed on a fleet worker runs in a new workspace on that worker; clear the workspace (host paths and resumed sessions are not available on other PCs)".into());
     }
-    if !fields.get("goal").and_then(|g| g.as_str()).map(|g| !g.trim().is_empty() && g.chars().count() <= 30000).unwrap_or(false) {
+    if !fields
+        .get("goal")
+        .and_then(|g| g.as_str())
+        .map(|g| !g.trim().is_empty() && g.chars().count() <= 30000)
+        .unwrap_or(false)
+    {
         return Err("A card needs a goal of at most 20000 characters".into());
     }
-    let agent = fields.get("agent").and_then(|a| a.as_str()).unwrap_or("codex");
+    let agent = fields
+        .get("agent")
+        .and_then(|a| a.as_str())
+        .unwrap_or("codex");
     if !capabilities::AGENTS.contains(&agent) {
-        return Err(format!("agent must be one of {}", capabilities::AGENTS.join(", ")));
+        return Err(format!(
+            "agent must be one of {}",
+            capabilities::AGENTS.join(", ")
+        ));
     }
-    if !fields.get("simulateFailures").map(|f| f.as_u64().map(|f| f <= 20).unwrap_or(false)).unwrap_or(true) {
+    if !fields
+        .get("simulateFailures")
+        .map(|f| f.as_u64().map(|f| f <= 20).unwrap_or(false))
+        .unwrap_or(true)
+    {
         return Err("simulateFailures must be a whole number from 0 to 20".into());
     }
     Ok(agent.to_string())
 }
 
-async fn admit(app: &Arc<App>, job_id: String, mut config: Value, requirement: Value, run_id: String) -> ApiResult {
+async fn admit(
+    app: &Arc<App>,
+    job_id: String,
+    mut config: Value,
+    requirement: Value,
+    run_id: String,
+) -> ApiResult {
     if let Some(command) = requirement.get("command").and_then(|c| c.as_str()) {
         app.refresh_inventory(&[command.to_string()]).await;
     }
@@ -319,14 +453,22 @@ struct After {
     after: Option<i64>,
 }
 
-async fn status(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<After>) -> ApiResult {
+async fn status(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(q): Query<After>,
+) -> ApiResult {
     let job = find(&app, &id)?;
     job.touch();
     let snapshot = job.snapshot(q.after.unwrap_or(0).max(0) as usize);
     Ok(Json(snapshot))
 }
 
-async fn receive(State(app): State<Arc<App>>, Path(id): Path<String>, Json(item): Json<Value>) -> ApiResult {
+async fn receive(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(item): Json<Value>,
+) -> ApiResult {
     let job = find(&app, &id)?;
     if !matches!(job.state(), JobState::Queued | JobState::Running) {
         return Err(bad("Job has finished"));
@@ -335,18 +477,31 @@ async fn receive(State(app): State<Arc<App>>, Path(id): Path<String>, Json(item)
     Ok(Json(json!({"ok": true})))
 }
 
-async fn authorize(State(app): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<Value>) -> Result<Json<Value>, Response> {
+async fn authorize(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, Response> {
     let job = find(&app, &id).map_err(|e| e.into_response())?;
     job.touch();
     let nonce = body.get("nonce").and_then(|n| n.as_str());
     if !job.authorize_with(nonce) {
-        return Err((StatusCode::CONFLICT, Json(json!({"error": "No start authorization is pending for this job"}))).into_response());
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "No start authorization is pending for this job"})),
+        )
+            .into_response());
     }
     Ok(Json(json!({"ok": true})))
 }
 
-async fn cancel(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Json<Value>, Response> {
-    let conflict = |message: &str| (StatusCode::CONFLICT, Json(json!({"error": message}))).into_response();
+async fn cancel(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, Response> {
+    let conflict =
+        |message: &str| (StatusCode::CONFLICT, Json(json!({"error": message}))).into_response();
     let expected = headers.get("x-flow-gate-id").and_then(|v| v.to_str().ok());
     let current = app.gate.gate_id();
     if current != app.gate_id || expected.map(|e| e != current).unwrap_or(false) {
@@ -354,29 +509,39 @@ async fn cancel(State(app): State<Arc<App>>, Path(id): Path<String>, headers: He
     }
     let known = app.jobs.lock().unwrap().contains_key(&id);
     if !known {
-        let terminated = read_json(&app.termination_path(&id)).map(|p| p["terminated"] == true && p["gate_id"] == json!(current)).unwrap_or(false);
+        let terminated = read_json(&app.termination_path(&id))
+            .map(|p| p["terminated"] == true && p["gate_id"] == json!(current))
+            .unwrap_or(false);
         if terminated {
             return Ok(Json(json!({"ok": true, "terminated": true})));
         }
-        let canonical = valid_uuid(&id).ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "404: Not Found".into()).into_response())?;
+        let canonical = valid_uuid(&id).ok_or_else(|| {
+            ApiError(StatusCode::NOT_FOUND, "404: Not Found".into()).into_response()
+        })?;
         if !app.gate.revoke_absent(&canonical, Some(&current)) {
             return Err(conflict("A previous execution may still be running"));
         }
         // The revocation prevents any delayed submit from acquiring capacity; check this process once more.
         if !app.jobs.lock().unwrap().contains_key(&id) {
-            app.record_termination(&canonical).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
+            app.record_termination(&canonical)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
             return Ok(Json(json!({"ok": true, "terminated": true})));
         }
     }
     let job = find(&app, &id).map_err(|e| e.into_response())?;
     if !job.cancel_and_wait(Duration::from_secs(30)).await {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "Worker cleanup did not confirm process termination"}))).into_response());
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Worker cleanup did not confirm process termination"})),
+        )
+            .into_response());
     }
     if !app.gate.revoke_absent(&id, Some(&current)) {
         return Err(conflict("A previous execution may still be running"));
     }
     job.mark_cancelled_if_active();
-    app.record_termination(&id).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
+    app.record_termination(&id)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e).into_response())?;
     Ok(Json(json!({"ok": true, "terminated": true})))
 }
 
@@ -400,7 +565,13 @@ pub fn spawn_background(app: Arc<App>) {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let now = mono();
-            let jobs: Vec<(String, Arc<Job>)> = a.jobs.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let jobs: Vec<(String, Arc<Job>)> = a
+                .jobs
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             for (id, job) in jobs {
                 let idle = now - job.last_seen();
                 if matches!(job.state(), JobState::Queued | JobState::Running) && idle > 45.0 {

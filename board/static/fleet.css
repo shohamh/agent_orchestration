@@ -107,6 +107,12 @@ dialog.fl-dialog[open] { display: flex; flex-direction: column; }
 .fl-form-error p { margin: 0; }
 .fl-form-actions { justify-content: flex-end; }
 .fl button:focus-visible, .fl input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+.fl-unregister { width: min(440px, 92vw); border: 1px solid var(--line); border-radius: 10px; padding: 20px; color: var(--ink); background: var(--panel); box-shadow: var(--shadow); }
+.fl-unregister::backdrop { background: rgba(0, 0, 0, .45); }
+.fl-unregister h3 { margin: 0 0 10px; font-size: 16px; }
+.fl-unregister p { margin: 0 0 16px; line-height: 1.5; }
+.fl-unregister-actions { justify-content: flex-end; }
+.fl-unregister .danger, .fl-worker-actions .fl-unregister-button { color: var(--danger); }
 
 @media (max-width: 700px), (pointer: coarse) {
   .fl button, .fl input:not([type="checkbox"]):not([type="radio"]) { min-height: 44px; }

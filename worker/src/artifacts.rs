@@ -23,9 +23,17 @@ pub fn validate(files: &Value) -> Result<(), String> {
     let (mut seen, mut total) = (HashSet::new(), 0usize);
     for (name, entry) in map {
         let parts: Vec<&str> = name.split('/').collect();
-        if name.is_empty() || name.contains('\\') || name.contains(':') || name.starts_with('/') || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..")
+        if name.is_empty()
+            || name.contains('\\')
+            || name.contains(':')
+            || name.starts_with('/')
+            || parts
+                .iter()
+                .any(|p| p.is_empty() || *p == "." || *p == "..")
             || name.chars().any(|c| (c as u32) < 32)
-            || parts.iter().any(|p| p.ends_with('.') || p.ends_with(' ') || reserved.is_match(p))
+            || parts
+                .iter()
+                .any(|p| p.ends_with('.') || p.ends_with(' ') || reserved.is_match(p))
         {
             return Err(format!("Unsafe workspace path: {name:?}"));
         }
@@ -36,8 +44,14 @@ pub fn validate(files: &Value) -> Result<(), String> {
         if !entry.is_object() || mode.map(|m| !(0..=0o777).contains(&m)).unwrap_or(true) {
             return Err(format!("Invalid file entry: {name}"));
         }
-        let data = entry.get("data").and_then(|d| d.as_str()).ok_or_else(|| format!("Invalid file content: {name}"))?;
-        total += STANDARD.decode(data).map_err(|_| format!("Invalid file content: {name}"))?.len();
+        let data = entry
+            .get("data")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| format!("Invalid file content: {name}"))?;
+        total += STANDARD
+            .decode(data)
+            .map_err(|_| format!("Invalid file content: {name}"))?
+            .len();
         if total > MAX_BYTES {
             return Err("Workspace exceeds 64 MiB transfer limit".into());
         }
@@ -54,13 +68,19 @@ pub fn validate(files: &Value) -> Result<(), String> {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let mut entries: Vec<_> = fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(|e| e.ok()).collect();
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let path = entry.path();
         let kind = entry.file_type().map_err(|e| e.to_string())?;
         if kind.is_symlink() {
-            return Err(format!("Symlinks cannot be transferred: {}", path.strip_prefix(root).unwrap_or(&path).display()));
+            return Err(format!(
+                "Symlinks cannot be transferred: {}",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            ));
         }
         if kind.is_dir() {
             walk(root, &path, out)?;
@@ -80,8 +100,17 @@ pub fn snapshot(root: &Path, original: Option<&Value>) -> Result<Value, String> 
     }
     let (mut files, mut total) = (Map::new(), 0usize);
     for path in paths {
-        let name = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-        if name.split('/').next().map(|p| p.starts_with(".flow-")).unwrap_or(false) {
+        let name = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if name
+            .split('/')
+            .next()
+            .map(|p| p.starts_with(".flow-"))
+            .unwrap_or(false)
+        {
             continue;
         }
         let bytes = fs::read(&path).map_err(|e| e.to_string())?;
@@ -93,13 +122,23 @@ pub fn snapshot(root: &Path, original: Option<&Value>) -> Result<Value, String> 
         #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::PermissionsExt;
-            (fs::metadata(&path).map_err(|e| e.to_string())?.permissions().mode() & 0o777) as i64
+            (fs::metadata(&path)
+                .map_err(|e| e.to_string())?
+                .permissions()
+                .mode()
+                & 0o777) as i64
         };
         #[cfg(not(unix))]
         let mode = {
-            let readonly = fs::metadata(&path).map(|m| m.permissions().readonly()).unwrap_or(false);
+            let readonly = fs::metadata(&path)
+                .map(|m| m.permissions().readonly())
+                .unwrap_or(false);
             let default = if readonly { 0o444 } else { 0o666 };
-            original.and_then(|o| o.get(&name)).filter(|o| o.get("data").and_then(|d| d.as_str()) == Some(&data)).and_then(|o| o.get("mode").and_then(|m| m.as_i64())).unwrap_or(default)
+            original
+                .and_then(|o| o.get(&name))
+                .filter(|o| o.get("data").and_then(|d| d.as_str()) == Some(&data))
+                .and_then(|o| o.get("mode").and_then(|m| m.as_i64()))
+                .unwrap_or(default)
         };
         let _ = original;
         files.insert(name, json!({"data": data, "mode": mode}));
@@ -117,12 +156,17 @@ pub fn restore(files: &Value, root: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let bytes = STANDARD.decode(entry["data"].as_str().unwrap()).map_err(|e| e.to_string())?;
+        let bytes = STANDARD
+            .decode(entry["data"].as_str().unwrap())
+            .map_err(|e| e.to_string())?;
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(entry["mode"].as_u64().unwrap_or(0o644) as u32));
+            let _ = fs::set_permissions(
+                &path,
+                fs::Permissions::from_mode(entry["mode"].as_u64().unwrap_or(0o644) as u32),
+            );
         }
     }
     Ok(())
@@ -138,11 +182,20 @@ mod tests {
 
     #[test]
     fn unsafe_names_and_collisions_are_refused() {
-        for name in ["../x", "/abs", "a\\b", "a:b", "a//b", "con", "nul.txt", "trail.", "sp ", "x\u{1}y", "./a"] {
+        for name in [
+            "../x", "/abs", "a\\b", "a:b", "a//b", "con", "nul.txt", "trail.", "sp ", "x\u{1}y",
+            "./a",
+        ] {
             assert!(validate(&json!({name: entry("x")})).is_err(), "{name}");
         }
-        assert!(validate(&json!({"a": entry("x"), "A": entry("y")})).is_err(), "case collision");
-        assert!(validate(&json!({"a": entry("x"), "a/b": entry("y")})).is_err(), "file under a file");
+        assert!(
+            validate(&json!({"a": entry("x"), "A": entry("y")})).is_err(),
+            "case collision"
+        );
+        assert!(
+            validate(&json!({"a": entry("x"), "a/b": entry("y")})).is_err(),
+            "file under a file"
+        );
         assert!(validate(&json!({"dir/ok.txt": entry("x"), "other": entry("y")})).is_ok());
         assert!(validate(&json!({"a": {"data": "not base64!!", "mode": 420}})).is_err());
         assert!(validate(&json!({"a": {"data": "", "mode": 0o1000}})).is_err());
@@ -160,6 +213,9 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(back["run.sh"]["mode"], 0o755);
         #[cfg(windows)]
-        assert_eq!(back["run.sh"]["mode"], 0o755, "an unchanged file keeps its mode on Windows");
+        assert_eq!(
+            back["run.sh"]["mode"], 0o755,
+            "an unchanged file keeps its mode on Windows"
+        );
     }
 }

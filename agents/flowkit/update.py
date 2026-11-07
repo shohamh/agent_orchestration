@@ -113,8 +113,11 @@ def server_for(request):
 
 
 def authorized_pc(request):
-    from .relay import authorized
-    if not authorized(request.app['relay'], request, request.match_info['id']):
+    from .relay import authorization_status, revoked_payload
+    status = authorization_status(request.app['relay'], request, request.match_info['id'])
+    if status == 'revoked':
+        raise web.HTTPGone(text=json.dumps(revoked_payload()), content_type='application/json')
+    if status != 'active':
         raise web.HTTPUnauthorized(text=json.dumps({'error': 'Unauthorized'}), content_type='application/json')
 
 
@@ -153,18 +156,10 @@ async def pc_deregister(request):
     """`agent-worker uninstall`: the PC asks to be removed from the fleet, authenticated by its own token."""
     authorized_pc(request)
     key = request.match_info['id']
-    from .fleet_registry import _read, delete_worker, relay_key
-    def remove():
-        name = next((w['id'] for w in _read() if relay_key(w) == key), None)
-        if name is None: return False
-        try: delete_worker(name)
-        except ValueError: return False
-        return True
-    removed = await asyncio.to_thread(remove)
-    peer = request.app['relay'].peers.pop(key, None)
-    if peer is not None:
-        for call in list(peer.pending): call.closed = True
-    return web.json_response({'removed': removed})
+    from .fleet_registry import unregister_worker
+    removed = await asyncio.to_thread(unregister_worker, relay_id=key)
+    request.app['relay'].revoke_peer(key)
+    return web.json_response({'removed': removed is not None})
 
 
 async def link_record(request):

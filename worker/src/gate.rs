@@ -13,7 +13,11 @@ const COOLDOWN: f64 = 10.0;
 
 fn cooldown() -> f64 {
     // Tests start a fresh service per run; AGENT_WORKER_TEST_FAST shortens the cooldown and primes the samples, as the Python fixture does.
-    if std::env::var_os("AGENT_WORKER_TEST_FAST").is_some() { 0.3 } else { COOLDOWN }
+    if std::env::var_os("AGENT_WORKER_TEST_FAST").is_some() {
+        0.3
+    } else {
+        COOLDOWN
+    }
 }
 const LEASE: f64 = 30.0;
 const MAX_REVOCATIONS: usize = 5000;
@@ -61,21 +65,40 @@ impl Gate {
         let saved = read_json(&path);
         let get = |key: &str| saved.as_ref().and_then(|v| v.get(key)).cloned();
         let settings = get("settings")
-            .and_then(|s| Some(Settings { slots: s.get("slots")?.as_u64()?, cpu_limit: s.get("cpu_limit")?.as_f64()?, ram_limit: s.get("ram_limit")?.as_f64()? }))
+            .and_then(|s| {
+                Some(Settings {
+                    slots: s.get("slots")?.as_u64()?,
+                    cpu_limit: s.get("cpu_limit")?.as_f64()?,
+                    ram_limit: s.get("ram_limit")?.as_f64()?,
+                })
+            })
             .filter(|s| valid_settings(s.slots, s.cpu_limit, s.ram_limit))
-            .unwrap_or(Settings { slots, cpu_limit: 90.0, ram_limit: 90.0 });
-        let revoked_order: Vec<String> = get("revoked").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+            .unwrap_or(Settings {
+                slots,
+                cpu_limit: 90.0,
+                ram_limit: 90.0,
+            });
+        let revoked_order: Vec<String> = get("revoked")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
         let state = State {
-            gate_id: get("gate_id").and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
+            gate_id: get("gate_id")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()),
             settings,
-            revision: get("settings_revision").and_then(|v| v.as_i64()).unwrap_or(-1),
+            revision: get("settings_revision")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1),
             samples: Vec::new(),
             last_start: mono() - cooldown(),
             leases: HashMap::new(),
             revoked: revoked_order.iter().cloned().collect(),
             revoked_order,
         };
-        let gate = Gate { path, state: Mutex::new(state) };
+        let gate = Gate {
+            path,
+            state: Mutex::new(state),
+        };
         gate.save(&gate.state.lock().unwrap());
         if std::env::var_os("AGENT_WORKER_TEST_FAST").is_some() {
             let base = mono();
@@ -96,7 +119,14 @@ impl Gate {
         self.state.lock().unwrap().gate_id.clone()
     }
 
-    pub fn configure(&self, slots: u64, cpu: f64, ram: f64, expected_gate: Option<&str>, revision: Option<i64>) -> Result<(), String> {
+    pub fn configure(
+        &self,
+        slots: u64,
+        cpu: f64,
+        ram: f64,
+        expected_gate: Option<&str>,
+        revision: Option<i64>,
+    ) -> Result<(), String> {
         if !valid_settings(slots, cpu, ram) {
             return Err("Invalid capacity settings".into());
         }
@@ -106,7 +136,11 @@ impl Gate {
                 return Err("Worker capacity gate identity changed".into());
             }
         }
-        let wanted = Settings { slots, cpu_limit: cpu, ram_limit: ram };
+        let wanted = Settings {
+            slots,
+            cpu_limit: cpu,
+            ram_limit: ram,
+        };
         match revision {
             Some(revision) => {
                 if revision < s.revision || (revision == s.revision && s.settings != wanted) {
@@ -122,7 +156,11 @@ impl Gate {
     }
 
     pub fn observe(&self, cpu: f64, ram: f64, t: f64) {
-        if !(cpu.is_finite() && ram.is_finite() && (0.0..=100.0).contains(&cpu) && (0.0..=100.0).contains(&ram)) {
+        if !(cpu.is_finite()
+            && ram.is_finite()
+            && (0.0..=100.0).contains(&cpu)
+            && (0.0..=100.0).contains(&ram))
+        {
             return;
         }
         let mut s = self.state.lock().unwrap();
@@ -187,7 +225,12 @@ impl Gate {
         m
     }
 
-    pub fn try_acquire(&self, job: &str, expected_gate: Option<&str>, expected_revision: Option<i64>) -> Acquire {
+    pub fn try_acquire(
+        &self,
+        job: &str,
+        expected_gate: Option<&str>,
+        expected_revision: Option<i64>,
+    ) -> Acquire {
         let mut s = self.state.lock().unwrap();
         let now = mono();
         let m = Self::window(&s, now);
@@ -209,7 +252,12 @@ impl Gate {
             Some("full_slots")
         } else if s.leases.values().any(|l| l.phase == "pending") {
             Some("pending_start")
-        } else if now - s.last_start < cooldown() || s.samples.last().map(|l| l.0 - s.last_start < cooldown()).unwrap_or(false) {
+        } else if now - s.last_start < cooldown()
+            || s.samples
+                .last()
+                .map(|l| l.0 - s.last_start < cooldown())
+                .unwrap_or(false)
+        {
             Some("cooldown")
         } else if m["state"] == "unknown" {
             Some("missing_metrics")
@@ -224,12 +272,25 @@ impl Gate {
             return Acquire::Refused(reason);
         }
         let fence = uuid::Uuid::new_v4().simple().to_string();
-        s.leases.insert(job.to_string(), Lease { fence: fence.clone(), expires: now + LEASE, phase: "pending" });
-        Acquire::Granted { fence, expires: now + LEASE }
+        s.leases.insert(
+            job.to_string(),
+            Lease {
+                fence: fence.clone(),
+                expires: now + LEASE,
+                phase: "pending",
+            },
+        );
+        Acquire::Granted {
+            fence,
+            expires: now + LEASE,
+        }
     }
 
     fn valid_locked(s: &State, job: &str, fence: &str) -> bool {
-        s.leases.get(job).map(|l| l.fence == fence && l.expires > mono()).unwrap_or(false)
+        s.leases
+            .get(job)
+            .map(|l| l.fence == fence && l.expires > mono())
+            .unwrap_or(false)
     }
 
     pub fn valid(&self, job: &str, fence: &str) -> bool {
@@ -241,7 +302,11 @@ impl Gate {
         if !Self::valid_locked(&s, job, fence) {
             return Err("Capacity lease lost before start".into());
         }
-        let already = s.leases.get(job).map(|l| l.phase == "started").unwrap_or(false);
+        let already = s
+            .leases
+            .get(job)
+            .map(|l| l.phase == "started")
+            .unwrap_or(false);
         if !already {
             if let Some(lease) = s.leases.get_mut(job) {
                 lease.phase = "started";
@@ -263,7 +328,12 @@ impl Gate {
     }
 
     /// Run `callback` only while the lease is still this attempt's: a publication after the lease expired is fenced out.
-    pub fn publish<T>(&self, job: &str, fence: &str, callback: impl FnOnce() -> T) -> Result<T, String> {
+    pub fn publish<T>(
+        &self,
+        job: &str,
+        fence: &str,
+        callback: impl FnOnce() -> T,
+    ) -> Result<T, String> {
         let s = self.state.lock().unwrap();
         if !Self::valid_locked(&s, job, fence) {
             return Err("Capacity lease expired; publication fenced".into());
@@ -340,21 +410,38 @@ mod tests {
     fn admits_within_limits_then_enforces_slots_and_cooldown() {
         let g = gate(1);
         warm(&g, 10.0, 10.0);
-        let Acquire::Granted { fence, .. } = g.try_acquire("a", None, None) else { panic!("should be admitted") };
-        assert!(matches!(g.try_acquire("b", None, None), Acquire::Refused("full_slots")));
+        let Acquire::Granted { fence, .. } = g.try_acquire("a", None, None) else {
+            panic!("should be admitted")
+        };
+        assert!(matches!(
+            g.try_acquire("b", None, None),
+            Acquire::Refused("full_slots")
+        ));
         g.confirm_started("a", &fence).unwrap();
         g.finish("a", None).unwrap();
-        assert!(matches!(g.try_acquire("c", None, None), Acquire::Refused("cooldown")));
+        assert!(matches!(
+            g.try_acquire("c", None, None),
+            Acquire::Refused("cooldown")
+        ));
     }
 
     #[test]
     fn unknown_metrics_and_high_load_hold_work() {
         let g = gate(2);
-        assert!(matches!(g.try_acquire("a", None, None), Acquire::Refused("missing_metrics")));
+        assert!(matches!(
+            g.try_acquire("a", None, None),
+            Acquire::Refused("missing_metrics")
+        ));
         warm(&g, 95.0, 10.0);
-        assert!(matches!(g.try_acquire("a", None, None), Acquire::Refused("high_cpu")));
+        assert!(matches!(
+            g.try_acquire("a", None, None),
+            Acquire::Refused("high_cpu")
+        ));
         warm(&g, 10.0, 95.0);
-        assert!(matches!(g.try_acquire("a", None, None), Acquire::Refused("high_ram")));
+        assert!(matches!(
+            g.try_acquire("a", None, None),
+            Acquire::Refused("high_ram")
+        ));
     }
 
     #[test]
@@ -366,8 +453,14 @@ mod tests {
         assert!(g.configure(2, 80.0, 80.0, None, Some(5)).is_ok());
         assert!(g.configure(2, 80.0, 80.0, Some("other"), Some(6)).is_err());
         warm(&g, 10.0, 10.0);
-        assert!(matches!(g.try_acquire("j", None, Some(4)), Acquire::Refused("settings_changed")));
-        assert!(matches!(g.try_acquire("j", Some("nope"), None), Acquire::Refused("gate_changed")));
+        assert!(matches!(
+            g.try_acquire("j", None, Some(4)),
+            Acquire::Refused("settings_changed")
+        ));
+        assert!(matches!(
+            g.try_acquire("j", Some("nope"), None),
+            Acquire::Refused("gate_changed")
+        ));
         assert!(g.configure(2, 80.0, 80.0, None, None).is_ok());
         assert_eq!(g.metrics()["settings_revision"], -1);
     }
@@ -377,16 +470,26 @@ mod tests {
         let g = gate(2);
         warm(&g, 10.0, 10.0);
         assert!(g.revoke_absent("x", None));
-        assert!(matches!(g.try_acquire("x", None, None), Acquire::Refused("revoked")));
-        let Acquire::Granted { .. } = g.try_acquire("y", None, None) else { panic!() };
-        assert!(!g.revoke_absent("y", None), "a live lease cannot be revoked away");
+        assert!(matches!(
+            g.try_acquire("x", None, None),
+            Acquire::Refused("revoked")
+        ));
+        let Acquire::Granted { .. } = g.try_acquire("y", None, None) else {
+            panic!()
+        };
+        assert!(
+            !g.revoke_absent("y", None),
+            "a live lease cannot be revoked away"
+        );
     }
 
     #[test]
     fn publication_is_fenced_by_the_lease() {
         let g = gate(1);
         warm(&g, 10.0, 10.0);
-        let Acquire::Granted { fence, .. } = g.try_acquire("a", None, None) else { panic!() };
+        let Acquire::Granted { fence, .. } = g.try_acquire("a", None, None) else {
+            panic!()
+        };
         assert_eq!(g.publish("a", &fence, || 7).unwrap(), 7);
         assert!(g.publish("a", "wrong", || 7).is_err());
         g.release("a");
@@ -403,6 +506,12 @@ mod tests {
         let second = Gate::open(path, 1);
         assert_eq!(second.gate_id(), id);
         let m = second.metrics();
-        assert_eq!((m["settings"]["slots"].as_u64(), m["settings_revision"].as_i64()), (Some(4), Some(9)));
+        assert_eq!(
+            (
+                m["settings"]["slots"].as_u64(),
+                m["settings_revision"].as_i64()
+            ),
+            (Some(4), Some(9))
+        );
     }
 }

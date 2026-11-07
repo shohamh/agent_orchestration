@@ -559,6 +559,31 @@ def relay_state() -> dict[str, dict]:
         return {}
 
 
+def revoke_relay_peer(relay_id: str) -> None:
+    """Tell the loopback relay to discard queued calls for an unregistered worker."""
+    from urllib.parse import quote
+    from flowkit.relay import relay_base
+    headers = {'Content-Type': 'application/json'}
+    token = os.environ.get('FLOW_HOST_TOKEN', '')
+    if token: headers['Authorization'] = f'Bearer {token}'
+    request = urllib.request.Request(
+        relay_base().rstrip('/') + '/internal/relay/' + quote(relay_id, safe='') + '/unregister',
+        data=b'{}', headers=headers, method='DELETE')
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response: response.read()
+    except (OSError, ValueError, AttributeError) as exc:
+        log(f'could not notify relay about worker removal: {type(exc).__name__}')
+
+
+def unregister_fleet_worker(worker_id: str) -> dict | None:
+    """Remove a Fleet registration and drop any in-memory relay work for its PC."""
+    from flowkit import fleet_registry
+    removed = fleet_registry.unregister_worker(worker_id=worker_id)
+    if removed is not None and fleet_registry.relayed(removed.get('url')):
+        revoke_relay_peer(fleet_registry.relay_key(removed))
+    return removed
+
+
 def relay_online() -> dict[str, bool]:
     """Which relayed PCs have a live connector."""
     return {k: bool(v.get('online')) for k, v in relay_state().items()}
@@ -768,6 +793,12 @@ class Api(BaseHTTPRequestHandler):
             if (method, path) == ('POST', '/fleet/workers'):
                 saved = fleet_registry.save_worker(fleet_worker(self._json_body(), None), create=True)
                 return self._send(200, {'worker': saved, 'settings_sync': asyncio.run(workers.sync_limits(saved['id']))}) or True
+            worker_delete = re.fullmatch(r'/fleet/workers/([^/]+)', path)
+            if worker_delete and method == 'DELETE':
+                worker_id = unquote(worker_delete[1], errors='strict')
+                removed = unregister_fleet_worker(worker_id)
+                if removed is None: return self._send(404, {'error': f'Unknown worker {worker_id}'}) or True
+                return self._send(200, {'ok': True}) or True
             jobs = re.fullmatch(r'/fleet/workers/([^/]+)/jobs', path)
             if jobs and method == 'GET':
                 from flowkit.distributed import worker_jobs
@@ -979,10 +1010,10 @@ class Api(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r'/workers/([^/]+)', urlsplit(self.path).path)
         if match:
-            from flowkit.fleet_registry import delete_worker
             from urllib.parse import unquote
             try:
-                delete_worker(unquote(match[1], errors='strict'))
+                worker_id = unquote(match[1], errors='strict')
+                if unregister_fleet_worker(worker_id) is None: raise ValueError('Unknown worker')
                 return self._send(200, {'ok': True})
             except ValueError as exc: return self._send(400, {'error': str(exc)})
         try:

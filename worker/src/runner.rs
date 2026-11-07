@@ -10,7 +10,10 @@ pub async fn run(home: Home) -> Result<(), String> {
     let config = home.config()?;
     let name = config::name_of(&config);
     let uuid = config::relay_id(&config);
-    let server = config["server"].as_str().ok_or("worker.json has no server")?.to_string();
+    let server = config["server"]
+        .as_str()
+        .ok_or("worker.json has no server")?
+        .to_string();
     let token = home.token();
     if token.is_empty() {
         return Err("The token file is empty".into());
@@ -24,19 +27,38 @@ pub async fn run(home: Home) -> Result<(), String> {
     }
     let other = home.pid();
     if other != 0 && other != std::process::id() && crate::procutil::pid_alive(other) {
-        crate::log!("runner", "not starting: the worker is already running (pid {other})");
+        crate::log!(
+            "runner",
+            "not starting: the worker is already running (pid {other})"
+        );
         return Ok(());
     }
     std::fs::write(&pidfile, std::process::id().to_string()).map_err(|e| e.to_string())?; // `agent-worker stop` and status find the runner here
     crate::confluence::set_source(home.0.clone(), &server, &uuid, &token);
-    let app = App::new(Config { id: name.clone(), uuid: uuid.clone(), slots: config["slots"].as_u64().unwrap_or(1), token: token.clone(), root: home.file("runtime"), version: config::self_version() });
+    let app = App::new(Config {
+        id: name.clone(),
+        uuid: uuid.clone(),
+        slots: config["slots"].as_u64().unwrap_or(1),
+        token: token.clone(),
+        root: home.file("runtime"),
+        version: config::self_version(),
+    });
     service::spawn_background(app.clone());
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;
-    crate::log!("runner", "worker {name} ({uuid}) {} on 127.0.0.1:{port}, relaying through {server}", config::self_version());
-    let server_task = tokio::spawn(async move { axum::serve(listener, service::router(app)).await });
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| format!("cannot listen on 127.0.0.1:{port}: {e}"))?;
+    crate::log!(
+        "runner",
+        "worker {name} ({uuid}) {} on 127.0.0.1:{port}, relaying through {server}",
+        config::self_version()
+    );
+    let server_task =
+        tokio::spawn(async move { axum::serve(listener, service::router(app)).await });
     let connector = Connector::new(&server, &uuid, &token, port, Home(home.0.clone()));
     let connector_task = tokio::spawn(connector.run());
-    let supervisor = Arc::new(tokio::sync::Mutex::new(Supervisor::new(Home(home.0.clone()))));
+    let supervisor = Arc::new(tokio::sync::Mutex::new(Supervisor::new(Home(
+        home.0.clone(),
+    ))));
     let supervisor_task = tokio::spawn(supervise(supervisor.clone()));
 
     wait_for_stop().await;
@@ -45,7 +67,10 @@ pub async fn run(home: Home) -> Result<(), String> {
     supervisor.lock().await.stop_all().await;
     connector_task.abort();
     server_task.abort();
-    if std::fs::read_to_string(&pidfile).map(|t| t.trim() == std::process::id().to_string()).unwrap_or(false) {
+    if std::fs::read_to_string(&pidfile)
+        .map(|t| t.trim() == std::process::id().to_string())
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_file(&pidfile);
     }
     Ok(())
@@ -55,7 +80,10 @@ async fn wait_for_stop() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let (mut term, mut int) = (signal(SignalKind::terminate()).unwrap(), signal(SignalKind::interrupt()).unwrap());
+        let (mut term, mut int) = (
+            signal(SignalKind::terminate()).unwrap(),
+            signal(SignalKind::interrupt()).unwrap(),
+        );
         tokio::select! { _ = term.recv() => {}, _ = int.recv() => {} }
     }
     #[cfg(windows)]

@@ -96,6 +96,10 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             outputs[sid] = await run_step(f, sid, step_context(f, step, params, outputs), "run-1", never, sink)
         return outputs, events
 
+    async def test_ui_created_flow_program_step_quotes_input_as_an_argument(self):
+        outputs, _ = await self.run_flow(load(FLOWS_DIR / "ui-made-flow.yaml"), {"topic": "board UI test"})
+        self.assertEqual(outputs["gather"]["stdout"], "gathering board UI test")
+
     async def test_research_flow_runs_end_to_end(self):
         outputs, events = await self.run_flow(load(FLOWS_DIR / "research-flow.yaml"), {"topic": "edge caching"})
         self.assertEqual(len(outputs["fetch_sources"]["docs"]), 3)

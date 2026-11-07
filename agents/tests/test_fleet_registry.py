@@ -43,12 +43,30 @@ class FleetTests(unittest.TestCase):
         saved=yaml.safe_load(self.path.read_text())['workers'][0]
         self.assertEqual(saved['token_env'], 'SECRET_TOKEN'); self.assertEqual(saved['pools'], ['old','new'])
 
+    def test_unregistration_persists_token_digest_and_fresh_registration_clears_it(self):
+        import hashlib
+        from flowkit.fleet_registry import save_worker, unregister_worker
+        worker_uuid = '90b96c8e-0210-420c-a6b1-586d54d79a02'
+        save_worker({'id': 'pc', 'uuid': worker_uuid, 'token_env': 'SECRET_TOKEN'}, create=True)
+        removed = unregister_worker(relay_id=worker_uuid)
+        self.assertEqual(removed['id'], 'pc')
+
+        saved = yaml.safe_load(self.path.read_text(encoding='utf-8'))
+        tombstone = saved['tombstones'][worker_uuid]
+        self.assertEqual(tombstone, {'token_sha256': hashlib.sha256(b'top-secret').hexdigest()})
+        self.assertNotIn('top-secret', str(tombstone))
+        self.assertEqual(yaml.safe_load(self.path.read_text(encoding='utf-8'))['tombstones'], saved['tombstones'])
+
+        save_worker({'id': 'pc', 'uuid': worker_uuid, 'token_env': 'SECRET_TOKEN'}, create=True)
+        self.assertNotIn(worker_uuid, yaml.safe_load(self.path.read_text(encoding='utf-8')).get('tombstones', {}))
+
+
 class FleetRouteTests(unittest.TestCase):
     def setUp(self):
         import threading, flow_host
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name) / 'workers.yaml'
-        self.path.write_text('workers:\n- {id: pc.example, pool: build, url: "http://localhost:8096", token_env: SECRET_TOKEN}\n', encoding='utf-8')
+        self.path.write_text('workers:\n- {id: pc.example, uuid: 90b96c8e-0210-420c-a6b1-586d54d79a02, pool: build, url: "http://localhost:8096", token_env: SECRET_TOKEN}\n', encoding='utf-8')
         self.env = patch.dict(os.environ, {'FLOW_WORKERS_FILE': str(self.path), 'FLOW_HOST_TOKEN':'host-secret', 'SECRET_TOKEN':'top-secret'})
         self.env.start(); self.addCleanup(self.env.stop)
         self.server = flow_host.serve(None, '127.0.0.1', 0)
@@ -77,6 +95,15 @@ class FleetRouteTests(unittest.TestCase):
         before=self.path.read_bytes()
         self.assertEqual(self.call('POST','/workers',{'id':'bad','url':'https://remote.example'})[0],400)
         self.assertEqual(before,self.path.read_bytes())
+
+    def test_authenticated_fleet_delete_removes_worker(self):
+        import hashlib
+        from flowkit.fleet_registry import load_fleet
+        self.assertEqual(self.call('DELETE', '/fleet/workers/pc.example', auth=False)[0], 401)
+        self.assertEqual(self.call('DELETE', '/fleet/workers/pc.example'), (200, {'ok': True}))
+        self.assertEqual(load_fleet(), [])
+        tombstone = yaml.safe_load(self.path.read_text(encoding='utf-8'))['tombstones']['90b96c8e-0210-420c-a6b1-586d54d79a02']
+        self.assertEqual(tombstone['token_sha256'], hashlib.sha256(b'top-secret').hexdigest())
 
 class FleetConcurrencyTests(unittest.TestCase):
     def test_multiple_processes_preserve_all_updates(self):

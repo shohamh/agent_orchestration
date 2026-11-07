@@ -89,4 +89,6 @@
 @media (max-width: 700px) {
   .fg-canvas { min-height: 200px; }
   .fg-tools .secondary { padding: 6px 10px; }
+  .fg-tools button.fg-icon, .fg-tools .fg-help { width: 44px; height: 44px; }
+  .fg-tools .fg-help { margin: 0; }
 }

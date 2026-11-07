@@ -18,23 +18,29 @@ ci/build.ps1                              # Windows MSVC build -> ../dist/worker
 ci/fetch-release.sh github OWNER/REPO worker-v0.1.0   # download a release instead of building
 ```
 
-Releases: push a tag `worker-vX.Y.Z` (it must match `version` in `Cargo.toml`). GitHub Actions
-(`.github/workflows/worker-release.yml`) and GitLab CI (`.gitlab-ci.yml`) call the same
-scripts and publish `agent-worker-x86_64-unknown-linux-musl`, `agent-worker-x86_64-pc-windows-msvc.exe`
-and `SHA256SUMS`. On GitLab set `WINDOWS_RUNNER_TAG` to your Windows runner's tag.
+Releases are unsigned Linux and Windows binaries plus `SHA256SUMS`. The checksum detects transfer
+corruption; it does not identify the publisher or prevent SmartScreen/Defender reputation warnings.
+This project does not currently sign Windows releases.
 
+
+Worker commands resolve the installed home from the executable's marked install folder, then the marked
+default install. A temporary downloader uses the marked default; a custom install can use `--home <DIR>`
+or `AGENT_WORKER_HOME`, which take precedence.
 The version a worker reports is the first 16 hex characters of the SHA-256 of its program, so
 the server and a PC always agree on what "the same version" means.
 
-The worker runs what a Python execution worker runs, with nothing else to install but the
-agents themselves: program steps and cards, agent sessions over ACP (permissions, questions,
-terminals, interrupts, retries), the built-in demo agent, environment setup and files,
-repositories and Confluence page trees attached to a run. `git` is needed for repositories.
+The worker provides program steps and cards, agent sessions over ACP (permissions, questions,
+terminals, interrupts, retries), the built-in demo agent, environment setup and files, repositories,
+and Confluence page trees attached to a run. The worker binary needs no Python; `git` is needed for
+repositories.
 
-Agents: `agent-worker agents install [--registry URL]` puts the pinned npm adapters for Claude
-Code, Codex, opencode v2 and pi next to the worker (needs Node.js). `opencode` and `omp` are found
-on the PATH. `agent-worker agents status` says what this PC can run; set
-`AGENT_WORKER_ACP_<AGENT>` to a JSON list to start an agent another way.
+The Fleet installer runs `npm ci` for the pinned ACP adapters (Claude Code, Codex, opencode v2 and
+pi) into the worker's `adapters/` directory. Node.js and npm must be available on the PC before
+install; `npm_config_registry` can point to an offline mirror such as `http://<server>:4873/`. The
+mirror must already cache the adapter dependencies. For an existing worker,
+`agent-worker agents install [--registry URL]` installs or refreshes the adapters;
+`agent-worker agents status` shows what can run. `AGENT_WORKER_ACP_<AGENT>` can override an adapter
+with a JSON command list.
 Confluence pages go through the pinned `confluence-markdown-exporter`, the same code a Python worker
 runs, with `CONFLUENCE_TOKEN` and `CONFLUENCE_EMAIL` when set. The PC needs no Python: the first run
 that needs it fetches a runtime from the server (a relocatable CPython and the pinned exporter)

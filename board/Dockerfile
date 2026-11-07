@@ -21,4 +21,4 @@ COPY *.py ./
 COPY static ./static
 
 EXPOSE 8090
-CMD ["python", "-u", "server.py"]
+CMD ["python", "-u", "auto_reload.py", "--", "python", "-u", "server.py"]

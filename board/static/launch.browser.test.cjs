@@ -26,7 +26,7 @@ let workers = fake.fleet();
 let schedules = [];
 const records = {};   // run id -> {step or 'card': execution record}
 const calls = [];
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'admin.js', 'admin.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;

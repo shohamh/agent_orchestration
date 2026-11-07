@@ -438,6 +438,9 @@
     const inspector = h('section', { class: 'fb-inspector', 'aria-label': 'Properties' });
     const main = h('section', { class: 'fb-main', 'aria-label': 'Editor' }, tabList, banner, graphView, stepsView, yamlView, problems);
     const askDialog = h('dialog', { class: 'fb-ask', 'aria-labelledby': 'fb-ask-title' });
+    askDialog.addEventListener('click', (event) => {
+      if (event.target === askDialog) askDialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    });
     container.classList.add('fb');
     container.setAttribute('aria-labelledby', 'fb-title');
     container.replaceChildren(top, h('div', { class: 'fb-body' }, nav, main, inspector), askDialog);

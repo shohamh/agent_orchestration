@@ -65,7 +65,7 @@
   .status.error { color: var(--danger); }
   #status { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: min(52vw, 640px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #status[data-feed]::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-  #status[data-feed="live"]::before { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+  #status[data-feed="live"]::before { width: 13px; height: 13px; background: radial-gradient(circle, var(--ok) 0 3.5px, color-mix(in srgb, var(--ok) 20%, transparent) 3.5px 6.5px); }
 
   /* Toolbar */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; flex: 0 1 620px; min-width: 0; }
@@ -291,7 +291,6 @@
     .board-picker > label { display: none; }
     .board-picker select { flex: 1 1 auto; min-width: 0; }
     button.quiet { padding: 6px 8px; }
-    button.quiet svg { display: none; }
     .filters { order: 4; }
     #needs-you { order: 5; }
     #status { order: 6; margin-left: auto; }
@@ -310,6 +309,7 @@
 <link rel="stylesheet" href="/static/flow-graph.css">
 <link rel="stylesheet" href="/static/flow-builder.css">
 <link rel="stylesheet" href="/static/fleet.css">
+<link rel="stylesheet" href="/static/admin.css">
 <link rel="stylesheet" href="/static/new-card.css">
 </head>
 <body>
@@ -332,6 +332,9 @@
     <button class="quiet" id="fleet-btn" type="button" title="Execution PCs: registration, capabilities, live CPU/RAM and limits">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2" width="13" height="9" rx="1.2"/><path d="M5.5 14h5M8 11v3"/></svg>
       Fleet</button>
+    <button class="quiet" id="admin-btn" type="button" title="Configure workflow engine URLs and check their status">
+      <svg width="15" height="15" viewBox="-1 -1 18 18" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M6.7 1.2h2.6l.35 1.6c.38.1.74.25 1.08.45l1.52-.7 1.84 1.84-.7 1.52c.2.34.35.7.45 1.08l1.6.35v2.6l-1.6.35c-.1.38-.25.74-.45 1.08l.7 1.52-1.84 1.84-1.52-.7c-.34.2-.7.35-1.08.45l-.35 1.6H6.7l-.35-1.6c-.38-.1-.74-.25-1.08-.45l-1.52.7-1.84-1.84.7-1.52c-.2-.34-.35-.7-.45-1.08l-1.6-.35v-2.6l1.6-.35c.1-.38.25-.74.45-1.08l-.7-1.52 1.84-1.84 1.52.7c.34-.2.7-.35 1.08-.45z"/><circle cx="8" cy="8" r="2.1"/></svg>
+      Admin</button>
     <button class="primary" id="new-card" type="button">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 1.5v9M1.5 6h9"/></svg>
       New card</button>
@@ -408,6 +411,7 @@
 <dialog id="flows-dialog" class="fb-dialog"></dialog>
 <!-- The fleet tab (fleet.js): registered execution PCs and their settings. -->
 <dialog id="fleet-dialog" class="fl-dialog" aria-labelledby="fl-title"></dialog>
+<dialog id="admin-dialog" class="ad-dialog" aria-labelledby="ad-title"></dialog>
 
 <script src="/static/overlays.js"></script>
 <script src="/static/chat.js"></script>
@@ -415,6 +419,7 @@
 <script src="/static/flow-graph.js"></script>
 <script src="/static/flow-builder.js"></script>
 <script src="/static/fleet.js"></script>
+<script src="/static/admin.js"></script>
 <script src="/static/new-card.js"></script>
 <script>
   // Size the drawer to the part of the screen the on-screen keyboard leaves visible. Android
@@ -886,7 +891,7 @@ function queuePosition(card) {
 }
 
 // What a card runs, with the same icons as steps in the graph: a flow, an agent, or a program.
-const cardKind = (card) => (card.flow ? "flow" : card.agent || card.task === "agent-session" || card.task === "steerable-agent" ? "agent" : "program");
+const cardKind = (card) => (card.flow || card.task === "research-report" ? "flow" : card.agent || card.task === "agent-session" || card.task === "steerable-agent" ? "agent" : "program");
 const KIND_WORDS = { flow: "Flow", agent: "Agent", program: "Program" };
 function kindIcon(card) {
   const kind = cardKind(card);
@@ -1748,8 +1753,16 @@ flowsDialog.addEventListener("close", () => { flowLayouts.clear(); runGraphShape
 $("flows-btn").addEventListener("click", () => { flowsDialog.showModal(); pushOverlay("flows", onFlowsBack); flowBuilder.open(); });
 // Escape asks before discarding unsaved edits instead of closing straight away.
 flowsDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeFlows(); });
+function closeOnBackdrop(dialog, close) {
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) close();
+  });
+}
+closeOnBackdrop(flowsDialog, () => closeFlows());
+closeOnBackdrop($("new-dialog"), () => { $("new-dialog").close(); dropOverlay("dialog"); });
 // ---------------------------------------------------------------- Fleet
 const fleetDialog = $("fleet-dialog");
+closeOnBackdrop(fleetDialog, () => closeFleet());
 const fleet = Fleet.mount(fleetDialog, { onClose: () => closeFleet(), onOpenJob: (job) => openJob(job) });
 async function closeFleet() { fleet.stop(); if (fleetDialog.open) { fleetDialog.close(); await dropOverlay("fleet"); } }
 // Opens over the flow editor when a step asks to see its workers; closing returns to the editor.
@@ -1771,6 +1784,23 @@ async function openJob(job) {
 $("fleet-btn").addEventListener("click", () => openFleet());
 // Escape closes an open form first, then the fleet tab.
 fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
+// Admin changes only engine URLs; environment-provided credentials stay server-side.
+const adminDialog = $("admin-dialog");
+const admin = Admin.mount(adminDialog, { onClose: closeAdmin });
+function closeAdmin() {
+  admin.stop();
+  if (adminDialog.open) { adminDialog.close(); return dropOverlay("admin"); }
+  return Promise.resolve();
+}
+function openAdmin() {
+  adminDialog.showModal();
+  pushOverlay("admin", () => { admin.stop(); adminDialog.close(); });
+  admin.open();
+}
+$("admin-btn").addEventListener("click", openAdmin);
+adminDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeAdmin(); });
+closeOnBackdrop(adminDialog, () => closeAdmin());
+
 
 $("d-close").addEventListener("click", closeDrawer);
 // A left click outside the drawer closes it. Cards stay out of this, so clicking another card switches

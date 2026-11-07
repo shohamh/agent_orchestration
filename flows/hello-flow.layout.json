@@ -1,25 +1,4 @@
 {
  "version": 1,
- "positions": {
-  "greet": {
-   "x": 125,
-   "y": -74
-  },
-  "reply": {
-   "x": 95,
-   "y": 232
-  },
-  "program_1": {
-   "x": -31,
-   "y": 112
-  },
-  "program_2": {
-   "x": 301,
-   "y": 67
-  },
-  "program_3": {
-   "x": 683,
-   "y": 53
-  }
- }
+ "positions": {}
 }

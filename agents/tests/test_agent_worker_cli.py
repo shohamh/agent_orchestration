@@ -63,24 +63,25 @@ class Harness(FleetFixture):
     def record(self, name='pc-x', os_name=TARGET, autostart='logon', auto_restart=True):
         return install.create({'id': name, 'os': os_name, 'autostart': autostart, 'auto_restart': auto_restart, 'engines': ['hatchet'], 'pool': 'build', 'tags': ['t1'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 70, 'server': 'http://192.168.1.10:8090'})
 
-    async def run_cli(self, home, *args, timeout=90):
+    async def run_cli(self, home, *args, timeout=180, downloaded=False):
         """Run the worker program; returns (exit code, output)."""
-        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1', 'AGENT_WORKER_NO_ELEVATE': '1'}  # a test must never raise a UAC prompt
+        env = {**os.environ, 'AGENT_WORKER_TEST_FAST': '1', 'AGENT_WORKER_NO_ELEVATE': '1',
+               'LOCALAPPDATA': str(self.root/'localappdata')}  # keep the worker's default-home probe inside this test's temp root
         env.pop('AGENT_WORKER_SERVICE', None)
         if self.SERVICE: env['AGENT_WORKER_SERVICE'] = self.SERVICE
-        exe = Path(home)/f'agent-worker{EXE}'  # once installed, the installed copy is the command (it is on the PATH on a real PC)
-        done = await asyncio.to_thread(subprocess.run, [str(exe) if exe.exists() else find_binary(), '--home', str(home), *args], capture_output=True, text=True, timeout=timeout, env=env, cwd=self.root)
+        installed = Path(home)/f'agent-worker{EXE}'
+        executable = find_binary() if downloaded or not installed.exists() else str(installed)
+        done = await asyncio.to_thread(subprocess.run, [executable, '--home', str(home), *args], capture_output=True, text=True, timeout=timeout, env=env, cwd=self.root)
         return done.returncode, (done.stdout + done.stderr)
 
     async def install_pc(self, record, home=None, server=None):
         home = home or self.new_home()
-        code, out = await self.run_cli(home, 'install', record['code'], '--server', server or self.server, '--port', str(free_port()))
+        code, out = await self.run_cli(home, 'install', record['code'], '--server', server or self.server, '--port', str(free_port()), downloaded=True)
         self.last_install = (record, home)
         if code != 0:
             peers = {k: (v.online(), v.holding, v.last_poll) for k, v in self.relay.app['relay'].peers.items()}
             out += f" [relay peers {peers}; this install {record['code']}; installs {sorted(p.name for p in install.state_dir().glob('*.json'))}]"
         return home, code, out
-
     async def status(self, home):
         code, out = await self.run_cli(home, 'status', '--json')
         return code, json.loads(out) if out.strip().startswith('{') else out
@@ -148,28 +149,132 @@ class Harness(FleetFixture):
 
 @unittest.skipUnless(find_binary(), 'build the worker first: worker/ci/build.sh or build.ps1')
 class AgentWorkerCliTests(Harness):
-    async def test_install_by_uuid_runs_the_worker_and_the_second_install_is_refused(self):
-        record = self.record()
-        home, code, out = await self.install_pc(record)
+    async def test_install_by_uuid_replaces_the_local_worker_without_unregistering_its_fleet_identity(self):
+        old = self.record()
+        home, code, out = await self.install_pc(old)
         self.addAsyncCleanup(self.run_cli, home, 'stop')
         self.assertEqual(code, 0, out)
-        await self.connected(record['code'])
-        await until(lambda: self.is_connected(home), timeout=30, message='status shows connected')
-        state = await self.status(home)
-        self.assertEqual(state[0], 0, state)
-        self.assertEqual(state[1]['name'], 'pc-x'); self.assertEqual(state[1]['uuid'], record['code'])
-        self.assertTrue(state[1]['running']); self.assertTrue(state[1]['connected'])
-        # the settings in the registry are the ones the form saved, and the worker reports them
+        await self.connected(old['code'])
+        old_token = (home/'token').read_text()
+        old_pid = (await self.status(home))[1]['pid']
+        adapter_data = home/'adapters'/'local-install-data.txt'
+        adapter_data.parent.mkdir(parents=True, exist_ok=True)
+        adapter_data.write_text('keep me')
+
+        new = self.record('pc-y')
+        _, code, out = await self.install_pc(new, home=home)
+        self.assertEqual(code, 0, out)
+        await self.connected(new['code'])
+        self.assertTrue(adapter_data.is_file())
+        self.assertEqual(adapter_data.read_text(), 'keep me')
+        self.assertNotEqual((home/'token').read_text(), old_token)
+        config = json.loads((home/'worker.json').read_text())
+        self.assertEqual((config['name'], config['uuid']), ('pc-y', new['code']))
+        self.assertEqual(json.loads((home/'installed.json').read_text())['uuid'], new['code'])
+        self.assertNotEqual((await self.status(home))[1]['pid'], old_pid)
+
         from flowkit.fleet_registry import load_fleet
-        entry = next(w for w in load_fleet() if w['id'] == 'pc-x')
-        self.assertEqual((entry['uuid'], entry['slots'], entry['cpu_limit'], entry['ram_limit']), (record['code'], 2, 80, 70))
-        # the same command again on this PC fails and says why
-        again = self.record('pc-y')
-        _, code, out = await self.install_pc(again, home=home)
-        self.assertNotEqual(code, 0); self.assertIn('already installed', out)
-        # the same command on another PC (another home) is refused by the server and names the first PC
-        _, code, out = await self.install_pc(record, home=self.new_home())
-        self.assertNotEqual(code, 0); self.assertRegex(out, r'already|used')
+        self.assertEqual({worker['id'] for worker in load_fleet()}, {'pc-x', 'pc-y'}, 'replacing locally must not unregister the active Fleet identity')
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f'{self.server}/relay/{old["code"]}/next?wait=0', headers={'Authorization': f'Bearer {old_token}'}) as response:
+                self.assertEqual(response.status, 204, 'the old active Fleet registration remains untouched')
+        _, code, out = await self.install_pc(old, home=self.new_home())
+        self.assertNotEqual(code, 0)
+        self.assertRegex(out.lower(), r'already|used')
+
+    async def test_replacement_after_unregistration_keeps_the_old_uuid_revoked(self):
+        old = self.record('pc-old')
+        home, code, out = await self.install_pc(old)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        await self.connected(old['code'])
+        old_token = (home/'token').read_text()
+        async with aiohttp.ClientSession() as http:
+            async with http.delete(f'{self.server}/relay/{old["code"]}/registration', headers={'Authorization': f'Bearer {old_token}'}) as response:
+                self.assertEqual((response.status, await response.json()), (200, {'removed': True}))
+
+        retained = home/'adapters'/'local-data.txt'
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        retained.write_text('adapter state')
+        new = self.record(old['id'])
+        _, code, out = await self.install_pc(new, home=home)
+        self.assertEqual(code, 0, out)
+        await self.connected(new['code'])
+        config = json.loads((home/'worker.json').read_text())
+        new_token = (home/'token').read_text()
+        self.assertEqual((config['name'], config['uuid']), (old['id'], new['code']))
+        self.assertNotEqual(new_token, old_token)
+        self.assertEqual(retained.read_text(), 'adapter state')
+
+        async with aiohttp.ClientSession() as http:
+            async with http.get(f'{self.server}/relay/{old["code"]}/next?wait=0', headers={'Authorization': f'Bearer {old_token}'}) as response:
+                self.assertEqual(response.status, 410, 'the old token stays revoked after the local replacement')
+            async with http.get(f'{self.server}/relay/{new["code"]}/next?wait=0', headers={'Authorization': f'Bearer {new_token}'}) as response:
+                self.assertEqual(response.status, 204)
+
+    async def test_a_failed_new_link_claim_leaves_the_existing_worker_untouched(self):
+        old = self.record()
+        home, code, out = await self.install_pc(old)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        await self.connected(old['code'])
+        names = ('worker.json', 'token', 'installed.json', 'claim')
+        before = {name: (home/name).read_bytes() for name in names}
+        adapter_data = home/'adapters'/'local-data.txt'
+        adapter_data.parent.mkdir(parents=True, exist_ok=True)
+        adapter_data.write_text('keep me')
+
+        _, code, out = await self.install_pc({'code': '00000000-0000-4000-8000-000000000000'}, home=home)
+        self.assertNotEqual(code, 0)
+        self.assertRegex(out.lower(), r'unknown|expired|already used')
+        self.assertEqual({name: (home/name).read_bytes() for name in names}, before)
+        self.assertEqual(adapter_data.read_text(), 'keep me')
+        self.assertEqual((await self.status(home))[1]['uuid'], old['code'])
+        await self.connected(old['code'])
+
+    async def test_a_fleet_name_conflict_is_rejected_before_local_replacement(self):
+        old = self.record()
+        home, code, out = await self.install_pc(old)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        await self.connected(old['code'])
+        names = ('worker.json', 'token', 'installed.json', 'claim')
+        before = {name: (home/name).read_bytes() for name in names}
+        conflict = self.record('pc-y')
+        conflict['id'] = old['id']
+        install.write_record(conflict)
+
+        _, code, out = await self.install_pc(conflict, home=home)
+        self.assertNotEqual(code, 0)
+        self.assertIn('Fleet name pc-x is already registered', out)
+        self.assertEqual({name: (home/name).read_bytes() for name in names}, before)
+        self.assertEqual((await self.status(home))[1]['uuid'], old['code'])
+        await self.connected(old['code'])
+
+    async def test_registration_refusal_restores_the_previous_worker_and_local_files(self):
+        old = self.record()
+        home, code, out = await self.install_pc(old)
+        self.addAsyncCleanup(self.run_cli, home, 'stop')
+        self.assertEqual(code, 0, out)
+        await self.connected(old['code'])
+        before = {name: (home/name).read_bytes() for name in ('worker.json', 'token', 'installed.json')}
+        old_pid = (await self.status(home))[1]['pid']
+        adapter_data = home/'adapters'/'local-data.txt'
+        adapter_data.parent.mkdir(parents=True, exist_ok=True)
+        adapter_data.write_text('keep me')
+        conflict = self.record('pc-y')
+
+        with patch.object(install, 'register', side_effect=install.InstallError('simulated registration refusal')):
+            _, code, out = await self.install_pc(conflict, home=home)
+        self.assertNotEqual(code, 0)
+        self.assertIn('server refused the registration', out.lower())
+        self.assertEqual({name: (home/name).read_bytes() for name in before}, before)
+        self.assertEqual(adapter_data.read_text(), 'keep me')
+        state = (await self.status(home))[1]
+        self.assertEqual(state['uuid'], old['code'])
+        self.assertTrue(state['running'], state)
+        self.assertNotEqual(state['pid'], old_pid)
+        await self.connected(old['code'])
 
     async def test_install_explains_a_server_it_cannot_reach_and_a_link_the_server_does_not_know(self):
         record = self.record()

@@ -1,11 +1,11 @@
 """Coordinator-owned worker fleet registry. Connection secrets stay in local files."""
+import hashlib
 import os
 import re
 import tempfile
 import time
 import threading
 import uuid
-import time
 from contextlib import contextmanager
 from dotenv import dotenv_values
 from pathlib import Path
@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 _LOCK = threading.RLock()
 ENGINES = ('hatchet', 'prefect', 'trigger')  # every engine reaches a PC through its execution service
 TOKEN_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,99}$')
+
+REVOCATION_MESSAGE = ('This worker has been unregistered from the fleet. Run agent-worker uninstall, '
+                      'then install again with a new Fleet install command.')
 
 
 class AlreadyRegistered(ValueError):
@@ -107,7 +110,7 @@ def _normalize(item, stored=False):
     return w
 
 def _load():
-    """The registry document: normalized workers plus the tag catalog (tags offered before use)."""
+    """The registry document: workers, tag catalog, and revoked relay credentials."""
     path = _path()
     data = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {'workers': []}
     if not isinstance(data, dict) or data.get('version', 1) not in (1, 2) or not isinstance(data.get('workers'), list): raise ValueError('Invalid worker registry')
@@ -115,7 +118,21 @@ def _load():
     if len({w['id'] for w in workers}) != len(workers): raise ValueError('Worker ids must be unique')
     tags = data.get('tags', [])
     if not isinstance(tags, list) or len(tags) > 1000 or any(not isinstance(t, str) or not t or len(t) > 100 for t in tags): raise ValueError('Invalid tag catalog')
-    return {'workers': workers, 'tags': list(dict.fromkeys(tags))}
+    tombstones = data.get('tombstones', {})
+    if not isinstance(tombstones, dict): raise ValueError('Invalid worker tombstones')
+    normalized = {}
+    for key, entry in tombstones.items():
+        try:
+            canonical = str(uuid.UUID(str(key)))
+        except (ValueError, AttributeError):
+            raise ValueError('Invalid worker tombstone uuid') from None
+        if canonical != key or not isinstance(entry, dict) or set(entry) != {'token_sha256'}:
+            raise ValueError('Invalid worker tombstone')
+        digest = entry['token_sha256']
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise ValueError('Invalid worker tombstone')
+        normalized[canonical] = {'token_sha256': digest}
+    return {'workers': workers, 'tags': list(dict.fromkeys(tags)), 'tombstones': normalized}
 
 def _read():
     return _load()['workers']
@@ -148,16 +165,18 @@ def add_tag(name):
     label(name)
     with _locked():
         doc = _load()
-        if name not in doc['tags']: _write(doc['workers'], doc['tags'] + [name])
+        if name not in doc['tags']: _write(doc['workers'], doc['tags'] + [name], doc['tombstones'])
     return tag_catalog()
 
-def _write(workers, tags=()):
+def _write(workers, tags=(), tombstones=None):
     path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
             stored = [{k: v for k, v in w.items() if not k.startswith('_')} for w in workers]
-            yaml.safe_dump({'version': 2, 'workers': stored, **({'tags': list(tags)} if tags else {})}, f, sort_keys=False)
+            document = {'version': 2, 'workers': stored, **({'tags': list(tags)} if tags else {})}
+            if tombstones: document['tombstones'] = tombstones
+            yaml.safe_dump(document, f, sort_keys=False)
             f.flush(); os.fsync(f.fileno())
         # Windows readers may briefly hold the old file without delete sharing.
         for attempt in range(100):
@@ -176,7 +195,7 @@ def migrate_legacy_registry():
         if path.exists():
             data = yaml.safe_load(path.read_text(encoding='utf-8'))
             if data.get('version') == 2: return {'migrated': False, 'workers': len(workers)}
-        _write(workers, doc['tags'])
+        _write(workers, doc['tags'], doc['tombstones'])
         return {'migrated': True, 'workers': len(workers)}
 
 def save_worker(worker, create=False):
@@ -202,11 +221,30 @@ def save_worker(worker, create=False):
                 raise ValueError(f"A network endpoint needs its token on the coordinator: set {updated.get('token_env') or 'a token_env variable'} "
                                  'in workers.local.env (or the environment) first, or save without an endpoint to wait for the connection')
         workers = [w for w in workers if w['id'] != updated['id']] + [updated]
-        _write(workers, doc['tags'])
+        tombstones = dict(doc['tombstones'])
+        tombstones.pop(updated.get('uuid'), None)
+        _write(workers, doc['tags'], tombstones)
         return _public(updated)
 
-def delete_worker(worker_id):
+def unregister_worker(worker_id=None, relay_id=None):
+    """Remove a worker, revoke its relay token, and release its consumed install name."""
+    if (worker_id is None) == (relay_id is None):
+        raise ValueError('Specify exactly one worker id or relay id')
     with _locked():
-        doc = _load(); workers = doc['workers']; remaining = [w for w in workers if w['id'] != worker_id]
-        if len(workers) == len(remaining): raise ValueError('Unknown worker')
-        _write(remaining, doc['tags'])
+        doc = _load()
+        workers = doc['workers']
+        worker = next((w for w in workers if (w['id'] == worker_id if worker_id is not None else relay_key(w) == relay_id)), None)
+        if worker is None: return None
+        remaining = [w for w in workers if w['id'] != worker['id']]
+        tombstones = dict(doc['tombstones'])
+        if worker.get('uuid'):
+            values = {**dotenv_values(env_path()), **os.environ}
+            token = values.get(worker.get('token_env', ''))
+            if isinstance(token, str) and token:
+                tombstones[worker['uuid']] = {
+                    'token_sha256': hashlib.sha256(token.encode('utf-8')).hexdigest(),
+                }
+        _write(remaining, doc['tags'], tombstones)
+    from .install import mark_unregistered
+    mark_unregistered(worker)
+    return worker

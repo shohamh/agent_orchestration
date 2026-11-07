@@ -30,7 +30,12 @@ static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// An installed worker fetches the runtime from its server, with its own token.
 pub fn set_source(home: PathBuf, server: &str, id: &str, token: &str) {
-    let _ = SOURCE.set(Source { home, server: server.trim_end_matches('/').to_string(), id: id.to_string(), token: token.to_string() });
+    let _ = SOURCE.set(Source {
+        home,
+        server: server.trim_end_matches('/').to_string(),
+        id: id.to_string(),
+        token: token.to_string(),
+    });
 }
 
 /// Where a `serve` worker without a server unpacks a runtime archive.
@@ -39,13 +44,26 @@ pub fn set_cache(path: PathBuf) {
 }
 
 fn python(path: &Path) -> PathBuf {
-    if cfg!(windows) { path.join("python").join("python.exe") } else { path.join("python").join("bin").join("python3") }
+    if cfg!(windows) {
+        path.join("python").join("python.exe")
+    } else {
+        path.join("python").join("bin").join("python3")
+    }
 }
 
 fn is_runtime(path: &Path) -> bool {
-    python(path).is_file() && path.join("packages").is_dir()
-        && path.join("agents").join("flowkit").join("confluence_runner.py").is_file()
-        && path.join("agents").join("flowkit").join("confluence_export.py").is_file()
+    python(path).is_file()
+        && path.join("packages").is_dir()
+        && path
+            .join("agents")
+            .join("flowkit")
+            .join("confluence_runner.py")
+            .is_file()
+        && path
+            .join("agents")
+            .join("flowkit")
+            .join("confluence_export.py")
+            .is_file()
 }
 
 /// The system's tar: every supported Windows and Linux has one. On Windows a tar earlier on the PATH (Git's) can't read
@@ -74,17 +92,32 @@ impl Drop for TemporaryPath {
 
 /// Unpack into a new folder, then move it into place: a partial runtime can never be mistaken for a complete one.
 async fn unpack(archive: &Path, destination: &Path) -> Result<(), String> {
-    let parent = destination.parent().ok_or("A runtime needs a parent folder")?;
+    let parent = destination
+        .parent()
+        .ok_or("A runtime needs a parent folder")?;
     let partial = TemporaryPath(parent.join(format!(".unpacking-{}", crate::util::random_hex(6))));
     std::fs::create_dir_all(&partial.0).map_err(|e| e.to_string())?;
     let mut command = Command::new(tar());
-    command.arg("-xzf").arg(archive).arg("-C").arg(&partial.0).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    command
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&partial.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     prepare_child(&mut command);
-    let child = command.spawn().map_err(|e| format!("Could not run tar to unpack the Confluence runtime: {e}"))?;
+    let child = command
+        .spawn()
+        .map_err(|e| format!("Could not run tar to unpack the Confluence runtime: {e}"))?;
     let _guard = KillOnDrop(Tree::adopt(&child));
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
     if !output.status.success() {
-        Err(format!("Could not unpack the Confluence runtime: {}", String::from_utf8_lossy(&output.stderr).trim()))
+        Err(format!(
+            "Could not unpack the Confluence runtime: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     } else if !is_runtime(&partial.0) {
         Err("The Confluence runtime archive is incomplete".to_string())
     } else {
@@ -97,17 +130,45 @@ async fn from_server(source: &Source) -> Result<PathBuf, String> {
     let folder = source.home.join("confluence-runtime");
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let current = folder.join("current");
-    let installed = std::fs::read_to_string(&current).ok().map(|v| v.trim().to_string()).filter(|v| is_runtime(&folder.join(v)));
-    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(DOWNLOAD_TIMEOUT).build().map_err(|e| e.to_string())?;
-    let request = client.get(format!("{}/relay/{}/update/confluence-runtime", source.server, source.id)).bearer_auth(&source.token)
-        .query(&[("os", config::os_name()), ("arch", "x86_64"), ("have", installed.as_deref().unwrap_or(""))]);
+    let installed = std::fs::read_to_string(&current)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| is_runtime(&folder.join(v)));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(DOWNLOAD_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let request = client
+        .get(format!(
+            "{}/relay/{}/update/confluence-runtime",
+            source.server, source.id
+        ))
+        .bearer_auth(&source.token)
+        .query(&[
+            ("os", config::os_name()),
+            ("arch", "x86_64"),
+            ("have", installed.as_deref().unwrap_or("")),
+        ]);
     let mut response = match request.send().await {
         Ok(response) => response,
-        Err(_) => return installed.map(|v| folder.join(v)).ok_or_else(|| format!("Could not reach {} to fetch the Confluence runtime", source.server)),
+        Err(_) => {
+            return installed.map(|v| folder.join(v)).ok_or_else(|| {
+                format!(
+                    "Could not reach {} to fetch the Confluence runtime",
+                    source.server
+                )
+            })
+        }
     };
     let status = response.status().as_u16();
     if status == 304 {
-        return installed.map(|version| folder.join(version)).ok_or_else(|| "The server returned an unchanged Confluence runtime, but none is installed".to_string());
+        return installed
+            .map(|version| folder.join(version))
+            .ok_or_else(|| {
+                "The server returned an unchanged Confluence runtime, but none is installed"
+                    .to_string()
+            });
     }
     if status != 200 {
         if let Some(version) = installed {
@@ -119,11 +180,23 @@ async fn from_server(source: &Source) -> Result<PathBuf, String> {
             format!("The server refused the Confluence runtime (HTTP {status})")
         });
     }
-    let version = response.headers().get("x-runtime-version").and_then(|v| v.to_str().ok()).map(String::from).ok_or("The server did not say which runtime this is")?;
-    let archive = TemporaryPath(folder.join(format!(".download-{}.tar.gz", crate::util::random_hex(6))));
-    let mut output = tokio::fs::File::create(&archive.0).await.map_err(|e| e.to_string())?;
+    let version = response
+        .headers()
+        .get("x-runtime-version")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .ok_or("The server did not say which runtime this is")?;
+    let archive =
+        TemporaryPath(folder.join(format!(".download-{}.tar.gz", crate::util::random_hex(6))));
+    let mut output = tokio::fs::File::create(&archive.0)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| "The Confluence runtime download was interrupted".to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "The Confluence runtime download was interrupted".to_string())?
+    {
         hash.update(&chunk);
         output.write_all(&chunk).await.map_err(|e| e.to_string())?;
     }
@@ -148,9 +221,14 @@ async fn from_override(path: PathBuf) -> Result<PathBuf, String> {
         return Ok(path);
     }
     if !path.is_file() {
-        return Err(format!("AGENT_WORKER_CONFLUENCE_RUNTIME is neither a runtime folder nor an archive: {}", path.display()));
+        return Err(format!(
+            "AGENT_WORKER_CONFLUENCE_RUNTIME is neither a runtime folder nor an archive: {}",
+            path.display()
+        ));
     }
-    let mut archive = tokio::fs::File::open(&path).await.map_err(|e| e.to_string())?;
+    let mut archive = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 8192];
     loop {
@@ -161,7 +239,11 @@ async fn from_override(path: PathBuf) -> Result<PathBuf, String> {
         hash.update(&buffer[..count]);
     }
     let version = hex::encode(&hash.finalize()[..8]);
-    let cache = CACHE.get().cloned().unwrap_or_else(std::env::temp_dir).join(format!("runtime-{version}"));
+    let cache = CACHE
+        .get()
+        .cloned()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("runtime-{version}"));
     if !is_runtime(&cache) {
         let _ = std::fs::remove_dir_all(&cache);
         std::fs::create_dir_all(cache.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -195,13 +277,26 @@ impl Drop for KillOnDrop {
 async fn run(mode: &str, item: &Value, target: &Path) -> Result<(), String> {
     let root = std::path::absolute(runtime().await?).map_err(|e| e.to_string())?;
     let python = python(&root);
-    let search = std::env::join_paths([root.join("agents"), root.join("packages")]).map_err(|e| e.to_string())?;
+    let search = std::env::join_paths([root.join("agents"), root.join("packages")])
+        .map_err(|e| e.to_string())?;
     let mut command = Command::new(&python);
     // Nothing of a Python this PC may also have can leak in. Credentials stay in the environment, named by the source.
-    command.args(["-u", "-m", "flowkit.confluence_runner"]).current_dir(root.join("agents")).env_remove("PYTHONHOME").env("PYTHONPATH", search).env("PYTHONNOUSERSITE", "1")
-        .env("PYTHONUTF8", "1").env("FLOW_MANAGED_JOB", "1").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
+    command
+        .args(["-u", "-m", "flowkit.confluence_runner"])
+        .current_dir(root.join("agents"))
+        .env_remove("PYTHONHOME")
+        .env("PYTHONPATH", search)
+        .env("PYTHONNOUSERSITE", "1")
+        .env("PYTHONUTF8", "1")
+        .env("FLOW_MANAGED_JOB", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     prepare_child(&mut command);
-    let mut child = command.spawn().map_err(|e| format!("Could not start the Confluence runtime: {e}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not start the Confluence runtime: {e}"))?;
     let _guard = KillOnDrop(Tree::adopt(&child));
     let absolute = std::path::absolute(target).map_err(|e| e.to_string())?;
     #[derive(serde::Serialize)]
@@ -210,19 +305,38 @@ async fn run(mode: &str, item: &Value, target: &Path) -> Result<(), String> {
         item: &'a Value,
         target: std::borrow::Cow<'a, str>,
     }
-    let request = serde_json::to_vec(&Request { mode, item, target: absolute.to_string_lossy() }).map_err(|e| e.to_string())?;
-    let mut stdin = child.stdin.take().ok_or("The Confluence runtime has no input")?;
+    let request = serde_json::to_vec(&Request {
+        mode,
+        item,
+        target: absolute.to_string_lossy(),
+    })
+    .map_err(|e| e.to_string())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or("The Confluence runtime has no input")?;
     stdin.write_all(&request).await.map_err(|e| e.to_string())?;
     drop(stdin);
-    let output = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output()).await.map_err(|_| "The Confluence export did not finish within 15 minutes".to_string())?.map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| "The Confluence export did not finish within 15 minutes".to_string())?
+        .map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(());
     }
     let error = String::from_utf8_lossy(&output.stderr);
     let error = error.trim();
-    let start = error.char_indices().rev().nth(3999).map_or(0, |(offset, _)| offset);
+    let start = error
+        .char_indices()
+        .rev()
+        .nth(3999)
+        .map_or(0, |(offset, _)| offset);
     let tail = &error[start..];
-    Err(if tail.is_empty() { format!("The Confluence export failed ({})", output.status) } else { tail.to_owned() })
+    Err(if tail.is_empty() {
+        format!("The Confluence export failed ({})", output.status)
+    } else {
+        tail.to_owned()
+    })
 }
 
 /// Import a tree into `target`. An unsuccessful refresh cannot replace a previously complete import.

@@ -3,8 +3,8 @@ mod acp;
 mod artifacts;
 mod capabilities;
 mod components;
-mod confluence;
 mod config;
+mod confluence;
 mod connector;
 mod ctl;
 mod environment;
@@ -28,9 +28,13 @@ use config::Home;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "agent-worker", version, about = "Manage this PC's execution worker (installed by the Fleet tab's one-line command)")]
+#[command(
+    name = "agent-worker",
+    version,
+    about = "Manage this PC's execution worker (installed by the Fleet tab's one-line command)"
+)]
 struct Cli {
-    /// The install folder (default: the folder this program is in)
+    /// The install folder (default: this program's install, then the marked default install)
     #[arg(long, global = true, hide = true)]
     home: Option<PathBuf>,
     #[command(subcommand)]
@@ -123,11 +127,21 @@ enum Cmd {
     Install {
         /// The install id from the Fleet tab's command (a uuid); everything else comes from the server
         uuid: String,
-        #[arg(long, help = "The server this PC reaches (the address in the Fleet tab's command)")]
+        #[arg(
+            long,
+            help = "The server this PC reaches (the address in the Fleet tab's command)"
+        )]
         server: String,
-        #[arg(long, default_value_t = 8096, help = "The worker's local port (it listens on 127.0.0.1 only)")]
+        #[arg(
+            long,
+            default_value_t = 8096,
+            help = "The worker's local port (it listens on 127.0.0.1 only)"
+        )]
         port: u16,
-        #[arg(long, help = "Install the files but no startup entry, and do not register")]
+        #[arg(
+            long,
+            help = "Install the files but no startup entry, and do not register"
+        )]
         no_service: bool,
     },
     /// Run only the execution service (tests and PCs the coordinator reaches directly)
@@ -168,12 +182,41 @@ fn finish(result: Result<(), String>) -> ! {
     }
 }
 
+fn command_home(
+    explicit: Option<PathBuf>,
+    configured: Option<PathBuf>,
+    default_home: PathBuf,
+    executable_home: Home,
+) -> Home {
+    if let Some(home) = explicit.or(configured) {
+        return Home(home);
+    }
+    if executable_home.file("installed.json").is_file()
+        && executable_home.file("worker.json").is_file()
+    {
+        return executable_home;
+    }
+    if default_home.join("installed.json").is_file() && default_home.join("worker.json").is_file() {
+        Home(default_home)
+    } else {
+        executable_home
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let installing = matches!(cli.command, Cmd::Install { .. });
-    // `install` runs from a temporary download, so its folder is the default install folder, not the program's own.
-    let home = if installing { Home(cli.home.clone().unwrap_or_else(install::default_home)) } else { Home::resolve(cli.home) };
+    let installing = matches!(&cli.command, Cmd::Install { .. });
+    let home = if installing {
+        Home(cli.home.clone().unwrap_or_else(install::default_home))
+    } else {
+        command_home(
+            cli.home.clone(),
+            std::env::var_os("AGENT_WORKER_HOME").map(PathBuf::from),
+            install::default_home(),
+            Home::resolve(None),
+        )
+    };
     match cli.command {
         Cmd::Run { log } => {
             #[cfg(windows)]
@@ -190,8 +233,18 @@ async fn main() {
         Cmd::Start { name } => finish(ctl::start(&home, name.as_deref())),
         Cmd::Stop { name } => finish(ctl::stop(&home, name.as_deref())),
         Cmd::Restart { name } => finish(ctl::restart(&home, name.as_deref())),
-        Cmd::Update { force, drain_timeout, background: _, from_file, server, code } => finish(ctl::update(&home, force, drain_timeout, from_file, server.zip(code)).await),
-        Cmd::Uninstall { yes, keep_registration } => finish(ctl::uninstall(&home, yes, keep_registration).await),
+        Cmd::Update {
+            force,
+            drain_timeout,
+            background: _,
+            from_file,
+            server,
+            code,
+        } => finish(ctl::update(&home, force, drain_timeout, from_file, server.zip(code)).await),
+        Cmd::Uninstall {
+            yes,
+            keep_registration,
+        } => finish(ctl::uninstall(&home, yes, keep_registration).await),
         Cmd::Boot { action, as_user } => finish(ctl::boot(&home, &action, as_user)),
         Cmd::Autorestart { action, as_user } => finish(ctl::autorestart(&home, &action, as_user)),
         Cmd::Logs { lines } => finish(ctl::logs(&home, lines)),
@@ -209,25 +262,153 @@ async fn main() {
             };
             if outcome.is_ok() {
                 for agent in capabilities::AGENTS {
-                    println!("{agent}: {}", capabilities::probe_agent(agent)["status"].as_str().unwrap_or("unknown"));
+                    println!(
+                        "{agent}: {}",
+                        capabilities::probe_agent(agent)["status"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                    );
                 }
             }
             finish(outcome)
         }
-        Cmd::Component { action, name, cwd, env, argv } => finish(ctl::component(&home, &action, name.as_deref(), cwd, env, argv)),
-        Cmd::Install { uuid, server, port, no_service } => finish(install::install(home, install::Options { uuid, server, port, no_service }).await),
-        Cmd::Serve { id, uuid, port, bind, slots, token, root } => {
-            let token = token.or_else(|| std::env::var("FLOW_WORKER_TOKEN").ok()).unwrap_or_default();
+        Cmd::Component {
+            action,
+            name,
+            cwd,
+            env,
+            argv,
+        } => finish(ctl::component(
+            &home,
+            &action,
+            name.as_deref(),
+            cwd,
+            env,
+            argv,
+        )),
+        Cmd::Install {
+            uuid,
+            server,
+            port,
+            no_service,
+        } => finish(
+            install::install(
+                home,
+                install::Options {
+                    uuid,
+                    server,
+                    port,
+                    no_service,
+                },
+            )
+            .await,
+        ),
+        Cmd::Serve {
+            id,
+            uuid,
+            port,
+            bind,
+            slots,
+            token,
+            root,
+        } => {
+            let token = token
+                .or_else(|| std::env::var("FLOW_WORKER_TOKEN").ok())
+                .unwrap_or_default();
             let loopback = ["127.0.0.1", "localhost", "::1"].contains(&bind.as_str());
             if !loopback && token.is_empty() {
                 eprintln!("a token is required for a network execution service");
                 std::process::exit(2);
             }
-            let app = service::App::new(service::Config { id, uuid: uuid.unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string()), slots, token, root, version: config::self_version() });
+            let app = service::App::new(service::Config {
+                id,
+                uuid: uuid.unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string()),
+                slots,
+                token,
+                root,
+                version: config::self_version(),
+            });
             service::spawn_background(app.clone());
-            let listener = tokio::net::TcpListener::bind((bind.as_str(), port)).await.expect("bind");
+            let listener = tokio::net::TcpListener::bind((bind.as_str(), port))
+                .await
+                .expect("bind");
             log!("service", "listening on {}:{}", bind, port);
             axum::serve(listener, service::router(app)).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_uses_the_marked_default_install_from_an_external_cli_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("installed");
+        let command = dir.path().join("temporary-cli");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("installed.json"), "{}").unwrap();
+        std::fs::write(default.join("worker.json"), "{}").unwrap();
+        assert_eq!(
+            command_home(None, None, default.clone(), Home(command)).0,
+            default
+        );
+    }
+
+    #[test]
+    fn command_honors_explicit_and_environment_home_over_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("installed");
+        let explicit = dir.path().join("explicit");
+        let configured = dir.path().join("configured");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("installed.json"), "{}").unwrap();
+        assert_eq!(
+            command_home(
+                Some(explicit.clone()),
+                None,
+                default.clone(),
+                Home(dir.path().join("cli")),
+            )
+            .0,
+            explicit
+        );
+        assert_eq!(
+            command_home(
+                None,
+                Some(configured.clone()),
+                default,
+                Home(dir.path().join("cli")),
+            )
+            .0,
+            configured
+        );
+    }
+
+    #[test]
+    fn command_falls_back_to_the_executable_folder_without_a_default_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("not-installed");
+        let executable = dir.path().join("cli");
+        assert_eq!(
+            command_home(None, None, default, Home(executable.clone())).0,
+            executable
+        );
+    }
+    #[test]
+    fn command_prefers_a_marked_custom_install_over_the_marked_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let default = dir.path().join("default");
+        let custom = dir.path().join("custom");
+        for home in [&default, &custom] {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(home.join("installed.json"), "{}").unwrap();
+            std::fs::write(home.join("worker.json"), "{}").unwrap();
+        }
+        assert_eq!(
+            command_home(None, None, default, Home(custom.clone())).0,
+            custom
+        );
     }
 }

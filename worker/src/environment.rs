@@ -19,20 +19,44 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 async fn git(args: &[&str]) -> Result<String, String> {
     let mut command = Command::new("git");
-    command.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    command
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     prepare_child(&mut command);
-    let child = command.spawn().map_err(|e| format!("Could not run git: {e}"))?;
-    let output = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output()).await.map_err(|_| "git did not finish within 5 minutes".to_string())?.map_err(|e| e.to_string())?;
+    let child = command
+        .spawn()
+        .map_err(|e| format!("Could not run git: {e}"))?;
+    let output = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
+        .await
+        .map_err(|_| "git did not finish within 5 minutes".to_string())?
+        .map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
     let error = String::from_utf8_lossy(&output.stderr);
-    let tail: String = error.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
-    Err(if tail.is_empty() { "git failed".into() } else { tail })
+    let tail: String = error
+        .chars()
+        .rev()
+        .take(2000)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Err(if tail.is_empty() {
+        "git failed".into()
+    } else {
+        tail
+    })
 }
 
 fn target_path(workspace: &Path, item: &Value) -> Result<PathBuf, String> {
-    let target = item["target"].as_str().ok_or("A source needs a target folder")?;
+    let target = item["target"]
+        .as_str()
+        .ok_or("A source needs a target folder")?;
     artifacts::validate(&json!({target: {"data": "", "mode": 420}}))?;
     if target.split('/').any(|part| part.starts_with(".flow-")) {
         return Err("Context target uses a reserved runtime directory".into());
@@ -91,12 +115,22 @@ async fn validate_repository(item: &Value, target: &Path) -> Result<(), String> 
     if git(&["-C", &path, "rev-parse", "--is-inside-work-tree"]).await? != "true" {
         return Err("Missing git worktree".into());
     }
-    if git(&["-C", &path, "remote", "get-url", "origin"]).await?.as_str() != item["url"].as_str().unwrap_or("") {
+    if git(&["-C", &path, "remote", "get-url", "origin"])
+        .await?
+        .as_str()
+        != item["url"].as_str().unwrap_or("")
+    {
         return Err("Repository origin differs from the requested source".into());
     }
     let head = git(&["-C", &path, "rev-parse", "HEAD"]).await?;
-    if !git(&["-C", &path, "ls-files", "--deleted"]).await?.is_empty() {
-        return Err("Repository has missing tracked files; restore the worktree before completing setup".into());
+    if !git(&["-C", &path, "ls-files", "--deleted"])
+        .await?
+        .is_empty()
+    {
+        return Err(
+            "Repository has missing tracked files; restore the worktree before completing setup"
+                .into(),
+        );
     }
     if let Some(reference) = item["ref"].as_str().filter(|r| !r.is_empty()) {
         let wanted = format!("{}^{{commit}}", resolved_ref(reference, &path).await);
@@ -108,8 +142,13 @@ async fn validate_repository(item: &Value, target: &Path) -> Result<(), String> 
 }
 
 fn source_path(item: &Value) -> Result<PathBuf, String> {
-    let source = item["source"].as_str().ok_or("A file source needs a source path")?;
-    let expanded = match (source.strip_prefix("~/"), std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })) {
+    let source = item["source"]
+        .as_str()
+        .ok_or("A file source needs a source path")?;
+    let expanded = match (
+        source.strip_prefix("~/"),
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }),
+    ) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(source),
     };
@@ -124,11 +163,15 @@ fn copy_source(item: &Value, target: &Path) -> Result<(), String> {
     if source.is_dir() {
         return artifacts::restore(&artifacts::snapshot(&source, None)?, target);
     }
-    let size = std::fs::metadata(&source).map_err(|e| format!("{}: {e}", source.display()))?.len();
+    let size = std::fs::metadata(&source)
+        .map_err(|e| format!("{}: {e}", source.display()))?
+        .len();
     if size > MAX_BYTES {
         return Err("Context file exceeds transfer limit".into());
     }
-    std::fs::copy(&source, target).map(|_| ()).map_err(|e| e.to_string())
+    std::fs::copy(&source, target)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn validate_copy(item: &Value, target: &Path) -> Result<(), String> {
@@ -139,8 +182,14 @@ fn validate_copy(item: &Value, target: &Path) -> Result<(), String> {
         }
         return Ok(());
     }
-    let same = target.is_file() && std::fs::read(&source).map_err(|e| e.to_string())? == std::fs::read(target).map_err(|e| e.to_string())?;
-    if same { Ok(()) } else { Err("Copied file is missing or differs from source".into()) }
+    let same = target.is_file()
+        && std::fs::read(&source).map_err(|e| e.to_string())?
+            == std::fs::read(target).map_err(|e| e.to_string())?;
+    if same {
+        Ok(())
+    } else {
+        Err("Copied file is missing or differs from source".into())
+    }
 }
 
 /// Fetch every source, failures included in the report: one bad source doesn't hide the others.
@@ -191,7 +240,11 @@ async fn validate_sources(config: &Value, workspace: &Path) -> Vec<String> {
             }
             .await;
             if let Err(problem) = outcome {
-                errors.push(format!("{}: {}", item["target"].as_str().unwrap_or(""), problem.chars().take(2000).collect::<String>()));
+                errors.push(format!(
+                    "{}: {}",
+                    item["target"].as_str().unwrap_or(""),
+                    problem.chars().take(2000).collect::<String>()
+                ));
             }
         }
     }
@@ -207,11 +260,18 @@ fn report_rows(report: &[Value], emitter: &Emitter) {
 }
 
 /// The sources attached to one run in New card: fetched without a human, and a failure fails the run.
-pub async fn prepare_attached(config: &Value, workspace: &Path, emitter: &Emitter) -> Result<Value, String> {
+pub async fn prepare_attached(
+    config: &Value,
+    workspace: &Path,
+    emitter: &Emitter,
+) -> Result<Value, String> {
     // A Confluence page attached in the form uses this PC's standard credential variables when they are set.
     let mut config = config.clone();
     for item in config["confluence"].as_array_mut().into_iter().flatten() {
-        for (key, name) in [("token_env", "CONFLUENCE_TOKEN"), ("username_env", "CONFLUENCE_EMAIL")] {
+        for (key, name) in [
+            ("token_env", "CONFLUENCE_TOKEN"),
+            ("username_env", "CONFLUENCE_EMAIL"),
+        ] {
             if std::env::var_os(name).is_some() && item.get(key).is_none() {
                 item[key] = json!(name);
             }
@@ -232,14 +292,30 @@ pub async fn prepare_attached(config: &Value, workspace: &Path, emitter: &Emitte
         emitter.emit("tool", json!({"id": format!("context:{source}"), "name": format!("Prepare {}", item["kind"].as_str().unwrap_or("")), "summary": source,
             "status": if ok { "ok" } else { "error" }, "output": item.get("error").cloned().unwrap_or(json!("Ready"))}));
         if !ok {
-            failed.push(format!("{source}: {}", item["error"].as_str().unwrap_or("")));
+            failed.push(format!(
+                "{source}: {}",
+                item["error"].as_str().unwrap_or("")
+            ));
         }
     }
-    if failed.is_empty() { Ok(json!({"sources": report})) } else { Err(format!("Could not prepare what was attached to this run:\n{}", failed.join("\n"))) }
+    if failed.is_empty() {
+        Ok(json!({"sources": report}))
+    } else {
+        Err(format!(
+            "Could not prepare what was attached to this run:\n{}",
+            failed.join("\n")
+        ))
+    }
 }
 
 /// A flow's setup step: fetch the sources, open an agent for repairs, and let dependents go only when validation passes.
-pub async fn setup_environment(config: &Value, workspace: &Path, inbox: Inbox, emitter: Arc<Emitter>, trees: Trees) -> Result<Value, String> {
+pub async fn setup_environment(
+    config: &Value,
+    workspace: &Path,
+    inbox: Inbox,
+    emitter: Arc<Emitter>,
+    trees: Trees,
+) -> Result<Value, String> {
     let report = prepare_sources(config, workspace).await;
     report_rows(&report, &emitter);
     let agent = config["agent"].as_str().unwrap_or("codex");
@@ -253,8 +329,14 @@ Explain any remaining login or network issues to the human. Wait for review.\n{c
         if errors.is_empty() {
             return Ok(json!({"sources": report, "validated": true}));
         }
-        instructions = format!("Setup is incomplete. Repair these sources before marking done:\n{}", errors.join("\n"));
-        emitter.emit("error", json!({"message": instructions, "will_retry": false}));
+        instructions = format!(
+            "Setup is incomplete. Repair these sources before marking done:\n{}",
+            errors.join("\n")
+        );
+        emitter.emit(
+            "error",
+            json!({"message": instructions, "will_retry": false}),
+        );
         emitter.emit("status", json!({"state": "awaiting_input", "reason": "Setup validation failed; dependencies remain blocked"}));
     }
 }

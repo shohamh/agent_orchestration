@@ -79,6 +79,16 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/fleet/tags', json={'name': 'new'})
         self.assertEqual((response.status, (await response.json())['tags']), (200, ['gpu', 'new']))
         self.host.add_fleet_tag.assert_awaited_once_with('new')
+        self.host.unregister_worker = AsyncMock(return_value=(200, {'worker': LEAKY}))
+        response = await self.client.delete('/api/fleet/workers/pc%20a')
+        self.assertEqual(response.status, 200)
+        data = await response.json()
+        self.assert_clean(data)
+        self.assertEqual(data['worker']['id'], 'pc-a')
+        self.host.unregister_worker.assert_awaited_once_with('pc a')
+        self.host.unregister_worker = AsyncMock(return_value=(404, {'error': 'Unknown worker'}))
+        response = await self.client.delete('/api/fleet/workers/missing')
+        self.assertEqual((response.status, await response.json()), (404, {'error': 'Unknown worker'}))
         self.host.fleet_tags = AsyncMock(return_value=(200, {'tags': ['gpu']}))
         self.assertEqual((await (await self.client.get('/api/fleet/tags')).json())['tags'], ['gpu'])
 
@@ -89,9 +99,9 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
             return 200, {}
         self.host._call = call
         await self.host.fleet(); await self.host.fleet_metrics(); await self.host.fleet_tags(); await self.host.add_fleet_tag('x')
-        await self.host.register_worker({'id': 'a'}); await self.host.update_worker('a/b', {'tags': []}); await self.host.refresh_capabilities('a')
+        await self.host.register_worker({'id': 'a'}); await self.host.update_worker('a/b', {'tags': []}); await self.host.unregister_worker('a/b'); await self.host.refresh_capabilities('a')
         self.assertEqual([c[:2] for c in calls], [('GET', '/fleet'), ('GET', '/fleet/metrics'), ('GET', '/fleet/tags'), ('POST', '/fleet/tags'),
-                                                  ('POST', '/fleet/workers'), ('PUT', '/fleet/workers/a%2Fb'), ('POST', '/fleet/workers/a/capabilities/refresh')])
+                                                  ('POST', '/fleet/workers'), ('PUT', '/fleet/workers/a%2Fb'), ('DELETE', '/fleet/workers/a%2Fb'), ('POST', '/fleet/workers/a/capabilities/refresh')])
 
     async def test_board_login_protects_the_fleet_routes(self):
         await self.client.close()
@@ -99,8 +109,8 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
             app = server.make_app()
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
-        for method, path in (('GET', '/api/fleet'), ('GET', '/api/fleet/metrics'), ('POST', '/api/fleet/workers'), ('POST', '/api/fleet/tags')):
-            response = await self.client.request(method, path, json={})
+        for method, path in (('GET', '/api/fleet'), ('GET', '/api/fleet/metrics'), ('POST', '/api/fleet/workers'), ('DELETE', '/api/fleet/workers/pc-a'), ('POST', '/api/fleet/tags')):
+            response = await self.client.request(method, path, json={} if method != 'GET' else None)
             self.assertEqual(response.status, 401, path)
 
 

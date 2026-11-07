@@ -85,7 +85,10 @@ impl Engine {
 }
 
 fn message_text(message: &Value) -> String {
-    message.as_str().map(String::from).unwrap_or_else(|| message["text"].as_str().unwrap_or("").to_string())
+    message
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| message["text"].as_str().unwrap_or("").to_string())
 }
 
 impl Shared {
@@ -94,7 +97,11 @@ impl Shared {
             let text = fields["text"].as_str().unwrap_or("");
             let id = fields.get("message_id").cloned().unwrap_or(Value::Null);
             let mut history = self.history.lock().unwrap();
-            let same = !id.is_null() && history.last().map(|h| h["message_id"] == id).unwrap_or(false);
+            let same = !id.is_null()
+                && history
+                    .last()
+                    .map(|h| h["message_id"] == id)
+                    .unwrap_or(false);
             if same {
                 let last = history.last_mut().unwrap();
                 last["text"] = json!(format!("{}{text}", last["text"].as_str().unwrap_or("")));
@@ -116,7 +123,13 @@ impl Shared {
     }
 
     pub fn config_str(&self, key: &str) -> String {
-        self.config.lock().unwrap().get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        self.config
+            .lock()
+            .unwrap()
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
     }
 
     fn stopped(&self) -> bool {
@@ -124,13 +137,27 @@ impl Shared {
     }
 
     /// Ask the human to allow something. The option they chose, or None when the turn was interrupted.
-    pub async fn permission(&self, tool: &str, summary: &str, detail: &str, options: Value) -> Option<String> {
+    pub async fn permission(
+        &self,
+        tool: &str,
+        summary: &str,
+        detail: &str,
+        options: Value,
+    ) -> Option<String> {
         if self.stopped() {
             return None;
         }
         let id = random_hex(16);
         let (answer, wait) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), Pending { kind: "approval", options: options.clone(), schema: Value::Null, answer });
+        self.pending.lock().unwrap().insert(
+            id.clone(),
+            Pending {
+                kind: "approval",
+                options: options.clone(),
+                schema: Value::Null,
+                answer,
+            },
+        );
         self.emit("approval", json!({"id": id, "tool": tool, "summary": summary, "detail": detail, "options": options}));
         self.status("approval", json!({"reason": "Permission needed"}));
         let chosen = wait.await.ok().flatten();
@@ -145,8 +172,19 @@ impl Shared {
         }
         let id = random_hex(16);
         let (answer, wait) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), Pending { kind: "answer", options: Value::Null, schema: schema.clone(), answer });
-        self.emit("question", json!({"id": id, "message": message, "schema": schema}));
+        self.pending.lock().unwrap().insert(
+            id.clone(),
+            Pending {
+                kind: "answer",
+                options: Value::Null,
+                schema: schema.clone(),
+                answer,
+            },
+        );
+        self.emit(
+            "question",
+            json!({"id": id, "message": message, "schema": schema}),
+        );
         self.status("question", json!({"reason": "Your answer is needed"}));
         let answers = wait.await.ok().flatten();
         self.pending.lock().unwrap().remove(&id);
@@ -157,15 +195,24 @@ impl Shared {
         let id = message["id"].as_str().unwrap_or("").to_string();
         let kind = message["type"].as_str().unwrap_or("");
         let mut pending = self.pending.lock().unwrap();
-        let live = pending.get(&id).filter(|p| p.kind == kind && !p.answer.is_closed());
+        let live = pending
+            .get(&id)
+            .filter(|p| p.kind == kind && !p.answer.is_closed());
         let Some(request) = live else {
             drop(pending);
-            self.emit("error", json!({"message": "This request is no longer pending.", "will_retry": false}));
+            self.emit(
+                "error",
+                json!({"message": "This request is no longer pending.", "will_retry": false}),
+            );
             return;
         };
         let value = if kind == "approval" {
             let chosen = message.get("optionId").cloned().unwrap_or(Value::Null);
-            let option = request.options.as_array().and_then(|o| o.iter().find(|o| o["id"] == chosen)).cloned();
+            let option = request
+                .options
+                .as_array()
+                .and_then(|o| o.iter().find(|o| o["id"] == chosen))
+                .cloned();
             let Some(option) = option else {
                 drop(pending);
                 self.emit("error", json!({"message": "Choose one of the permission options shown.", "will_retry": false}));
@@ -176,7 +223,10 @@ impl Shared {
                 Some("allow_always") => "allow_session",
                 _ => "deny",
             };
-            self.emit("approval_resolved", json!({"id": id, "decision": decision, "optionId": option["id"]}));
+            self.emit(
+                "approval_resolved",
+                json!({"id": id, "decision": decision, "optionId": option["id"]}),
+            );
             option["id"].clone()
         } else {
             let answers = message.get("answers").cloned().unwrap_or(Value::Null);
@@ -194,16 +244,31 @@ impl Shared {
         let any_approval = pending.values().any(|p| p.kind == "approval");
         let any = !pending.is_empty();
         drop(pending);
-        self.status(if any_approval { "approval" } else if any { "question" } else { "working" }, json!({}));
+        self.status(
+            if any_approval {
+                "approval"
+            } else if any {
+                "question"
+            } else {
+                "working"
+            },
+            json!({}),
+        );
     }
 
     fn cancel_pending(&self) {
         let drained: Vec<(String, Pending)> = self.pending.lock().unwrap().drain().collect();
         for (id, request) in drained {
             if request.kind == "approval" {
-                self.emit("approval_resolved", json!({"id": id, "decision": "cancelled"}));
+                self.emit(
+                    "approval_resolved",
+                    json!({"id": id, "decision": "cancelled"}),
+                );
             } else {
-                self.emit("answer", json!({"id": id, "answers": {}, "cancelled": true}));
+                self.emit(
+                    "answer",
+                    json!({"id": id, "answers": {}, "cancelled": true}),
+                );
             }
             let _ = request.answer.send(None);
         }
@@ -224,13 +289,24 @@ async fn inputs(shared: Arc<Shared>, inbox: Inbox) {
         match kind.as_str() {
             "message" => {
                 let text = message["text"].as_str().unwrap_or("").trim().to_string();
-                let attachments = message.get("attachments").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+                let attachments = message
+                    .get("attachments")
+                    .and_then(|a| a.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 if text.is_empty() && attachments.is_empty() {
                     continue;
                 }
-                let names: Vec<Value> = attachments.iter().map(|a| json!({"name": a["name"], "mimeType": a["mimeType"]})).collect();
+                let names: Vec<Value> = attachments
+                    .iter()
+                    .map(|a| json!({"name": a["name"], "mimeType": a["mimeType"]}))
+                    .collect();
                 shared.emit("user", json!({"text": text, "attachments": names, "queued": !shared.state_is_waiting()}));
-                let queued = if attachments.is_empty() { json!(text) } else { json!({"text": text, "attachments": attachments}) };
+                let queued = if attachments.is_empty() {
+                    json!(text)
+                } else {
+                    json!({"text": text, "attachments": attachments})
+                };
                 let _ = shared.messages.send(Some(queued));
             }
             "approval" | "answer" => shared.resolve(&message),
@@ -239,9 +315,17 @@ async fn inputs(shared: Arc<Shared>, inbox: Inbox) {
                 let result = match engine.as_deref() {
                     Some(Engine::Acp(engine)) => {
                         if kind == "config" {
-                            engine.set_option(&shared, message["id"].as_str().unwrap_or(""), message["value"].clone()).await
+                            engine
+                                .set_option(
+                                    &shared,
+                                    message["id"].as_str().unwrap_or(""),
+                                    message["value"].clone(),
+                                )
+                                .await
                         } else {
-                            engine.set_mode(&shared, message["id"].as_str().unwrap_or("")).await
+                            engine
+                                .set_mode(&shared, message["id"].as_str().unwrap_or(""))
+                                .await
                         }
                     }
                     Some(Engine::Demo(_)) => Err("The demo agent has no settings".to_string()),
@@ -262,13 +346,19 @@ async fn inputs(shared: Arc<Shared>, inbox: Inbox) {
                         let _ = tokio::time::timeout(Duration::from_secs(3), engine.cancel()).await;
                     }
                     let mut idle = shared.idle.subscribe();
-                    if tokio::time::timeout(Duration::from_secs(5), idle.wait_for(|i| *i)).await.is_err() {
+                    if tokio::time::timeout(Duration::from_secs(5), idle.wait_for(|i| *i))
+                        .await
+                        .is_err()
+                    {
                         if let Some(active) = shared.active.lock().unwrap().as_ref() {
                             active.abort();
                         }
                     }
                 } else {
-                    shared.status("awaiting_input", json!({"reason": "Interrupted. Send a new instruction to continue."}));
+                    shared.status(
+                        "awaiting_input",
+                        json!({"reason": "Interrupted. Send a new instruction to continue."}),
+                    );
                 }
                 shared.interrupt_done.send_replace(true);
             }
@@ -293,10 +383,16 @@ async fn turn(shared: Arc<Shared>, message: Value) -> Result<String, TurnError> 
         None => {
             let agent = shared.config_str("agent");
             let engine = if agent == "demo" {
-                let quiet = shared.config.lock().unwrap()["quietDemo"].as_bool().unwrap_or(false);
+                let quiet = shared.config.lock().unwrap()["quietDemo"]
+                    .as_bool()
+                    .unwrap_or(false);
                 Arc::new(Engine::Demo(DemoEngine::new(quiet)))
             } else {
-                Arc::new(Engine::Acp(AcpEngine::spawn(shared.clone()).await.map_err(TurnError::Failed)?))
+                Arc::new(Engine::Acp(
+                    AcpEngine::spawn(shared.clone())
+                        .await
+                        .map_err(TurnError::Failed)?,
+                ))
             };
             *shared.engine.lock().await = Some(engine.clone());
             if let Engine::Acp(acp) = &*engine {
@@ -309,9 +405,17 @@ async fn turn(shared: Arc<Shared>, message: Value) -> Result<String, TurnError> 
     let fresh = shared.connections.load(Ordering::SeqCst);
     if fresh > 0 && !engine.resumed() && engine_is_new(&shared, &engine).await {
         // A failed transport loses the provider's in-memory conversation. Restore the user's intent.
-        let mut context = serde_json::to_string(&*shared.history.lock().unwrap()).unwrap_or_default();
+        let mut context =
+            serde_json::to_string(&*shared.history.lock().unwrap()).unwrap_or_default();
         if context.chars().count() > CONTEXT_LIMIT {
-            let tail: String = context.chars().rev().take(CONTEXT_LIMIT).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = context
+                .chars()
+                .rev()
+                .take(CONTEXT_LIMIT)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             context = format!("[Earlier conversation omitted]\n{tail}");
         }
         let restored = format!("The agent connection restarted. Continue the existing task; files may already contain earlier work.\nOriginal task: {}\nConversation so far:\n{context}\nLatest instruction: {}",
@@ -322,7 +426,10 @@ async fn turn(shared: Arc<Shared>, message: Value) -> Result<String, TurnError> 
             message = json!(restored);
         }
     }
-    shared.connections.fetch_add(u32::from(engine_is_new(&shared, &engine).await), Ordering::SeqCst);
+    shared.connections.fetch_add(
+        u32::from(engine_is_new(&shared, &engine).await),
+        Ordering::SeqCst,
+    );
     mark_used(&shared, &engine).await;
     if shared.failures.load(Ordering::SeqCst) > 0 {
         shared.failures.fetch_sub(1, Ordering::SeqCst);
@@ -330,7 +437,10 @@ async fn turn(shared: Arc<Shared>, message: Value) -> Result<String, TurnError> 
     }
     match &*engine {
         Engine::Acp(acp) => acp.prompt(&shared, &message).await,
-        Engine::Demo(demo) => demo.prompt(&shared, &message_text(&message)).await.map_err(TurnError::Failed),
+        Engine::Demo(demo) => demo
+            .prompt(&shared, &message_text(&message))
+            .await
+            .map_err(TurnError::Failed),
     }
 }
 
@@ -370,9 +480,17 @@ impl Drop for Cleanup {
 }
 
 /// Run a session until it is marked done (or, with `autoDone`, until its first finished turn).
-pub async fn run_session(config: Value, inbox: Inbox, emitter: Arc<Emitter>, trees: Trees) -> Result<Value, String> {
+pub async fn run_session(
+    config: Value,
+    inbox: Inbox,
+    emitter: Arc<Emitter>,
+    trees: Trees,
+) -> Result<Value, String> {
     let (messages, mut queue) = mpsc::unbounded_channel();
-    let failures = config.get("simulateFailures").and_then(|f| f.as_i64()).unwrap_or(0);
+    let failures = config
+        .get("simulateFailures")
+        .and_then(|f| f.as_i64())
+        .unwrap_or(0);
     let goal = config["goal"].as_str().unwrap_or("").to_string();
     let shared = Arc::new(Shared {
         config: Mutex::new(config),
@@ -392,24 +510,39 @@ pub async fn run_session(config: Value, inbox: Inbox, emitter: Arc<Emitter>, tre
         connections: AtomicU32::new(0),
         failures: AtomicI64::new(failures),
     });
-    shared.status("starting", json!({"workspace": shared.config_str("workspace"), "agent": shared.config_str("agent")}));
+    shared.status(
+        "starting",
+        json!({"workspace": shared.config_str("workspace"), "agent": shared.config_str("agent")}),
+    );
     shared.emit("user", json!({"text": goal}));
     let _ = shared.messages.send(Some(json!(goal)));
     let pump = tokio::spawn(inputs(shared.clone(), inbox));
-    let _cleanup = Cleanup { shared: shared.clone(), inputs: pump.abort_handle() };
+    let _cleanup = Cleanup {
+        shared: shared.clone(),
+        inputs: pump.abort_handle(),
+    };
 
     while !shared.finishing.load(Ordering::SeqCst) {
-        let Some(Some(message)) = queue.recv().await else { break };
+        let Some(Some(message)) = queue.recv().await else {
+            break;
+        };
         if shared.finishing.load(Ordering::SeqCst) {
             break;
         }
         shared.interrupted.store(false, Ordering::SeqCst);
-        shared.history.lock().unwrap().push(json!({"role": "user", "text": message_text(&message)}));
+        shared
+            .history
+            .lock()
+            .unwrap()
+            .push(json!({"role": "user", "text": message_text(&message)}));
         for attempt in 1..=MAX_ATTEMPTS {
             if shared.stopped() {
                 break;
             }
-            shared.status("working", json!({"attempt": attempt, "max_attempts": MAX_ATTEMPTS}));
+            shared.status(
+                "working",
+                json!({"attempt": attempt, "max_attempts": MAX_ATTEMPTS}),
+            );
             shared.idle.send_replace(false);
             let task = tokio::spawn(turn(shared.clone(), message.clone()));
             *shared.active.lock().unwrap() = Some(task.abort_handle());
@@ -421,8 +554,16 @@ pub async fn run_session(config: Value, inbox: Inbox, emitter: Arc<Emitter>, tre
                     let mut done = shared.interrupt_done.subscribe();
                     let _ = done.wait_for(|d| *d).await;
                     if shared.interrupted.load(Ordering::SeqCst) || reason == "cancelled" {
-                        shared.status("awaiting_input", json!({"reason": "Interrupted. Send an instruction to continue."}));
-                    } else if reason == "end_turn" && shared.config.lock().unwrap()["autoDone"].as_bool().unwrap_or(false) && queue.is_empty() {
+                        shared.status(
+                            "awaiting_input",
+                            json!({"reason": "Interrupted. Send an instruction to continue."}),
+                        );
+                    } else if reason == "end_turn"
+                        && shared.config.lock().unwrap()["autoDone"]
+                            .as_bool()
+                            .unwrap_or(false)
+                        && queue.is_empty()
+                    {
                         // Flow steps without review: a finished turn finishes the step.
                         shared.finishing.store(true, Ordering::SeqCst);
                     } else if reason == "end_turn" {
@@ -440,22 +581,34 @@ pub async fn run_session(config: Value, inbox: Inbox, emitter: Arc<Emitter>, tre
                 }
                 Ok(Err(TurnError::Rejected(problem))) => {
                     shared.emit("error", json!({"message": problem, "will_retry": false}));
-                    shared.status("awaiting_input", json!({"reason": "Message not sent. Change it and try again."}));
+                    shared.status(
+                        "awaiting_input",
+                        json!({"reason": "Message not sent. Change it and try again."}),
+                    );
                     break;
                 }
                 Ok(Err(TurnError::Failed(problem))) => {
                     shared.cancel_pending();
                     shared.close_engine().await;
                     if shared.interrupted.load(Ordering::SeqCst) {
-                        shared.status("awaiting_input", json!({"reason": "Interrupted. Send an instruction to continue."}));
+                        shared.status(
+                            "awaiting_input",
+                            json!({"reason": "Interrupted. Send an instruction to continue."}),
+                        );
                         break;
                     }
                     let retry = attempt < MAX_ATTEMPTS;
                     shared.emit("error", json!({"message": problem, "will_retry": retry}));
                     if retry {
                         shared.status("retrying", json!({"attempt": attempt, "max_attempts": MAX_ATTEMPTS, "reason": "Retrying failed turn"}));
-                        let delay = shared.config.lock().unwrap()["retryDelay"].as_f64().unwrap_or(1.0);
-                        let _ = tokio::time::timeout(Duration::from_secs_f64(delay), shared.cancel.notified()).await;
+                        let delay = shared.config.lock().unwrap()["retryDelay"]
+                            .as_f64()
+                            .unwrap_or(1.0);
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs_f64(delay),
+                            shared.cancel.notified(),
+                        )
+                        .await;
                     } else {
                         shared.status("stuck", json!({"attempt": attempt, "max_attempts": MAX_ATTEMPTS, "reason": "Retries exhausted. Send Continue to retry."}));
                     }
@@ -463,12 +616,27 @@ pub async fn run_session(config: Value, inbox: Inbox, emitter: Arc<Emitter>, tre
             }
         }
     }
-    let auto = shared.config.lock().unwrap()["autoDone"].as_bool().unwrap_or(false);
-    shared.status("done", json!({"reason": if auto { "Finished" } else { "Marked done by you" }}));
-    let last = shared.history.lock().unwrap().iter().rev().find(|h| h["role"] == "agent").map(|h| h["text"].clone()).unwrap_or(json!(""));
+    let auto = shared.config.lock().unwrap()["autoDone"]
+        .as_bool()
+        .unwrap_or(false);
+    shared.status(
+        "done",
+        json!({"reason": if auto { "Finished" } else { "Marked done by you" }}),
+    );
+    let last = shared
+        .history
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|h| h["role"] == "agent")
+        .map(|h| h["text"].clone())
+        .unwrap_or(json!(""));
     shared.cancel_pending();
     shared.close_engine().await;
-    Ok(json!({"state": "done", "agent": shared.config_str("agent"), "workspace": shared.config_str("workspace"), "text": last}))
+    Ok(
+        json!({"state": "done", "agent": shared.config_str("agent"), "workspace": shared.config_str("workspace"), "text": last}),
+    )
 }
 
 /// Explicitly simulated interactions, useful offline and without CLI logins. `quiet` (flow steps): no permission or
@@ -482,7 +650,12 @@ pub struct DemoEngine {
 
 impl DemoEngine {
     fn new(quiet: bool) -> DemoEngine {
-        DemoEngine { cancelled: AtomicBool::new(false), turn: AtomicU32::new(0), quiet, used: AtomicBool::new(false) }
+        DemoEngine {
+            cancelled: AtomicBool::new(false),
+            turn: AtomicU32::new(0),
+            quiet,
+            used: AtomicBool::new(false),
+        }
     }
 
     fn is_cancelled(&self) -> bool {
@@ -490,7 +663,11 @@ impl DemoEngine {
     }
 
     async fn quiet_prompt(&self, shared: &Shared, text: &str, turn: u32) -> String {
-        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
         let tool = random_hex(16);
         shared.emit("tool", json!({"id": tool, "name": "read", "summary": format!("Read the step input ({} chars, simulated)", text.chars().count()), "status": "running"}));
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -500,11 +677,23 @@ impl DemoEngine {
         shared.emit("tool", json!({"id": tool, "status": "ok", "output": lines.iter().take(12).cloned().collect::<Vec<_>>().join("\n")}));
         let mut reply = vec![];
         if turn == 1 {
-            reply.push(format!("Simulated agent, no model is called. The task: {}", lines.first().copied().unwrap_or("(empty)")));
+            reply.push(format!(
+                "Simulated agent, no model is called. The task: {}",
+                lines.first().copied().unwrap_or("(empty)")
+            ));
             reply.push("Key points from the input:".to_string());
-            reply.extend(lines.iter().skip(1).take(5).map(|l| format!("- {}", l.chars().take(160).collect::<String>())));
+            reply.extend(
+                lines
+                    .iter()
+                    .skip(1)
+                    .take(5)
+                    .map(|l| format!("- {}", l.chars().take(160).collect::<String>())),
+            );
         } else {
-            reply.push(format!("Noted: {}", text.trim().chars().take(300).collect::<String>()));
+            reply.push(format!(
+                "Noted: {}",
+                text.trim().chars().take(300).collect::<String>()
+            ));
             reply.push("I would apply that instruction here (simulated).".to_string());
         }
         let id = random_hex(16);
@@ -513,7 +702,10 @@ impl DemoEngine {
             if self.is_cancelled() {
                 return "cancelled".into();
             }
-            shared.emit("agent", json!({"message_id": id, "text": format!("{line}\n")}));
+            shared.emit(
+                "agent",
+                json!({"message_id": id, "text": format!("{line}\n")}),
+            );
         }
         "end_turn".into()
     }
@@ -525,11 +717,20 @@ impl DemoEngine {
             return Ok(self.quiet_prompt(shared, text, turn).await);
         }
         shared.emit("agent", json!({"message_id": random_hex(16), "text": "This is the simulated UI demo. No model is being called. I'll show a permission request and a question."}));
-        let option = shared.permission("execute", "Run the demo test suite", "python -m unittest -v", json!([
+        let option = shared
+            .permission(
+                "execute",
+                "Run the demo test suite",
+                "python -m unittest -v",
+                json!([
             {"id": "allow", "label": "Allow once", "kind": "allow_once"},
             {"id": "session", "label": "Allow for session", "kind": "allow_always"},
-            {"id": "deny", "label": "Deny", "kind": "reject_once"}])).await;
-        let Some(option) = option.filter(|_| !self.is_cancelled()) else { return Ok("cancelled".into()) };
+            {"id": "deny", "label": "Deny", "kind": "reject_once"}]),
+            )
+            .await;
+        let Some(option) = option.filter(|_| !self.is_cancelled()) else {
+            return Ok("cancelled".into());
+        };
         if option == "deny" {
             shared.emit("agent", json!({"text": "Permission denied. I won't run that tool.", "message_id": random_hex(16)}));
             return Ok("end_turn".into());
@@ -538,13 +739,18 @@ impl DemoEngine {
             "style": {"type": "string", "title": "Summary style", "oneOf": [{"const": "brief", "title": "Brief"}, {"const": "detailed", "title": "Detailed"}]},
             "checks": {"type": "array", "title": "Checks to mention", "items": {"anyOf": [{"const": "tests", "title": "Tests"}, {"const": "changes", "title": "Changes"}]}},
             "other": {"type": "string", "title": "Other instructions"}}, "required": ["style"]})).await;
-        let Some(answer) = answer.filter(|_| !self.is_cancelled()) else { return Ok("cancelled".into()) };
+        let Some(answer) = answer.filter(|_| !self.is_cancelled()) else {
+            return Ok("cancelled".into());
+        };
         let tool = random_hex(16);
         shared.emit("tool", json!({"id": tool, "name": "execute", "summary": "python -m unittest -v (simulated)", "status": "running"}));
         for _ in 0..8 {
             tokio::time::sleep(Duration::from_millis(250)).await;
             if self.is_cancelled() {
-                shared.emit("tool", json!({"id": tool, "status": "error", "output": "Interrupted"}));
+                shared.emit(
+                    "tool",
+                    json!({"id": tool, "status": "error", "output": "Interrupted"}),
+                );
                 return Ok("cancelled".into());
             }
         }

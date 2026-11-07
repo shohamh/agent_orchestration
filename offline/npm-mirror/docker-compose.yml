@@ -2,7 +2,7 @@
 #   Connected side: MODE=online  -> proxies registry.npmjs.org and caches every tarball it serves.
 #   Offline side:    MODE=offline -> no uplink; serves only what was cached (storage imported by load.sh).
 # Config is baked into a tiny image (no bind mounts) so it works on any Docker host.
-name: npm-mirror
+name: ${NPM_MIRROR_PROJECT:-npm-mirror}
 
 services:
   verdaccio:
@@ -20,4 +20,4 @@ services:
 
 volumes:
   storage:
-    name: npm-mirror-storage
+    name: ${NPM_MIRROR_VOLUME:-npm-mirror-storage}

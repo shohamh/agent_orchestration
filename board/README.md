@@ -35,6 +35,36 @@ python smoke_test.py    # optional: end-to-end check against every configured ba
 
 The board reaches both stacks through their published ports (`host.docker.internal`). It doesn't join their networks, so either stack can be down. A backend is enabled only when its credential is set.
 
+### Admin: engine URLs and status
+
+Open **Admin** to edit each engine's server-side API URL and browser-visible dashboard URL,
+then use **Check now** or leave Admin open to refresh status every 10 seconds. Status distinguishes
+disabled engines from reachable, unreachable, and authentication failures. Credentials are still
+provided through the board's environment; the UI never reads or stores them. URL settings persist
+in the `board_data` Docker volume and apply to the board's adapters without a rebuild. Hatchet's SDK
+endpoint is constructed at startup, so changing its API URL takes effect after restarting the board.
+
+For offline deployment, point each API URL at the engine address reachable from the board container;
+set dashboard URLs to addresses reachable by the browser (including remote phones). The two URL
+types can differ when Docker-internal and browser-visible hostnames differ.
+
+### UI development auto-reload
+
+From the repository root, use the root Compose file and the development override. The root file
+connects the board to the flow host and engine network; do not start this override from `board/` alone.
+
+```bash
+docker compose -f docker-compose.yml -f board/docker-compose.dev.yml up -d --build board
+```
+
+The override mounts `board/` read-only at `/app` (dependencies remain in the image and persistent
+data stays in `/data`), enables the static-file watcher, and sets `BOARD_AUTO_RELOAD=1`. Browser tabs
+reload within about a second after a file in `board/static/` changes. The backend supervisor watches
+Python files under `/app` and restarts the server child after a source change; it uses only the
+Python standard library. `BOARD_AUTO_RELOAD` defaults to `0` in ordinary Compose. Set it to `1` to
+enable backend restarts; `BOARD_DEV_RELOAD` remains the separate browser/static polling switch.
+
+
 ## Login and phone access (Tailscale Funnel)
 
 The board can start coding agents that run commands on this PC. Set `BOARD_PASSWORD` in the ignored

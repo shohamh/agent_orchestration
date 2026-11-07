@@ -7,6 +7,9 @@ The worker fleet supplies execution capacity for cards and flows across orchestr
 **Execution worker**:
 A registered service that runs card or flow tasks on a machine.
 
+**Worker unregistration**:
+A server-side removal of an execution worker from the Fleet that revokes its relay authorization and frees its name for a new registration. The local installation remains and reports the cutoff; restoring access requires a new Fleet install link, which replaces the local worker identity in place.
+
 **Worker pool**:
 A named group of execution workers used to select where tasks can run. An execution worker can belong to multiple pools.
 

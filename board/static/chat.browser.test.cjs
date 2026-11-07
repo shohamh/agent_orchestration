@@ -105,7 +105,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
       if (url.pathname === '/api/workers') { response.end(JSON.stringify({workers:[{id:'pc-a',pool:'builds',tags:['linux'],online:true},{id:'pc-b',pool:'review',tags:[],online:true}]})); return; }
       if (url.pathname === '/api/schedules') { response.end(JSON.stringify({ schedules: [] })); return; }
       const file = url.pathname === '/' ? 'index.html' : url.pathname.replace('/static/', '');
-      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'].includes(file)) { response.writeHead(404).end(); return; }
+      if (!['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'admin.js', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'].includes(file)) { response.writeHead(404).end(); return; }
       response.setHeader('Content-Type', file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html');
       response.end(fs.readFileSync(path.join(__dirname, file)));
     } catch (error) { response.writeHead(500).end(JSON.stringify({ error: error.message })); }

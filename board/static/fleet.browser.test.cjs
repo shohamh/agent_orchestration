@@ -83,10 +83,10 @@ test('metric text: values, limits, unknown and stale are words, not colour', () 
 const iso = (minutesAgo = 0) => new Date(Date.now() - minutesAgo * 60000).toISOString();
 const result = (status, minutesAgo = 5) => ({ status, checked_at: iso(minutesAgo), auth_status: 'unknown' });
 const ENGINES = ['hatchet', 'prefect', 'trigger'];
-let workers, tags, calls, fault, metrics;
+let workers, tags, calls, fault, metrics, unregisterFault;
 function reset() {
   installs.clear(); installCount = 0; updates.workers = []; updates.auto = false;
-  calls = []; fault = { metrics: false };
+  calls = []; fault = { metrics: false }; unregisterFault = null;
   tags = ['cuda', 'linux', 'windows'];
   workers = new Map(Object.entries({
     'pc-a': { id: 'pc-a', pools: ['build', 'gpu'], tags: ['windows', 'cuda'], engines: ['hatchet', 'prefect'], slots: 2, cpu_limit: 90, ram_limit: 90,
@@ -135,7 +135,7 @@ const installCommands = (record, origin) => {
     bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
 const installView = (r) => { const { commands, ...rest } = r; return rest; };
-const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
+const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'admin.js', 'admin.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   let raw = ''; for await (const chunk of request) raw += chunk;
@@ -167,6 +167,14 @@ const server = http.createServer(async (request, response) => {
       if (!existing) return json(404, { error: 'Unknown worker' });
       return json(200, save({ ...body, id: existing.id }, existing));
     }
+    if (m && request.method === 'DELETE') {
+      if (unregisterFault) return json(unregisterFault.status, { error: unregisterFault.error });
+      const id = decodeURIComponent(m[1]);
+      workers.delete(id);
+      for (const record of installs.values()) if (record.id === id && record.state === 'registered') record.state = 'unregistered';
+      return json(200, { ok: true });
+    }
+
 
     if (url.pathname === '/api/fleet/installs' && request.method === 'GET') {
       return json(200, { installs: [...installs.values()].filter((r) => r.state !== 'cancelled').map((r) => (r.state === 'pending' ? { ...installView(r), commands: r.commands } : installView(r))) });
@@ -580,6 +588,91 @@ test('manual capability refresh updates results and timestamps; offline PCs expl
   assert.equal(await evaluate(`${q(`${worker('pc-b')} [data-action="refresh"]`)}.disabled`), true);
 });
 
+test('unregister requires a named confirmation and removes the PC on success', async () => {
+  await openFleet();
+  await evaluate(`document.querySelector('${worker('pc-b')}').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }))`);
+  await waitFor('document.querySelector(".ctx-menu")', 'worker context menu opens');
+  assert.match(await text('.ctx-menu'), /Unregister from Fleet/);
+  await press('Escape');
+  await click(`${worker('pc-b')} [data-action="unregister"]`);
+  await waitFor('document.querySelector(".fl-unregister").open', 'unregister confirmation opens');
+  assert.match(await text('.fl-unregister'), /Unregister pc-b\?.*removes pc-b from Fleet.*frees its name for a new worker.*Already-running work is not canceled synchronously/);
+  assert.equal(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/fleet/workers/pc-b').length, 0, 'opening confirmation does not unregister');
+  await click('.fl-unregister button', 'Cancel');
+  await waitFor('!document.querySelector(".fl-unregister").open', 'cancel closes confirmation');
+  assert.equal(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/fleet/workers/pc-b').length, 0, 'cancel leaves the PC registered');
+  await click(`${worker('pc-b')} [data-action="unregister"]`);
+  const box = await evaluate('document.querySelector(".fl-unregister").getBoundingClientRect().toJSON()');
+  await mouse('mouseMoved', { x: Math.max(1, box.x - 20), y: box.y + box.height / 2 }, 0);
+  await mouse('mousePressed', { x: Math.max(1, box.x - 20), y: box.y + box.height / 2 });
+  await mouse('mouseReleased', { x: Math.max(1, box.x - 20), y: box.y + box.height / 2 }, 0);
+  await waitFor('!document.querySelector(".fl-unregister").open', 'backdrop closes confirmation');
+  assert.equal(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/fleet/workers/pc-b').length, 0, 'backdrop cancels unregister');
+
+  await click(`${worker('pc-b')} [data-action="unregister"]`);
+  await click('.fl-unregister button', 'Unregister pc-b');
+  await waitFor(`!document.querySelector('${worker('pc-b')}')`, 'removed PC leaves the list');
+  assert.equal(lastCall('DELETE', '/api/fleet/workers/pc-b').method, 'DELETE');
+  await waitFor(`/pc-b was removed from Fleet/.test(document.querySelector('.fl-live').textContent)`, 'success announcement');
+  assert.equal(workers.has('pc-b'), false);
+});
+
+test('a registered disconnected install can be unregistered from its waiting card', async () => {
+  reset();
+  const code = '00000000-0000-4000-8000-000000000099';
+  installs.set(code, { code, id: 'stuck-pc', os: 'windows', state: 'registered', created_at: Date.now() / 1000,
+    expires_at: Date.now() / 1000 + 1800, step: 'register', error: null, hostname: null, connected: false });
+  const connectedCode = '00000000-0000-4000-8000-000000000100';
+  installs.set(connectedCode, { code: connectedCode, id: 'live-pc', os: 'windows', state: 'registered', connected: true, hostname: 'LIVE' });
+  workers.set('stuck-pc', { id: 'stuck-pc', pools: ['default'], tags: [], engines: ['hatchet'], slots: 1, cpu_limit: 90, ram_limit: 90,
+    connection: 'configured', online: false, status: 'unreachable', settings_sync: { state: 'pending' } });
+  await openFleet();
+  const card = '.fl-install-card[data-install="stuck-pc"]';
+  await waitFor(`${q(card)}?.textContent.includes('Waiting for the worker to connect')`, 'registered worker status loads');
+  assert.match(await text(card), /Registered\. Waiting for the worker to connect/);
+  assert.equal(await evaluate(`!!${q(`${card} [data-action="unregister-install"]`)}`), true, 'disconnected registered install has an action');
+  assert.equal(await evaluate(`!!${q('.fl-install-card[data-install="live-pc"] [data-action="unregister-install"]')}`), false, 'connected records do not get an action');
+  await click(`${card} [data-action="unregister-install"]`);
+  await waitFor('document.querySelector(".fl-unregister").open', 'confirmation opens');
+  assert.match(await text('.fl-unregister'), /Unregister stuck-pc\?/);
+  assert.equal(calls.filter((c) => c.method === 'DELETE' && c.path === '/api/fleet/workers/stuck-pc').length, 0);
+  await click('.fl-unregister button', 'Unregister stuck-pc');
+  await waitFor(`!${q(card)}`, 'stuck install disappears after successful unregister');
+  assert.equal(lastCall('DELETE', '/api/fleet/workers/stuck-pc').path, '/api/fleet/workers/stuck-pc');
+  assert.ok(calls.some((c) => c.method === 'GET' && c.path === '/api/fleet'));
+  assert.ok(calls.some((c) => c.method === 'GET' && c.path === '/api/fleet/installs'));
+  const failedCode = '00000000-0000-4000-8000-000000000101';
+  installs.set(failedCode, { code: failedCode, id: 'stuck-fail', os: 'windows', state: 'registered', connected: false });
+  workers.set('stuck-fail', { id: 'stuck-fail', pools: ['default'], tags: [], engines: ['hatchet'], slots: 1, cpu_limit: 90, ram_limit: 90,
+    connection: 'configured', online: false, status: 'unreachable', settings_sync: { state: 'pending' } });
+  unregisterFault = { status: 503, error: 'Flow host unavailable' };
+  await click('.fl-top button', 'Reload');
+  const failedCard = '.fl-install-card[data-install="stuck-fail"]';
+  await waitFor(`!!${q(failedCard)}`, 'failed install is listed');
+  await click(`${failedCard} [data-action="unregister-install"]`);
+  await click('.fl-unregister button', 'Unregister stuck-fail');
+  await waitFor(`/Could not unregister stuck-fail: Flow host unavailable/.test(document.querySelector('.fl-status').textContent)`);
+  assert.ok(await evaluate(`!!${q(failedCard)}`), 'failed request preserves the install card');
+  await evaluate('document.querySelector(\'[aria-label="Close fleet"]\').click()');
+  await waitFor('!document.querySelector("#fleet-dialog").open', 'Fleet closes after unregister test');
+  reset();
+});
+test('unregister handles a stale worker by refreshing and preserves the card on other errors', async () => {
+  await openFleet();
+  workers.delete('pc-c');
+  unregisterFault = { status: 404, error: 'Unknown worker' };
+  await click(`${worker('pc-c')} [data-action="unregister"]`);
+  await click('.fl-unregister button', 'Unregister pc-c');
+  await waitFor(`!document.querySelector('${worker('pc-c')}')`, 'stale worker is refreshed out of the list');
+  await waitFor(`/already unregistered from Fleet/.test(document.querySelector('.fl-status').textContent)`);
+
+  unregisterFault = { status: 503, error: 'Flow host unavailable' };
+  await click(`${worker('pc-a')} [data-action="unregister"]`);
+  await click('.fl-unregister button', 'Unregister pc-a');
+  await waitFor(`/Could not unregister pc-a: Flow host unavailable/.test(document.querySelector('.fl-status').textContent)`);
+  assert.ok(await evaluate(`!!document.querySelector('${worker('pc-a')}')`), 'failed request keeps the worker card');
+});
+
 test('closing the fleet tab stops polling', async () => {
   await openFleet();
   await press('Escape');
@@ -717,6 +810,7 @@ test('a valid form creates the install link and shows the Windows commands with 
   await click('.fl-top button', 'Register PC');
   await waitFor('document.querySelector(".fl-form input[name=id]")');
   await fillInstall({ id: 'build-pc', os: 'windows' });
+  await evaluate('(() => { const pool = document.querySelector(".fl-form select[name=pool]"); pool.value = "default"; pool.dispatchEvent(new Event("change", { bubbles: true })); })()');
   await click('.fl-form input[name="engine"][value="prefect"]');
   await type('.fl-form input[name="slots"]', '2');
   await type('.fl-form input[name="cpu_limit"]', '80');
@@ -872,6 +966,20 @@ test('a pending install survives closing the tab: it is listed with its command 
   await fillInstall({ id: 'later-pc' });
   await submitInstall();
   await waitFor('document.querySelectorAll(".fl-command").length === 2', 'a cancelled name can be registered again');
+});
+
+test('an unregistered worker name is free and its old install is not shown as waiting', async () => {
+  reset();
+  const code = '00000000-0000-4000-8000-000000000099';
+  installs.set(code, { code, id: 'released-pc', os: 'windows', state: 'unregistered', created_at: Date.now() / 1000,
+    expires_at: Date.now() / 1000 + 1800, step: null, error: null, hostname: null, connected: false });
+  await openFleet();
+  assert.equal(await evaluate('document.querySelector(".fl-installs").hidden'), true, 'the old install does not look pending');
+  await click('.fl-top button', 'Register PC');
+  await waitFor('document.querySelector(".fl-form input[name=id]")');
+  await fillInstall({ id: 'released-pc' });
+  await submitInstall();
+  await waitFor('document.querySelectorAll(".fl-command").length === 2', 'the released name can be used again');
 });
 
 test('the server refusing a name (already waiting) is shown on the form without losing the input', async () => {

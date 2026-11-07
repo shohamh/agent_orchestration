@@ -196,6 +196,10 @@ class FlowHost:
     async def update_worker(self, worker_id: str, worker: dict) -> tuple[int, Any]:
         return await self._call('PUT', f'/fleet/workers/{quote(worker_id, safe="")}', worker, timeout=30)
 
+    async def unregister_worker(self, worker_id: str) -> tuple[int, Any]:
+        return await self._call('DELETE', f'/fleet/workers/{quote(worker_id, safe="")}', timeout=30)
+
+
     async def fleet_updates(self) -> tuple[int, Any]:
         return await self._call('GET', '/fleet/updates', timeout=15)
 

@@ -66,6 +66,8 @@ log = logging.getLogger("board")
 
 
 def load_adapters() -> dict[str, Any]:
+    import engine_admin
+    engine_admin.prepare_environment()
     adapters: dict[str, Any] = {}
     if os.environ.get("HATCHET_CLIENT_TOKEN"):
         try:
@@ -123,6 +125,38 @@ async def errors_as_json(request: web.Request, handler: Any) -> web.StreamRespon
 
 async def systems(request: web.Request) -> web.Response:
     return web.json_response({"systems": list(request.app["adapters"]), "columns": COLUMNS})
+
+
+async def admin_engines(request: web.Request) -> web.Response:
+    import engine_admin
+    records = await asyncio.gather(*(engine_admin.record(name, check=True, app=request.app) for name in engine_admin.ENGINES))
+    for item in records:
+        if item["enabled"]:
+            request.app.setdefault("engine_status", {})[item["id"]] = (item["status"], item["checked_at"], item["error"])
+    return web.json_response({"engines": records})
+
+
+async def admin_engine_save(request: web.Request) -> web.Response:
+    import engine_admin
+    engine = request.match_info["engine"]
+    if engine not in engine_admin.ENGINES:
+        raise web.HTTPNotFound(text="unknown engine")
+    config = engine_admin.save(engine, await json_object(request))
+    engine_admin.apply_adapter_url(engine, config["api_url"], config["dashboard_url"], request.app)
+    if engine == "prefect" and config["api_url"] and engine not in request.app["adapters"]:
+        from prefect_adapter import PrefectAdapter
+        request.app["adapters"][engine] = PrefectAdapter()
+    request.app.setdefault("engine_status", {}).pop(engine, None)
+    return web.json_response(await engine_admin.record(engine, app=request.app))
+
+
+async def admin_engine_check(request: web.Request) -> web.Response:
+    import engine_admin
+    engine = request.match_info["engine"]
+    if engine not in engine_admin.ENGINES:
+        raise web.HTTPNotFound(text="unknown engine")
+    result = await engine_admin.check(engine, request.app)
+    return web.json_response(result, status=200 if result["status"] != "disabled" else 409)
 
 
 async def label_flows(app: web.Application, cards: list[Any]) -> None:
@@ -823,6 +857,8 @@ async def fleet_register(request: web.Request) -> web.Response:
 async def fleet_update(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
 
+async def fleet_unregister(request: web.Request) -> web.Response:
+    return fleet_answer(await request.app['flow_host'].unregister_worker(request.match_info['worker_id']))
 
 INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart'}
 
@@ -1043,8 +1079,22 @@ async def pause_queue(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC / "index.html")
+async def index(request: web.Request) -> web.StreamResponse:
+    if not request.app["dev_reload"]:
+        return web.FileResponse(STATIC / "index.html")
+    document = (STATIC / "index.html").read_text(encoding="utf-8")
+    document = document.replace("</body>", '<script src="/static/dev-reload.js" defer></script>\n</body>', 1)
+    return web.Response(text=document, content_type="text/html")
+
+
+async def dev_revision(_: web.Request) -> web.Response:
+    entries = []
+    for path in sorted(STATIC.rglob("*")):
+        if path.is_file():
+            stat = path.stat()
+            entries.append(f"{path.relative_to(STATIC).as_posix()}:{stat.st_mtime_ns}:{stat.st_size}")
+    revision = hashlib.sha256("\n".join(entries).encode()).hexdigest()
+    return web.json_response({"revision": revision}, headers={"Cache-Control": "no-store"})
 
 
 @web.middleware
@@ -1083,9 +1133,15 @@ def make_app() -> web.Application:
     app.on_cleanup.append(close_adapters)
     app.on_response_prepare.append(revalidate_ui)
     auth.install(app)
+    app["dev_reload"] = os.environ.get("BOARD_DEV_RELOAD") == "1"
+    if app["dev_reload"]:
+        app.router.add_get("/api/dev/revision", dev_revision)
     relay_proxy.install(app)
     app.router.add_get("/", index)
     app.router.add_get("/api/systems", systems)
+    app.router.add_get("/api/admin/engines", admin_engines)
+    app.router.add_put("/api/admin/engines/{engine}", admin_engine_save)
+    app.router.add_post("/api/admin/engines/{engine}/check", admin_engine_check)
     app.router.add_get("/api/live", live)
     app.router.add_get("/api/boards/{system}/{board}/cards", list_cards)
     app.router.add_post("/api/boards/{system}/{board}/cards", create_card)
@@ -1124,6 +1180,7 @@ def make_app() -> web.Application:
     app.router.add_delete('/api/fleet/installs/{code}', fleet_install_cancel)
     app.router.add_post('/api/fleet/workers', fleet_register)
     app.router.add_put('/api/fleet/workers/{worker_id}', fleet_update)
+    app.router.add_delete('/api/fleet/workers/{worker_id}', fleet_unregister)
     app.router.add_post('/api/fleet/workers/{worker_id}/refresh', fleet_refresh)
     app.router.add_get('/api/fleet/workers/{worker_id}/jobs', fleet_worker_jobs)
     app.router.add_post('/api/launch/validate', launch_validate)

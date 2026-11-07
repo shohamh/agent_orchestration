@@ -37,7 +37,8 @@ const DAG = { model: 'declared', edges: [{ from: 'n-a', to: 'n-b', kind: 'depend
   { id: 'n-b', step: 'b', label: 'b', ref: 'r-b', kind: 'agent', agent: 'codex', column: 'stopped', status: 'FAILED', error: 'Exit code 2', started_at: ago(760), finished_at: ago(700), restart_supported: false, restart_reason: 'No replay here', backend_url: 'http://localhost:1/x' }] };
 const SAVED = { a: { x: 400, y: 30 }, b: { x: 40, y: 200 }, c: { x: 400, y: 200 } };
 const KINDS = [{ id: 'k-flow', title: 'A flow', flow: 'mirror-refresh', task: 'mirror-refresh', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800) },
-  { id: 'k-prog', title: 'A program', task: 'research-report', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) }];
+  { id: 'k-prog', title: 'A program', task: 'echo', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) },
+  { id: 'k-research', title: 'Cats', task: 'research-report', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) }];
 const session = (id, worker) => ({ id, title: id, task: 'agent-session', agent: 'codex', session_state: 'approval', column: 'waiting', status: 'WAITING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'card', id: worker, state: 'running' }] });
 const LINKS = [session('on-live', 'pc-on'), session('on-dead', 'pc-off'), session('on-lost', 'pc-unregistered'),
   { id: 'run-dead', title: 'run-dead', task: 'x', agent: 'pi', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'main', id: 'pc-off', state: 'running' }] },
@@ -48,11 +49,17 @@ const SCHEDULES = {
   flowrun: [{ id: 'later2', system: 'hatchet', board: 'flowrun', title: 'Next flow run', enabled: true, cron: '0 9 * * *', next_at: '2026-11-09T09:00:00Z', summary: 'Every day at 09:00', overlap: 'skip' }],
 };
 
-let holdSnapshot = false, workersDown = false;
+let holdSnapshot = false, workersDown = false, devRevision = 'v1';
 const WORKERS = [{ id: 'pc-on', pools: ['build'], tags: [], online: true }, { id: 'pc-off', pools: ['build'], tags: [], online: false }];
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://localhost');
-  const json = (data, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data)); };
+  const json = (data, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(data)); };
+  if (url.pathname === '/api/dev/revision') return json({ revision: devRevision });
+  if (url.pathname === '/dev-reload-test') {
+    response.writeHead(200, { 'Content-Type': 'text/html' });
+    response.end(`<script>sessionStorage.setItem('dev-reloads', String(Number(sessionStorage.getItem('dev-reloads') || 0) + 1))</script><script src="/static/dev-reload.js"></script>`);
+    return;
+  }
   if (url.pathname === '/api/systems') return json({ systems: ['hatchet'], columns: COLUMNS });
   if (url.pathname === '/api/live') {
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -88,7 +95,7 @@ async function evaluate(expression) {
   return result.result.value;
 }
 async function waitFor(expression, label = expression) {
-  for (let i = 0; i < 100; i++) { if (await evaluate(expression)) return; await sleep(50); }
+  for (let i = 0; i < 100; i++) { try { if (await evaluate(expression)) return; } catch {} await sleep(50); }
   assert.fail(`timed out waiting for ${label}`);
 }
 async function openBoard(name) {
@@ -179,7 +186,23 @@ test('each card shows what it runs, with the same icons as the graph', async () 
   assert.equal(await cardText('k-flow', '.source'), 'mirror-refresh', 'the icon says it is a flow');
   assert.equal(await kind('k-prog'), 'Program');
   assert.equal(await icon('k-prog'), await evaluate('FlowGraph.ICONS.program'));
+  assert.equal(await kind('k-research'), 'Flow');
+  assert.equal(await icon('k-research'), await evaluate('FlowGraph.ICONS.flow'));
+  assert.equal(await cardText('k-research', '.source'), 'research-report', 'the report task is identified as a graph');
   assert.equal(await evaluate(`document.querySelector('.card[data-id="k-flow"] .card-kind').classList.contains('live')`), true, 'running work pulses');
+});
+test('the live status glow fits inside its clipped status label', async () => {
+  await openBoard('empty');
+  const style = await evaluate(`(() => { const s = getComputedStyle(document.getElementById('status'), '::before'); return { width: s.width, height: s.height, background: s.backgroundImage }; })()`);
+  assert.deepEqual([style.width, style.height], ['13px', '13px']);
+  assert.match(style.background, /radial-gradient/);
+});
+test('development watcher reloads the page when static files change', async () => {
+  devRevision = 'v1';
+  await call('Page.navigate', { url: `${base}dev-reload-test` });
+  await waitFor(`sessionStorage.getItem('dev-reloads') === '1'`, 'initial dev page load');
+  devRevision = 'v2';
+  await waitFor(`sessionStorage.getItem('dev-reloads') === '2'`, 'automatic reload after a static change');
 });
 
 test('needs-you: the toolbar counts blocked sessions and walks through them, oldest first', async () => {

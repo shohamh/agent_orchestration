@@ -8,7 +8,11 @@ pub fn host_name() -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        std::fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).or_else(|| std::env::var("HOSTNAME").ok().filter(|n| !n.is_empty()))
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|n| !n.is_empty()))
     }
 }
 
@@ -19,7 +23,9 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn new() -> Sampler {
-        Sampler { last_cpu: cpu_ticks() }
+        Sampler {
+            last_cpu: cpu_ticks(),
+        }
     }
 
     /// (cpu percent, ram percent); None when the system cannot say. The CPU figure covers the time since the previous call.
@@ -27,7 +33,9 @@ impl Sampler {
         let now = cpu_ticks()?;
         let ram = ram_percent()?;
         let cpu = match self.last_cpu {
-            Some((busy, total)) if now.1 > total => 100.0 * (now.0.saturating_sub(busy)) as f64 / (now.1 - total) as f64,
+            Some((busy, total)) if now.1 > total => {
+                100.0 * (now.0.saturating_sub(busy)) as f64 / (now.1 - total) as f64
+            }
             _ => 0.0,
         };
         self.last_cpu = Some(now);
@@ -39,7 +47,11 @@ impl Sampler {
 fn cpu_ticks() -> Option<(u64, u64)> {
     let stat = std::fs::read_to_string("/proc/stat").ok()?;
     let line = stat.lines().next()?;
-    let values: Vec<u64> = line.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|v| v.parse().ok())
+        .collect();
     if values.len() < 4 {
         return None;
     }
@@ -51,7 +63,12 @@ fn cpu_ticks() -> Option<(u64, u64)> {
 #[cfg(target_os = "linux")]
 fn ram_percent() -> Option<f64> {
     let info = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let field = |name: &str| info.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<f64>().ok());
+    let field = |name: &str| {
+        info.lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<f64>().ok())
+    };
     let (total, available) = (field("MemTotal:")?, field("MemAvailable:")?);
     if total <= 0.0 {
         return None;
@@ -63,7 +80,10 @@ fn ram_percent() -> Option<f64> {
 fn cpu_ticks() -> Option<(u64, u64)> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetSystemTimes;
-    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
     let (mut idle, mut kernel, mut user) = (zero, zero, zero);
     // SAFETY: three valid FILETIME out-pointers
     if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
@@ -105,7 +125,10 @@ mod tests {
         let mut sampler = Sampler::new();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let (cpu, ram) = sampler.sample().expect("this OS reports CPU and RAM");
-        assert!((0.0..=100.0).contains(&cpu) && ram > 0.0 && ram <= 100.0, "cpu {cpu} ram {ram}");
+        assert!(
+            (0.0..=100.0).contains(&cpu) && ram > 0.0 && ram <= 100.0,
+            "cpu {cpu} ram {ram}"
+        );
         assert!(host_name().is_some());
     }
 }

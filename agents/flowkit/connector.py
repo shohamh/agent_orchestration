@@ -19,6 +19,12 @@ STATUS_EVERY = 5.0
 BACKOFF = (1, 2, 5, 10, 30)
 CHUNK = 64 * 1024
 
+REVOCATION_MESSAGE = 'This worker has been unregistered from the fleet. Run agent-worker uninstall, then install again with a new Fleet install command.'
+
+
+class WorkerRevoked(RuntimeError):
+    pass
+
 
 class Connector:
     def __init__(self, server, worker_id, token, local_port=8096, local_host='127.0.0.1', home=None):
@@ -30,38 +36,103 @@ class Connector:
         self.headers = {'Authorization': f'Bearer {token}'}
         self.connected = False  # the last poll reached the server
         self.stopping = asyncio.Event()
+        self.revoked_event = asyncio.Event()
+        self.revocation = None
+        if self.home is not None:
+            try:
+                state = json.loads((self.home / 'runtime' / 'connector.json').read_text(encoding='utf-8'))
+                saved = state.get('revocation')
+                if (isinstance(saved, dict) and saved.get('reason') == 'worker_revoked'
+                        and isinstance(saved.get('message'), str) and isinstance(saved.get('at'), (int, float))):
+                    self.revocation = {'reason': 'worker_revoked', 'message': saved['message'], 'at': saved['at']}
+                    self.revoked_event.set()
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
 
     async def run(self):
+        if self.revocation is not None:
+            await self.stopping.wait()
+            return
         timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10)
         async with aiohttp.ClientSession(headers=self.headers, timeout=timeout) as client:
-            tasks = {asyncio.create_task(self.push_status(client))}
+            status_task = asyncio.create_task(self.push_status(client))
+            tasks = {status_task}
             failures = 0
             try:
-                while not self.stopping.is_set():
+                while not self.stopping.is_set() and self.revocation is None:
                     try:
-                        calls = await self.poll(client)
+                        calls = await self.poll_until_revoked(client)
+                        if self.revocation is not None:
+                            break
                         self.connected, failures = True, 0
-                    except asyncio.CancelledError: raise
+                    except WorkerRevoked as exc:
+                        self.mark_revoked(str(exc))
+                        break
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
-                        if self.connected or failures == 0: log.warning('Relay poll failed: %s', exc)
+                        if self.connected or failures == 0:
+                            log.warning('Relay poll failed: %s', exc)
                         self.connected = False
-                        await asyncio.sleep(BACKOFF[min(failures, len(BACKOFF) - 1)])
+                        self.write_state()
+                        try:
+                            await asyncio.wait_for(self.revoked_event.wait(), BACKOFF[min(failures, len(BACKOFF) - 1)])
+                        except asyncio.TimeoutError:
+                            pass
                         failures += 1
                         continue
                     for call in calls:
+                        if self.revocation is not None:
+                            break
                         task = asyncio.create_task(self.handle(client, call))
                         tasks.add(task)
                         task.add_done_callback(tasks.discard)
             finally:
-                for task in tasks: task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                if self.revocation is not None:
+                    status_task.cancel()
+                    await asyncio.gather(status_task, return_exceptions=True)
+                else:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            if self.revocation is not None:
+                await self.stopping.wait()
+
+    async def poll_until_revoked(self, client):
+        poll_task = asyncio.create_task(self.poll(client))
+        revoked_task = asyncio.create_task(self.revoked_event.wait())
+        try:
+            done, _ = await asyncio.wait((poll_task, revoked_task), return_when=asyncio.FIRST_COMPLETED)
+            if revoked_task in done:
+                raise WorkerRevoked(self.revocation['message'])
+            return await poll_task
+        finally:
+            for task in (poll_task, revoked_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(poll_task, revoked_task, return_exceptions=True)
 
     async def poll(self, client):
         async with client.get(f'{self.base}/next', params={'wait': POLL_WAIT}, timeout=aiohttp.ClientTimeout(total=POLL_WAIT + 15, connect=10)) as response:
             if response.status == 204: return []
             if response.status == 401: raise RuntimeError("The server refused this PC's token")
+            if response.status == 410:
+                try: body = await response.json()
+                except (aiohttp.ClientError, ValueError, TypeError): body = {}
+                if isinstance(body, dict) and body.get('error') == 'worker_revoked':
+                    message = body.get('message')
+                    raise WorkerRevoked(message if isinstance(message, str) and message.strip() else REVOCATION_MESSAGE)
+                raise RuntimeError('Server answered 410')
             if response.status >= 400: raise RuntimeError(f'Server answered {response.status}')
             return await response.json()
+
+    def mark_revoked(self, message):
+        if self.revocation is None:
+            self.connected = False
+            self.revocation = {'reason': 'worker_revoked', 'message': message or REVOCATION_MESSAGE, 'at': time.time()}
+            self.write_state()
+            log.warning('Worker unregistered from the Fleet: %s', self.revocation['message'])
+        self.revoked_event.set()
 
     def write_state(self):
         if self.home is None: return
@@ -69,22 +140,39 @@ class Connector:
             target = self.home / 'runtime' / 'connector.json'
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix('.tmp')
-            temporary.write_text(json.dumps({'connected': self.connected, 'at': time.time()}), encoding='utf-8')
+            temporary.write_text(json.dumps({
+                'connected': self.connected,
+                'at': time.time(),
+                'revoked': self.revocation is not None,
+                'revocation': self.revocation,
+            }), encoding='utf-8')
             os.replace(temporary, target)
         except OSError: pass
 
     async def push_status(self, client):
-        while True:
+        while self.revocation is None:
             self.write_state()
             try:
                 async with client.get(f'{self.local}/health', timeout=aiohttp.ClientTimeout(total=10)) as local:
                     if local.status == 200:
                         health = {**await local.json(), **self.update_state()}
+                        if self.revocation is not None: return
                         async with client.post(f'{self.base}/status', json=health, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                            await response.read()
+                            if response.status == 410:
+                                try: body = await response.json()
+                                except (aiohttp.ClientError, ValueError, TypeError): body = {}
+                                if isinstance(body, dict) and body.get('error') == 'worker_revoked':
+                                    message = body.get('message')
+                                    self.mark_revoked(message if isinstance(message, str) and message.strip() else REVOCATION_MESSAGE)
+                                    return
+                            else:
+                                await response.read()
             except asyncio.CancelledError: raise
             except Exception as exc: log.debug('Status push skipped: %s', exc)
-            await asyncio.sleep(STATUS_EVERY)
+            if self.revocation is not None: return
+            try: await asyncio.wait_for(self.revoked_event.wait(), STATUS_EVERY)
+            except asyncio.TimeoutError: pass
+
 
     def update_state(self):
         """What `agent-worker update` last wrote about itself: running, updated or failed, with the reason."""
