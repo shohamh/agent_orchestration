@@ -8,6 +8,24 @@ Workflow engines schedule jobs and manage retries, but teams still need a usable
 
 This project adds that shared layer without replacing the engines. The Board gives people one place to start and monitor work. A Fleet of registered PCs runs agents and commands near their tools, credentials, and devices. Portable YAML workflows can be activated on any of the supported engines.
 
+## How the pieces fit
+
+The engines own native scheduling and run state. The shared layer supplies the Board, flow host,
+relay, and Fleet PCs that execute work locally.
+
+```mermaid
+flowchart LR
+    User --> Board["Agent Board"]
+    Board -->|"launch and inspect runs"| Engines["Hatchet · Prefect · Trigger.dev"]
+    Board -->|"save drafts and activate flows"| Host["Flow host"]
+    Host -->|"publish active YAML workflows"| Engines
+    Engines -->|"schedule native runs"| Runners["Engine workers / coordinators"]
+    Runners -->|"dispatch work"| Relay["Outbound relay"]
+    PC["Registered Fleet PC"] -->|"outbound poll and results"| Relay
+    Relay -->|"queued jobs"| PC
+    PC --> Local["Local agents, commands, and devices"]
+```
+
 ## What it adds above the engines
 
 - **One Board:** create agent sessions, command cards, schedules, and workflows; watch live progress; answer questions and permissions; steer or stop runs.
@@ -29,6 +47,31 @@ They solve related problems with different strengths. Supporting all three lets 
 | [Trigger.dev](trigger.dev/README.md) | TypeScript workflows, versioned deployments, and rich streaming/UI features. Its self-hosted run containers are less suited to local-device access and take more work to operate offline. |
 
 See [COMPARISON.md](COMPARISON.md) for tested capabilities, limitations, and operational trade-offs.
+
+## A portable workflow run
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Board
+    participant Host as Flow host
+    participant Engine as Chosen engine
+    participant Runner as Engine worker
+    participant Relay
+    participant PC as Fleet PC
+    User->>Board: Save a YAML draft and activate it
+    Board->>Host: Save draft / activate revision
+    Host->>Engine: Publish the active workflow
+    Engine->>Runner: Schedule run and step
+    Runner->>Relay: Dispatch step to selected PC
+    PC->>Relay: Outbound long-poll
+    Relay-->>PC: Deliver job
+    PC->>PC: Run agent, command, or flow step locally
+    PC-->>Relay: Return status and output
+    Relay-->>Runner: Forward result
+    Runner->>Engine: Complete native step
+    Engine-->>Board: Update run status
+```
 
 ## Start the Board
 
