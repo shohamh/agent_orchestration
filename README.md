@@ -1,13 +1,34 @@
 # Agent Orchestration
 
-A self-hosted platform for running AI-agent sessions and workflows. Use the web Board to create and monitor work, connect execution PCs, and run portable workflows on Hatchet, Prefect, or Trigger.dev. The repo includes example engine stacks and tools for offline deployment.
+A shared control plane for self-hosted AI-agent work, built on top of Hatchet, Prefect, or Trigger.dev.
 
-## What it does
+## The problem it solves
 
-- **Board:** create coding-agent sessions, command cards, schedules, and workflows; follow live progress, respond to permission or question prompts, and review results.
-- **Portable workflows:** define a workflow once in YAML, edit it in the visual builder, then activate it on Hatchet, Prefect, or Trigger.dev.
-- **Worker fleet:** register Windows or Linux PCs to run work. The `agent-worker` service connects outbound to the server, so Fleet workers need no inbound port.
-- **Offline deployment:** bundle container images, worker runtimes, Python dependencies, and npm packages on a connected machine, then transfer the bundle to the offline host.
+Workflow engines schedule jobs and manage retries, but teams still need a usable way to launch and follow coding agents, handle human interaction, build workflows, and route work to machines with the right tools or hardware. Those tasks otherwise end up split across engine dashboards, custom scripts, and one-off worker setups.
+
+This project adds that shared layer without replacing the engines. The Board gives people one place to start and monitor work. A Fleet of registered PCs runs agents and commands near their tools, credentials, and devices. Portable YAML workflows can be activated on any of the supported engines.
+
+## What it adds above the engines
+
+- **One Board:** create agent sessions, command cards, schedules, and workflows; watch live progress; answer questions and permissions; steer or stop runs.
+- **Interactive coding-agent sessions:** connect ACP-compatible agents such as Codex, Claude Code, and OpenCode to the Board's chat, with approvals, interruption, and continuation.
+- **Portable workflows:** author a YAML workflow once and activate it on Hatchet, Prefect, or Trigger.dev. The Board adds a visual editor and separates drafts from explicit activation.
+- **A shared worker Fleet:** register Windows or Linux PCs once, then route work by engine, software, pool, tags, and capacity. Fleet workers connect outbound, so they need no inbound port.
+- **Self-hosted and offline operation:** run the Board and engines yourself, or create a bundle for a network with no internet access.
+
+The engines remain responsible for their native scheduling, retries, persistence, and run lifecycle. The shared flow format covers common workflow behavior; engine-specific features remain available through each engine's own APIs and UI.
+
+## Why support three engines?
+
+They solve related problems with different strengths. Supporting all three lets a team choose the engine that fits its language, reliability, interaction, hardware, and operations needs—without giving up the shared Board and Fleet. You can run one engine; the project does not require all three.
+
+| Engine | Good fit when you need |
+|---|---|
+| [Hatchet](hatchet/README.md) | Durable task workflows, worker-label routing to hardware PCs, and straightforward offline operation. |
+| [Prefect](prefect/README.md) | Python-native workflows, a lightweight server, and built-in approval forms for human input. |
+| [Trigger.dev](trigger.dev/README.md) | TypeScript workflows, versioned deployments, and rich streaming/UI features. Its self-hosted run containers are less suited to local-device access and take more work to operate offline. |
+
+See [COMPARISON.md](COMPARISON.md) for tested capabilities, limitations, and operational trade-offs.
 
 ## Start the Board
 
@@ -23,31 +44,31 @@ Set `FLOW_HOST_TOKEN` in `.env` (for example, `openssl rand -hex 32`), then star
 docker compose up -d --build
 ```
 
-Open [http://localhost:8090](http://localhost:8090). Engine servers run separately; start at least one engine and configure its credentials before launching work. See the engine setup links below. For access beyond localhost, set a Board password and follow the [Board security guidance](board/README.md#login-and-phone-access-tailscale-funnel).
+Open [http://localhost:8090](http://localhost:8090). Engine servers run separately; start and configure at least one engine before launching work. For access beyond localhost, set a Board password and follow the [Board security guidance](board/README.md#login-and-phone-access-tailscale-funnel).
 
 ## Run work
 
-1. Start the Board and an engine: [Hatchet](hatchet/README.md), [Prefect](prefect/README.md), or [Trigger.dev](trigger.dev/README.md).
-2. Register an execution PC in **Fleet → Register PC** and run its generated install command. The worker needs Node.js/npm for the pinned ACP adapters. See [worker installation and lifecycle](docs/workers-and-context.md#register-a-pc).
-3. Create a coding-agent session or command card in **New card**. Real coding agents also need their CLI and provider credentials on the worker. The built-in `demo` agent is a no-credentials connectivity check.
+1. Start an engine using its guide above.
+2. In **Fleet → Register PC**, create a worker install command and run it on the Windows or Linux PC that should execute the work. Node.js and npm are required for the pinned ACP adapters; real agents also need their CLI and provider credentials on that PC. See [worker installation and lifecycle](docs/workers-and-context.md#register-a-pc).
+3. Create a coding-agent session, command card, or workflow in **New card**. The built-in `demo` agent is a no-credentials connectivity check.
 
-For portable workflows, open **Flows** in the Board or see the [workflow guide](flows/README.md). Saved workflows are drafts; activation is a separate, explicit action.
+For portable workflows, open **Flows** in the Board or read the [workflow guide](flows/README.md). Saved workflows are drafts; activation is a separate, explicit action.
 
 ## Offline deployment
 
-Build the bundle on a connected machine and transfer it to the offline host. The bundle includes the selected images and runtimes, Python wheels, worker binaries, and npm mirror contents; it contains no credentials. Follow [OFFLINE.md](OFFLINE.md) for prerequisites, bundling, transfer, and startup steps.
+Build a bundle on a connected machine and transfer it to the offline host. The bundle contains the selected images and runtimes, Python wheels, worker binaries, and npm mirror contents; it contains no credentials. Follow [OFFLINE.md](OFFLINE.md) for prerequisites, bundling, transfer, and startup steps.
 
 ## Repository map
 
 | Path | Purpose |
 |---|---|
-| [`board/`](board/README.md) | Web Board, engine status, cards, chat, Fleet, and workflow builder |
+| [`board/`](board/README.md) | Web Board, cards, chat, Fleet, and workflow builder |
 | [`agents/`](agents/README.md) | Coding-agent sessions, worker services, and execution adapters |
 | [`flows/`](flows/README.md) | Portable YAML workflows and examples |
 | [`hatchet/`](hatchet/README.md) | Hatchet example stack |
 | [`prefect/`](prefect/README.md) | Prefect example stack |
 | [`trigger.dev/`](trigger.dev/README.md) | Trigger.dev example stack |
 | [`offline/`](OFFLINE.md) | Offline bundle and deployment instructions |
-| [`COMPARISON.md`](COMPARISON.md) | Engine capabilities and operational trade-offs |
+| [`COMPARISON.md`](COMPARISON.md) | Engine capabilities and trade-offs |
 
-See the [worker guide](docs/workers-and-context.md) for Fleet setup, identity, updates, and troubleshooting. Each component README has its detailed configuration and verification steps.
+The [worker guide](docs/workers-and-context.md) covers Fleet setup, identity, updates, and troubleshooting. Each component README has detailed configuration and verification steps.
