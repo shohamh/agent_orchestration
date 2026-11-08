@@ -31,11 +31,19 @@ verify_worker_node_assets() {
 log() { printf '\n==> %s\n' "$*"; }
 
 install() {
-  local target=${1:-$PWD/agent_orchestration}
+  local target=${1:-$PWD/agent_orchestration} mirror_image
 
   log "Verifying checksums"
   (cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS)
   verify_worker_node_assets
+  local -a mirror_images
+  mapfile -t mirror_images <"$BUNDLE/images/npm-mirror.txt"
+  [ "${#mirror_images[@]}" -eq 1 ] &&
+    [[ "${mirror_images[0]}" =~ ^npm-mirror:offline-bundle-[A-Za-z0-9_.-]+$ ]] || {
+    echo "Invalid bundled npm mirror image reference" >&2
+    exit 1
+  }
+  mirror_image=${mirror_images[0]}
 
   log "Loading images"
   for tar in "$BUNDLE"/images/*.tar; do docker load -i "$tar"; done
@@ -90,7 +98,7 @@ install() {
   (cd "$target/offline/npm-mirror" &&
     COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
       NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
-      MODE=offline docker compose up -d --no-build)
+      NPM_MIRROR_IMAGE="$mirror_image" MODE=offline docker compose up -d --no-build)
 
   cat <<EOF
 

@@ -50,6 +50,15 @@ git clone <repository-url> agent-orchestration
 cd agent-orchestration
 ```
 
+Create the root `.env` before bundling:
+```bash
+cp .env.example .env
+```
+It defaults to `ENGINES=hatchet`, the recommended offline path. Set `ENGINES=prefect` for a
+Prefect-only Board, or `ENGINES=hatchet,prefect` to include both SDKs. The Board image is prebuilt;
+changing `ENGINES` on the offline host cannot add an SDK. Rebuild and rebundle if the required SDK
+was not included.
+
 On Windows, install Trigger's locked dependencies from PowerShell (`npm.cmd` is required; plain
 `npm` may fail in Git Bash):
 
@@ -64,8 +73,8 @@ Then run the bundle builder from Git Bash at the repository root:
 ./offline/bundle.sh                           # writes dist/offline-bundle/
 ```
 
-If the connected host already has an npm mirror on the default project, volume or port, give the
-bundle run isolated values, for example:
+The bundle builder chooses a unique npm mirror project, volume, port and image tag by default, so
+an existing mirror on the connected host is left untouched. Set explicit values only if needed:
 
 ```bash
 NPM_MIRROR_PROJECT=agent-orchestration-bundle \
@@ -73,11 +82,13 @@ NPM_MIRROR_VOLUME=agent-orchestration-bundle-storage \
 NPM_MIRROR_PORT=14873 ./offline/bundle.sh
 ```
 
-The npm package archive is portable; on the offline host, choose a project, volume and free port
-independently when running `load.sh install`.
+The npm package archive is portable. On a fresh offline Docker host, use the loader defaults; if a
+mirror already uses them, choose a different project, volume and free port when running `load.sh`.
 
 The Trigger CLI supplies its pinned deploy-image digests. Container images and package dependencies
 are obtained online; do not copy generated `.env` files or credentials to the offline host.
+The bundler runs `trigger.dev/generate-secrets.sh` to fill missing local Compose secrets. Its `.env`
+and generated registry password hash stay on the connected machine and are excluded from the bundle.
 
 `OUT=/path/to/bundle` selects another output directory. The script caches ACP adapter packages for
 both Windows x64 and Linux x64, plus Trigger's npm dependencies, Linux Python wheels, engine/app
@@ -106,6 +117,12 @@ outbound access only. The separate Python `flow_execution_worker.py` runs portab
 worker PC and uses a different token and inbound-network setup. Follow **Admin → Fleet setup** and
 `docs/workers-and-context.md` for that path.
 
+On Windows, run `load.sh` and `create-token.sh` from Git Bash with Docker Desktop in Linux-container mode.
+The commands use `/opt/agent_orchestration` as a Linux path; replace it with `/c/agent_orchestration`
+in Git Bash. `COMPOSE_FILE` uses `;` on Windows Docker Desktop and `:` on Linux/WSL.
+The Windows worker EXE is signed with a free self-signed certificate; it does not gain SmartScreen
+reputation or public trust automatically. See [worker release signing](worker/README.md) for details.
+
 ```bash
 cd offline-bundle
 ./load.sh install /opt/agent_orchestration
@@ -113,10 +130,13 @@ cd offline-bundle
 # Start Hatchet on the offline server.
 cd /opt/agent_orchestration/hatchet
 cp .env.example .env
-# In hatchet/.env: set HATCHET_HOST to this server's offline DNS name/IP and add:
-# COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml
+# Set HATCHET_HOST to this server's offline DNS name/IP and change HATCHET_ADMIN_PASSWORD
+# before the first start. Set COMPOSE_FILE with the platform separator:
+# Windows Docker Desktop: COMPOSE_FILE=docker-compose.yml;docker-compose.agents.yml
+# Linux/WSL: COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml
 docker compose up -d
-./scripts/create-token.sh               # copy the printed client token into board/.env
+./scripts/create-token.sh               # writes HATCHET_CLIENT_TOKEN into hatchet/.env
+# Copy that value into board/.env before starting the root Board stack.
 
 # Configure the root Board + flow-host stack.
 cd /opt/agent_orchestration
@@ -132,9 +152,23 @@ cp board/.env.example board/.env
 docker compose --profile hatchet up -d --no-build
 ```
 
+The `hatchet` profile starts both `flow-worker-hatchet` for portable YAML flows and
+`agent-session-worker-hatchet` for standalone `agent-session` cards. The session worker reuses the
+portable worker image and the root repo mount; no additional image is required.
+
 `load.sh install` verifies `SHA256SUMS`, loads the images, unpacks the source and worker assets,
 and starts the local npm mirror on port 4873. The root Compose command uses only preloaded images;
 `--no-build` prevents an accidental online build.
+
+The loader defaults are project `npm-mirror`, volume `npm-mirror-storage` and port `4873`. If
+those conflict on the offline host, use unique values instead of the default install command:
+
+```bash
+cd offline-bundle
+NPM_MIRROR_PROJECT=agent-orchestration-offline \
+NPM_MIRROR_VOLUME=agent-orchestration-offline-storage \
+NPM_MIRROR_PORT=14873 ./load.sh install /opt/agent_orchestration
+```
 
 Open `http://<server>:8090`, sign in, then open **Admin**. For Hatchet, the API URL must be
 reachable from the Board container (on `agent-net`, `http://hatchet-dashboard:80`); the dashboard
@@ -183,6 +217,9 @@ runs `npm ci` for the pinned ACP adapters, downloads the matching worker executa
 and connects outbound; no worker port needs to be opened. Autostart also requires Node on the PATH
 for the worker's service account. The bundle's `dist/worker` binaries are what Fleet serves.
 
+The Linux one-line install command uses `curl`; Windows uses PowerShell's built-in web request
+command. Neither requires public Internet access when the Board and npm mirror are reachable.
+
 For an offline transport smoke test, open the Hatchet tab and choose **New card → Coding agent
 session → demo**. Under **More placement options**, set **Run on one specific worker** to the PC
 you just registered, then launch. `demo` makes no model request; this checks engine scheduling,
@@ -195,11 +232,15 @@ mirror does not include a model, CLI login, or provider credentials.
 
 ### Other engines
 
-The bundle also carries Trigger.dev and Prefect server images. Choose them by aligning `COMPOSE_PROFILES`,
-`FLOW_BACKENDS`, and `ENGINES` in the root `.env`, then configure their server and credentials in
-their own `.env` and in `board/.env`. Use their `docker-compose.agents.yml` overlay to join
-`agent-net`. Do not start every engine by default; Trigger.dev has additional registry/base-image
-setup documented below, while Prefect uses the simpler image-and-wheelhouse path.
+The bundle also carries Trigger.dev and Prefect server images. Choose an engine by aligning
+`COMPOSE_PROFILES`, `FLOW_BACKENDS`, and `ENGINES` in the offline root `.env`, then configure its
+server and credentials in its own `.env` and in `board/.env`. Use the engine's `docker-compose.agents.yml`
+overlay to join `agent-net`. Do not start every engine by default; Trigger.dev has additional
+registry/base-image setup documented below, while Prefect uses the simpler image-and-wheelhouse path.
+
+`ENGINES` is baked into the Board image on the connected side. The offline root `.env` can select
+only SDKs included in that image; if Prefect was not included, setting `ENGINES=prefect` here is not
+enough. Rebuild and rebundle with the required SDKs.
 
 ```bash
 # Prefect only (after setting its .env and root/board configuration):
@@ -214,6 +255,10 @@ docker compose up -d --no-build
 # ENGINES=prefect
 # PREFECT_API_URL=http://prefect-server:4200/api
 ```
+
+The `prefect` profile starts both `flow-worker-prefect` for portable YAML flows and
+`agent-session-worker-prefect` for standalone `agent-session` cards. Both workers use the existing
+Prefect flow-worker image and mounted repo; no additional image is required.
 
 The examples below cover Trigger.dev deployment and native Prefect/Hatchet workers; they are not
 needed for the Hatchet Fleet smoke path above.

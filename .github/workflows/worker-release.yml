@@ -53,7 +53,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: worker
-      - run: pwsh worker/ci/build.ps1
+      - name: Build and sign Windows worker
+        env:
+          WORKER_SIGNING_PFX_BASE64: ${{ startsWith(github.ref, 'refs/tags/worker-v') && secrets.WORKER_SIGNING_PFX_BASE64 || '' }}
+          WORKER_SIGNING_PFX_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/worker-v') && secrets.WORKER_SIGNING_PFX_PASSWORD || '' }}
+        run: pwsh worker/ci/build.ps1
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: agent-worker-windows

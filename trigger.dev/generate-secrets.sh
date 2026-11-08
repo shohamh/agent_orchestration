@@ -96,6 +96,7 @@ done
 # the only hash the registry accepts, and openssl can't produce it - use httpd's
 # htpasswd via docker (already required for this stack).
 if [ "$FORCE" -eq 1 ] || [ -z "$(current_value DOCKER_REGISTRY_PASSWORD)" ]; then
+    mkdir -p "$(dirname "$htpasswd_file")"
     registry_user=$(current_value DOCKER_REGISTRY_USERNAME)
     registry_user=${registry_user:-registry-user}
     registry_pass=$(gen)

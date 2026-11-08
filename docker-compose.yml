@@ -81,6 +81,18 @@ services:
     image: agent-flow-worker-prefect:local
     command: ["python", "-u", "agents/flow_worker_service.py", "prefect"]
 
+  agent-session-worker-hatchet:
+    <<: *flow-worker
+    profiles: ["hatchet"]
+    image: agent-flow-worker-hatchet:local
+    command: ["python", "-u", "agents/hatchet_worker.py"]
+
+  agent-session-worker-prefect:
+    <<: *flow-worker
+    profiles: ["prefect"]
+    image: agent-flow-worker-prefect:local
+    command: ["python", "-u", "agents/prefect_worker.py"]
+
 networks:
   agents:
     name: agent-net

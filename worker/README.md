@@ -18,9 +18,31 @@ ci/build.ps1                              # Windows MSVC build -> ../dist/worker
 ci/fetch-release.sh github OWNER/REPO worker-v0.1.0   # download a release instead of building
 ```
 
-Releases are unsigned Linux and Windows binaries plus `SHA256SUMS`. The checksum detects transfer
-corruption; it does not identify the publisher or prevent SmartScreen/Defender reputation warnings.
-This project does not currently sign Windows releases.
+Releases include the Windows and Linux worker binaries plus `SHA256SUMS`. Windows release EXEs are
+Authenticode-signed with a free self-signed `CN=Agent Orchestration` certificate. The signature
+carries a signer thumbprint for inspection, not public trust: it does not establish a publicly
+trusted publisher, create SmartScreen reputation, or guarantee a Defender verdict. Checksums are computed after signing
+and detect transfer corruption; they do not establish publisher identity.
+
+For local Windows signing, run `pwsh ci/new-signing-certificate.ps1` from `worker/`. It creates the
+certificate in `CurrentUser\My`, prompts securely for a PFX password, and stores the PFX under
+`%LOCALAPPDATA%\AgentOrchestration\`, outside the repository. Keep both the PFX and password private
+and out of version control. `ci/build.ps1` signs with the single matching certificate automatically;
+if there is more than one, pass `-SignerThumbprint <thumbprint>`.
+
+CI release builds for tags `worker-v*` require both `WORKER_SIGNING_PFX_BASE64` (the PFX as
+single-line Base64) and `WORKER_SIGNING_PFX_PASSWORD`. Add them as GitHub Actions repository secrets
+and as masked, hidden, protected GitLab CI/CD variables; protect the `worker-v*` tags. Encode the PFX
+locally without committing or printing it. Tagged release builds fail if either value is absent or
+the signature cannot be verified. Pull-request and branch builds may remain unsigned. These values
+must be provisioned manually; no CI secrets are set by this repository change.
+The certificate expires three years after creation. Before renewal, create a replacement, build with
+`-SignerThumbprint <thumbprint>` while both certificates are present, verify the new signature, and
+replace the CI PFX secrets if CI signing is enabled. Keep the old certificate until you no longer need
+to inspect signatures made with it.
+
+The release pipeline does not upload binaries to Microsoft or submit them for review. Signing alone
+does not guarantee a clean antivirus verdict.
 
 
 Worker commands resolve the installed home from the executable's marked install folder, then the marked

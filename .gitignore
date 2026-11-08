@@ -32,5 +32,6 @@ venv/
 # Editors / OS
 .vscode/
 .idea/
+.claude/launch.json
 .DS_Store
 Thumbs.db

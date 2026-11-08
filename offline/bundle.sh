@@ -30,10 +30,11 @@ SKOPEO_IMAGE=${SKOPEO_IMAGE:-quay.io/skopeo/stable:v1.20.0}
 BUILDKIT_IMAGE=${BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}
 PY_IMAGE=${PY_IMAGE:-python:3.12-slim}  # downloads Linux wheels and builds cross-platform Confluence runtimes
 WORKER_BUILD_IMAGE=${WORKER_BUILD_IMAGE:-rust:alpine}
-NPM_MIRROR_PORT=${NPM_MIRROR_PORT:-4873}
-NPM_MIRROR_PROJECT=${NPM_MIRROR_PROJECT:-npm-mirror}
-NPM_MIRROR_VOLUME=${NPM_MIRROR_VOLUME:-npm-mirror-storage}
 BUNDLE_IMAGE_SUFFIX="offline-bundle-${BASHPID:-$$}-$(date +%s)"
+BUNDLE_NPM_MIRROR_IMAGE="npm-mirror:$BUNDLE_IMAGE_SUFFIX"
+NPM_MIRROR_PROJECT=${NPM_MIRROR_PROJECT:-$BUNDLE_IMAGE_SUFFIX}
+NPM_MIRROR_VOLUME=${NPM_MIRROR_VOLUME:-${NPM_MIRROR_PROJECT}-storage}
+NPM_MIRROR_PORT=${NPM_MIRROR_PORT:-$((20000 + (${BASHPID:-$$} % 30000)))}
 SKOPEO_VOLUME="offline-skopeo-${BASHPID:-$$}-$(date +%s)"
 WORKER_NODE_VERSION=v24.22.2
 WORKER_NODE_LINUX_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
@@ -48,6 +49,7 @@ fi
 log() { printf '\n==> %s\n' "$*"; }
 mkdir -p "$OUT/images" "$OUT/wheelhouse"
 OUT=$(cd "$OUT" && pwd)
+printf '%s\n' "$BUNDLE_NPM_MIRROR_IMAGE" >"$OUT/images/npm-mirror.txt"
 
 # Interpolated defaults like ${CLICKHOUSE_IMAGE_TAG:-26.2} need the project's .env to exist.
 ensure_env() { [ -f "$1/.env" ] || cp "$1/.env.example" "$1/.env"; }
@@ -227,6 +229,8 @@ log "Trigger.dev images"
 (
   cd "$ROOT/trigger.dev"
   [ -f .env ] || { cp .env.example .env && cat local.env.example >>.env; }
+  # Compose needs local secrets even for image staging; they stay out of the source bundle.
+  ./generate-secrets.sh
   set -a; . ./.env; set +a
   docker compose pull --ignore-buildable --quiet
   docker compose build
@@ -297,6 +301,10 @@ services:
     image: agent-flow-worker-hatchet:$BUNDLE_IMAGE_SUFFIX
   flow-worker-prefect:
     image: agent-flow-worker-prefect:$BUNDLE_IMAGE_SUFFIX
+  agent-session-worker-hatchet:
+    image: agent-flow-worker-hatchet:$BUNDLE_IMAGE_SUFFIX
+  agent-session-worker-prefect:
+    image: agent-flow-worker-prefect:$BUNDLE_IMAGE_SUFFIX
 EOF
 (
   cd "$ROOT"
@@ -352,11 +360,14 @@ log "npm mirror (Verdaccio) for: $NPM_PROJECTS"
 (
   cd "$ROOT/offline/npm-mirror"
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=offline docker compose build --quiet
+    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose build --quiet
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=online docker compose up -d --build --wait 2>/dev/null ||
+    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=online docker compose up -d --build --wait 2>/dev/null ||
     COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-      NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=online docker compose up -d --build
+      NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+      NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=online docker compose up -d --build
 )
 run_npm_project() {
   local proj=$1 target_os=$2 phase=$3 tmp cache
@@ -393,9 +404,11 @@ done
 (
   cd "$ROOT/offline/npm-mirror"
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=online docker compose stop
+    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=online docker compose stop
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=offline docker compose up -d --no-build --wait
+    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose up -d --wait
 )
 log "Verifying npm cache without upstream access"
 for proj in $NPM_PROJECTS; do
@@ -407,10 +420,12 @@ for proj in $NPM_PROJECTS; do
   fi
 done
 (
-    COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-      NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" MODE=offline docker compose stop
+  cd "$ROOT/offline/npm-mirror"
+  COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
+    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose stop
 )
-docker save npm-mirror:offline busybox:1.37 >"$OUT/images/npm-mirror.tar"
+docker save "$BUNDLE_NPM_MIRROR_IMAGE" busybox:1.37 >"$OUT/images/npm-mirror.tar"
 docker run --rm -v "$NPM_MIRROR_VOLUME:/s" busybox tar -C /s -cf - . >"$OUT/npm-storage.tar"
 # Downloaded inside a Linux container: pip evaluates environment markers against the machine it
 # runs on even with --platform, so on a Windows bundling host it would demand Windows-only deps
@@ -450,5 +465,7 @@ tar -C "$ROOT" -cf "$OUT/source.tar" \
   } | tar --null --append --file="$OUT/source.tar" --files-from=-
 )
 
+cp "$ROOT/offline/load.sh" "$OUT/load.sh"
+chmod 755 "$OUT/load.sh"
 (cd "$OUT" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 log "Done: $OUT ($(du -sh "$OUT" | cut -f1)). Copy the whole directory to the offline network."

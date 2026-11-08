@@ -188,11 +188,33 @@ release with both programs. `worker/ci/fetch-release.sh` downloads the assets of
 `dist/worker/` for an offline server. The Rust dependencies are vendored in `worker/vendor/` (pruned of import libraries for Windows targets we do not build), so
 `cargo build --locked` needs no network; `worker/ci/vendor.sh` refreshes them after a `Cargo.toml` change.
 
+Windows release EXEs are Authenticode-signed using a free self-signed `CN=Agent Orchestration`
+certificate. The signature identifies the signer by certificate thumbprint, but a self-signed
+certificate does not establish a publicly trusted publisher or SmartScreen reputation and does not
+guarantee a Defender verdict. The Windows `.sha256` file and release `SHA256SUMS` are generated from
+the signed executable bytes, so the checksum matches the artifact that is published.
+
+For local signing, run `pwsh worker/ci/new-signing-certificate.ps1`. It creates the code-signing
+certificate in `CurrentUser\My`, prompts for a PFX password without echoing it, and exports the PFX
+to `%LOCALAPPDATA%\AgentOrchestration\` outside the repository. Keep the PFX and password private
+and never commit them. `worker/ci/build.ps1` automatically selects the single matching certificate;
+with multiple matches, use `-SignerThumbprint <thumbprint>`.
+
+CI release builds for `worker-v*` tags require `WORKER_SIGNING_PFX_BASE64` (single-line Base64 of
+the PFX) and `WORKER_SIGNING_PFX_PASSWORD`. Add both as GitHub Actions repository secrets and as
+masked, hidden, protected GitLab CI/CD variables, and protect the `worker-v*` tags. Base64-encode the
+PFX locally without committing or printing it. The Windows release build fails if either variable
+is missing or signing/verification fails; non-release branch and pull-request builds may remain
+unsigned. Secret provisioning is a manual maintainer step and is not done by this repository change.
+
+The signing and release workflows do not upload binaries to Microsoft or submit them for review.
+
 #### Windows security checks
 
-Windows releases are currently unsigned. Signing establishes publisher identity; it does not
-guarantee a clean antivirus verdict. A SmartScreen “unrecognized app” warning is separate from a
-Defender Antivirus detection ([Microsoft developer guidance](https://learn.microsoft.com/en-us/defender-xdr/developer-faq)).
+Signing establishes the selected certificate identity only; it does not make a self-signed
+certificate publicly trusted, create SmartScreen reputation, or guarantee a clean antivirus verdict.
+A SmartScreen “unrecognized app” warning is separate from a Defender Antivirus detection
+([Microsoft developer guidance](https://learn.microsoft.com/en-us/defender-xdr/developer-faq)).
 
 If Defender detects a worker, keep the threat name, file SHA-256 and Defender intelligence version.
 Update security intelligence normally before changing or rebuilding the program. On 2026-11-06,
@@ -210,11 +232,13 @@ real-time protection. Require both a successful scan and “found no threats” 
 A file scan alone does not verify runtime behavior: also exercise the downloaded worker's
 opt-in install, Scheduled Task startup, program execution, update, restart and uninstall, then
 check for new Defender detection events (Operational log event 1116). Keep protection enabled;
-do not add exclusions to make the check pass. If detection persists with current intelligence,
-submit the exact affected binary through Microsoft's
-[software-developer false-positive process](https://learn.microsoft.com/en-us/defender-xdr/submission-guide),
-with the owner's approval to upload it. Neither changing languages nor signing alone is a
-verified remedy for a particular detection.
+do not add exclusions to make the check pass.
+
+If detection persists with current intelligence, preserve the artifact details and consult
+Microsoft's [software-developer false-positive process](https://learn.microsoft.com/en-us/defender-xdr/submission-guide).
+The worker signing and release pipeline does not submit or upload binaries to Microsoft; any such
+submission is outside this workflow and would require a separate explicit decision. Neither changing
+languages nor signing alone is a verified remedy for a particular detection.
 
 ### Why the PC needs no open port: the relay
 

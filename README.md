@@ -88,10 +88,13 @@ credentials. [OFFLINE.md](OFFLINE.md) separates each connected-side and offline-
 
 ## Board, flows, and worker PCs
 
-The root [docker-compose.yml](docker-compose.yml) runs the Board, flow host, and Hatchet/Prefect
-flow-worker containers on the shared `agent-net`. Engine servers run from their own folders and
-join that network with their `docker-compose.agents.yml` overlay. Flow steps run on registered PCs;
-the containers coordinate and dispatch work, but do not execute agent steps themselves.
+The root [docker-compose.yml](docker-compose.yml) runs the Board, flow host, and workers on the
+shared `agent-net`. Selecting the `hatchet` or `prefect` Compose profile starts both that engine's
+portable-flow worker (`flow-worker-*`, which dispatches portable YAML flow steps to Fleet PCs) and
+its native session worker (`agent-session-worker-*`, which registers `agent-session` for standalone
+Coding agent session cards). The session worker reuses the flow-worker image and mounted repo. Engine
+servers run from their own folders and join the network with their `docker-compose.agents.yml`
+overlay. Fleet PCs execute portable flow steps and standalone agent sessions.
 
 For the simplest offline deployment, use **Hatchet only**. It is the smallest engine setup here
 and does not need Trigger.dev's image registry/build pipeline. In the root `.env`, set:
@@ -106,9 +109,10 @@ HATCHET_URL=http://hatchet-dashboard:80
 ```
 
 Also set `COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml` in `hatchet/.env` so the
-Hatchet API and dashboard join `agent-net`. Set `HATCHET_HOST` there to the server's offline-network
-DNS name or IP. Start Hatchet, create its client token, then start the root stack. The offline
-procedure, including bundle transfer, is in [OFFLINE.md](OFFLINE.md).
+Hatchet API and dashboard join `agent-net` (use `;` instead of `:` as the separator on Windows
+Docker Desktop). Set `HATCHET_HOST` there to the server's offline-network DNS name or IP. Start
+Hatchet, create its client token, then start the root stack. The offline scripts are Bash; on Windows,
+run them from Git Bash or WSL. See [OFFLINE.md](OFFLINE.md) for the complete transfer procedure.
 
 For a connected development stack, copy `.env.example` to `.env`, set the same engine selections
 and secrets, then run:
@@ -117,24 +121,30 @@ and secrets, then run:
 docker compose up -d --build
 ```
 
-`COMPOSE_PROFILES` starts the Hatchet/Prefect flow-worker containers; `FLOW_BACKENDS` tells the
-flow host which engines to activate flows on; `ENGINES` selects the SDKs built into the Board image.
-Keep these aligned. **For offline Fleet execution, use Hatchet.** Prefect is also available when its
-server and credentials are configured. Trigger.dev uses a separate `trigger dev` worker for local
-development; do not select Trigger production as a Fleet execution engine.
+`COMPOSE_PROFILES` starts both workers for the selected Hatchet/Prefect engine: the portable-flow
+worker coordinates YAML workflows, while the native session worker registers the engine's
+`agent-session` workflow for standalone Coding agent session cards. `FLOW_BACKENDS` tells the flow
+host which engines to activate flows on; `ENGINES` selects the SDKs built into the Board image. Keep
+these aligned. For an offline bundle, set `ENGINES` in the connected root `.env` before running
+`offline/bundle.sh`; the preloaded Board image contains only those SDKs. Set `ENGINES=hatchet,prefect`
+to keep both available. Changing this set after transfer requires rebuilding and rebundling the Board
+image. **For offline Fleet execution, use Hatchet.** Prefect is also available when its server and
+credentials are configured. Trigger.dev uses a separate `trigger dev` worker for local development;
+do not select Trigger production as a Fleet execution engine.
 
 Engine selection for the Board and flow host:
 
-| Engine | Enable it | What runs the flows | Use |
+| Engine | Enable it | What runs the flows and sessions | Use |
 |---|---|---|---|
-| Hatchet | `HATCHET_CLIENT_TOKEN` in `board/.env`; `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`, `ENGINES=hatchet` | Hatchet server plus `flow-worker-hatchet` | Recommended offline Fleet path |
-| Prefect | `PREFECT_API_URL`; `COMPOSE_PROFILES=prefect`, `FLOW_BACKENDS=prefect` | Prefect server plus `flow-worker-prefect` | Supported Fleet alternative; offline wheelhouse included |
+| Hatchet | `HATCHET_CLIENT_TOKEN` in `board/.env`; `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`, `ENGINES=hatchet` | Hatchet server, `flow-worker-hatchet` (portable YAML flows), and `agent-session-worker-hatchet` (standalone sessions) | Recommended offline Fleet path |
+| Prefect | `PREFECT_API_URL`; `COMPOSE_PROFILES=prefect`, `FLOW_BACKENDS=prefect`, `ENGINES=prefect` | Prefect server, `flow-worker-prefect` (portable YAML flows), and `agent-session-worker-prefect` (standalone sessions) | Supported Fleet alternative; offline wheelhouse included |
 | Trigger.dev · production | `TRIGGER_SECRET_KEY` in `board/.env` | Trigger's own server/worker stack | Production cards/deploys; not the offline Fleet path |
 | Trigger.dev · local | `TRIGGER_DEV_SECRET_KEY` in `board/.env` | Native `trigger dev` process | Connected local development only |
 
-Only Hatchet and Prefect have flow-worker containers in the root Compose file. Start the matching
-engine server with its `docker-compose.agents.yml` overlay so it joins `agent-net`. Trigger.dev
-production/local are separate engine integrations, not a substitute for a registered Fleet worker.
+Hatchet and Prefect profile workers use the shared root Compose network and mounted repo. Start the
+matching engine server with its `docker-compose.agents.yml` overlay so it joins `agent-net`.
+Trigger.dev production/local are separate engine integrations, not a substitute for a registered
+Fleet worker.
 
 
 To verify execution, open the Hatchet tab, choose **New card → Coding agent session → demo**,
@@ -152,8 +162,13 @@ URL. Settings persist in the `board_data` volume.
 
 In **Fleet → Register PC**, select the engine(s) and worker capacity/tags, then run the generated
 PowerShell or shell install command on the target PC as a normal user. The worker connects outbound
-to the server; no worker port needs to be opened. See
-[worker registration and lifecycle](docs/workers-and-context.md#register-a-pc).
+to the server; no worker port needs to be opened. See [worker registration and lifecycle](docs/workers-and-context.md#register-a-pc).
+
+This command installs the standalone Rust `agent-worker` used by Coding agent session cards. Portable
+YAML flow steps use the separate Python `agents/flow_execution_worker.py` service, with its own token
+and inbound endpoint; see [advanced worker setup](docs/workers-and-context.md#advanced-register-a-pc-the-server-can-reach-directly).
+
+On Linux, the command requires `curl`; Windows uses PowerShell's built-in web request support.
 
 The built-in `demo` agent needs no model or CLI. The Fleet installer runs `npm ci` to install the
 pinned ACP adapters, so **Node.js and npm are required on the worker before install**. The offline

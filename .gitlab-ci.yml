@@ -52,6 +52,8 @@ worker:build:linux:
     key: worker-cargo-linux
     paths: [.cargo-home/registry, worker/target]
 
+# Configure WORKER_SIGNING_PFX_BASE64 and WORKER_SIGNING_PFX_PASSWORD as protected CI/CD variables.
+# The shared build script detects worker-v tags and fails closed unless both signing secrets verify.
 worker:build:windows:
   stage: build
   tags: [$WINDOWS_RUNNER_TAG]
