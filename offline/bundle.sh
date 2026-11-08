@@ -361,9 +361,6 @@ log "npm mirror (Verdaccio) for: $NPM_PROJECTS"
   cd "$ROOT/offline/npm-mirror"
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
     NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
-    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose build --quiet
-  COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
-    NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
     NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=online docker compose up -d --build --wait 2>/dev/null ||
     COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
       NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
@@ -408,7 +405,13 @@ done
     NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=online docker compose stop
   COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
     NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
-    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose up -d --wait
+    NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose up -d --build --wait 2>/dev/null ||
+    COMPOSE_PROJECT_NAME="$NPM_MIRROR_PROJECT" NPM_MIRROR_PROJECT="$NPM_MIRROR_PROJECT" \
+      NPM_MIRROR_VOLUME="$NPM_MIRROR_VOLUME" NPM_MIRROR_PORT="$NPM_MIRROR_PORT" \
+      NPM_MIRROR_IMAGE="$BUNDLE_NPM_MIRROR_IMAGE" MODE=offline docker compose up -d --build
+  log "Checking offline mirror has no upstream"
+  docker run --rm --network none --entrypoint node "$BUNDLE_NPM_MIRROR_IMAGE" -e \
+    'const fs = require("node:fs"); const config = fs.readFileSync("/verdaccio/conf/config.yaml", "utf8"); if (/^uplinks:/m.test(config)) { console.error("Bundled npm mirror still has upstreams"); process.exit(1); }'
 )
 log "Verifying npm cache without upstream access"
 for proj in $NPM_PROJECTS; do

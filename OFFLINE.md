@@ -136,7 +136,8 @@ cp .env.example .env
 # Linux/WSL: COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml
 docker compose up -d
 ./scripts/create-token.sh               # writes HATCHET_CLIENT_TOKEN into hatchet/.env
-# Copy that value into board/.env before starting the root Board stack.
+# Copy the token into board/.env as HATCHET_CLIENT_TOKEN and root .env as
+# HATCHET_WORKER_CLIENT_TOKEN.
 
 # Configure the root Board + flow-host stack.
 cd /opt/agent_orchestration
@@ -148,7 +149,7 @@ cp .env.example .env
 # HATCHET_GRPC=hatchet-engine:7070
 # HATCHET_URL=http://hatchet-dashboard:80
 cp board/.env.example board/.env
-# Set BOARD_PASSWORD and HATCHET_CLIENT_TOKEN in board/.env.
+# Set BOARD_PASSWORD and HATCHET_CLIENT_TOKEN in board/.env; set HATCHET_WORKER_CLIENT_TOKEN in root .env.
 docker compose --profile hatchet up -d --no-build
 ```
 
@@ -300,15 +301,23 @@ npx trigger.dev deploy --skip-update-check --network host
 - **New dependencies need a new bundle.** Any new npm or pip dependency needs a bundle refresh or an internal mirror that is fed regularly. For ongoing development inside the offline network, a permanent Verdaccio (npm) and devpi or a simple index (pip) is the sustainable answer. `offline/npm-mirror` is already that for npm. You can also `npm publish` internal packages to it.
 - **LLM access.** Agents inside the offline network need an on-prem model endpoint (vLLM, Ollama, TGI, ...). All three orchestrators just call it over HTTP from task code. None of them needs anything special for this.
 - **Email.** Trigger.dev login links go to the bundled Mailpit inbox (`http://<server>:8025`, set `MAILPIT_PUBLISH_IP=0.0.0.0`). To use Exchange or another internal mail server instead, follow "Email: Mailpit or Exchange" in `trigger.dev/README.md`.
-- **What was and wasn't tested here.**
+- **Windows Docker Desktop VMM mounts.** On this host, VMM rejected bind mounts from WSL home. A 1.4 MB source tree under `C:\Users\Shoham\workspace` stalled during container creation, while the same tree under `%LOCALAPPDATA%\Temp` mounted successfully. This is environment-specific; use a Windows-drive path Docker Desktop can access and validate Compose startup before disconnecting.
+- **What was and wasn’t tested here.**
   - **Tested:**
-    - `bundle.sh` end to end.
+    - `load.sh install` from a fresh clone into a fresh install target on this Windows/Docker Desktop host. `SHA256SUMS` validation passed; bundled images and runtime artifacts loaded.
     - `load.sh trigger-base-images`.
-    - The offline Trigger.dev deploy path, against the running stack on this Windows/Docker Desktop machine.
-    - Prefect: the worker image built with networking disabled, using only the bundled wheels. The whole Prefect stack ran on a Docker network with no internet route, and every requirement test passed there.
+    - The offline Trigger.dev deploy path against the running stack on this host (2026-11-02).
+    - Prefect: the worker image built without networking using bundled wheels; the stack ran on a Docker network without an internet route and its requirement checks passed.
+    - The npm mirror's offline configuration has no uplinks, verified by running it with `--network none`.
+    - The Admin page's Hatchet connectivity check returned `Reachable`; saving the Hatchet URLs returned HTTP 200.
+    - Fleet installed the bundled Linux worker on an internal Docker network. It connected to the Board, reached the internal npm mirror (`npm ping` returned `PONG`), and an external HTTPS probe from the worker failed as expected.
+    - A simulated demo task dispatched to that worker reached approval, question, answer, and a completed turn using the bundled Hatchet worker image. No model was called. **The Hatchet run then remained `RUNNING` and the Board remained in `Waiting`; Hatchet worker logs showed gRPC heartbeat `DEADLINE_EXCEEDED`. Final task completion is not verified.**
+    - For local browser access, the test Board was temporarily attached to Docker's `bridge` network. The test worker, Hatchet services, and npm mirror used the internal network; this host was not fully air-gapped.
   - **Not tested:**
-    - `load.sh install` on a fresh host.
-    - Hatchet and Trigger.dev on a network with no internet route. This machine still had internet, so a forgotten dependency in those stacks would not have shown up.
+    - An uninterrupted successful `bundle.sh` run. The transfer bundle was assembled from verified stages after bundle attempts were interrupted; fresh online bundle creation is not verified end to end.
+    - A physically separate offline PC/host. This test used containers on the same Windows/Docker Desktop machine.
+    - A real model or provider CLI in the offline environment.
+    - End-to-end task completion after the observed Hatchet heartbeat failure.
 
-  Do one dry run on a disconnected VM, for example with its network removed, before relying on this.
+  Disconnecting a container network is not a substitute for testing on a separate offline host; do a dry run there before relying on this.
 - **The connected-side mirror stops after bundling.** `bundle.sh` stops the online Verdaccio when it finishes. Start it with `MODE=offline docker compose up -d` in `offline/npm-mirror` if you want to keep using it locally.

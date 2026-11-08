@@ -29,6 +29,9 @@ verify_worker_node_assets() {
     sha256sum -c --quiet -)
 }
 log() { printf '\n==> %s\n' "$*"; }
+# Keep paths native for Docker on Git Bash; MSYS_NO_PATHCONV is set above.
+native() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+
 
 install() {
   local target=${1:-$PWD/agent_orchestration} mirror_image
@@ -46,7 +49,7 @@ install() {
   mirror_image=${mirror_images[0]}
 
   log "Loading images"
-  for tar in "$BUNDLE"/images/*.tar; do docker load -i "$tar"; done
+  for tar in "$BUNDLE"/images/*.tar; do docker load -i "$(native "$tar")"; done
 
   log "Unpacking source into $target"
   mkdir -p "$target"
