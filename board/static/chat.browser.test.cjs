@@ -251,6 +251,8 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     // Ordinary logs: the newest 1000 lines, then 1000 more per scroll to the top.
     await evaluate('document.querySelector("#d-close").click(); document.querySelectorAll(".card")[1].click()');
     await waitFor('document.querySelectorAll("#d-progress li:not(.log-older)").length === 1000');
+    assert.equal(await evaluate('document.querySelector("#d-output-title").textContent'), 'Output');
+    assert.equal(await evaluate('document.querySelector("#d-progress").parentElement.id'), 'd-output-section');
     assert.equal(await evaluate('document.querySelector("#d-progress li:not(.log-older)").textContent'), 'line 1500');
     await evaluate('const list = document.querySelector("#d-progress"); list.scrollTop = 0; list.dispatchEvent(new Event("scroll"))');
     await waitFor('document.querySelector("#d-progress .spinner")');
@@ -276,8 +278,13 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     assert.deepEqual(posts.at(-1), { url: '/api/cards/hatchet/flow1/nodes/agent-ref/input', body: { type: 'message', text: 'step guidance' } });
     assert.equal(await evaluate('document.querySelector("#d-node a.backend-link").target'), '_blank');
     await evaluate('selectNode("program-node")');
-    await waitFor('document.querySelectorAll("#d-node ol.progress li:not(.log-older)").length === 1000');
-    assert.equal(await evaluate('document.querySelector("#d-node ol.progress").scrollHeight > document.querySelector("#d-node ol.progress").clientHeight'), true);
+    await waitFor('document.querySelectorAll("#d-node .node-output ol.progress li:not(.log-older)").length === 1000');
+    assert.equal(await evaluate('document.querySelector("#d-node .node-output h4").textContent'), 'Output');
+    assert.equal(await evaluate('document.querySelector("#d-node .node-output ol.progress").scrollHeight > document.querySelector("#d-node .node-output ol.progress").clientHeight'), true);
+    const programStream = [...streams].find(stream => stream.node === 'program-ref');
+    assert.ok(programStream, 'the selected program step has a live engine stream');
+    send(programStream, { type: 'node-lines', card: 'flow1', node: 'program-ref', start: 2500, lines: ['worker output arrived live'] });
+    await waitFor('document.querySelector("#d-node .node-output").textContent.includes("worker output arrived live")');
     await evaluate('document.querySelector("#d-node .restart-step").click()');
     await waitFor('document.querySelector("#status").textContent.includes("Engine accepted step replay")');
     assert.equal(posts.at(-1).url, '/api/cards/hatchet/flow1/nodes/program-ref/restart');

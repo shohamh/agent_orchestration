@@ -486,7 +486,7 @@ async def _run_placed(root, key, requirements, wanted, payload, bound, receive, 
         while True:
             worker = await wait_for_worker(requirements, record, lambda: check_cancelled(root))
             try:
-                return await job.run(worker, attempt['job'])
+                return await job.run(worker, attempt['job'], engine)
             except _Replace as exc:
                 previous, next_job = attempt['job'], str(uuid.uuid4())
                 if not job.safe_to_replace:
@@ -532,11 +532,15 @@ class _Job:
     def current(self, job_id):
         if json.loads(self.fence.read_text()) != job_id: raise RuntimeError('Execution superseded by another attempt')
 
-    async def run(self, worker, job_id):
+    async def run(self, worker, job_id, engine=None):
         root, key, info, record, sink = self.root, self.key, self.info, self.record, self.sink
         url = worker['url']+'/jobs/'+job_id
-        # `authorize`: after admission the service waits for this coordinator to confirm the start.
+        native_engine = engine if engine in ('hatchet', 'prefect') and engine in worker.get('native_engines', []) else None
+        # Native engines receive a per-PC dispatch request; the local SDK worker starts the job
+        # after it has been scheduled there. Trigger.dev and legacy PCs remain Fleet relays.
         config = {'id': job_id, 'authorize': True, 'gate_id': worker['_gate_id'], 'settings_revision': worker.get('settings_revision', 0), **self.payload}
+        if native_engine:
+            config['native_engine'] = native_engine
         record(state='queued', worker=None, waiting_reason=None, intervention_needed=False, waiting=[], message=None, resolution=None)
         async with aiohttp.ClientSession(headers=worker['_headers'], timeout=aiohttp.ClientTimeout(total=120, connect=5)) as client:
             async def call(method, endpoint, data=None, timeout=None):
@@ -593,7 +597,9 @@ class _Job:
                                 self.current(job_id)
                                 check_cancelled(root)
                             previously, authorized, granted = authorized, True, data['authorization']  # may start: never placed again
-                            try: await call('POST', url+'/start', {'nonce': granted}, timeout=START_TIMEOUT)
+                            endpoint = url+'/dispatch' if native_engine else url+'/start'
+                            request = {'nonce': granted, **({'engine': native_engine} if native_engine else {})}
+                            try: await call('POST', endpoint, request, timeout=START_TIMEOUT)
                             except RuntimeError: authorized, granted = previously, None  # explicitly refused: not started by this
                             except (aiohttp.ClientError, asyncio.TimeoutError, ValueError): pass  # may have arrived: assume it did
                     if data.get('worker') and info.get('worker')!=data['worker']:

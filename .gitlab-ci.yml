@@ -1,9 +1,8 @@
-# Builds the static agent-worker binaries and bundled Confluence runtimes; publishes them for a tag worker-vX.Y.Z.
-# The GitHub workflow (.github/workflows/worker-release.yml) runs the same scripts in worker/ci/ and does the same.
+# Builds the static agent-worker binaries and bundled Confluence/native runtimes; publishes them for a tag worker-vX.Y.Z.
+# The GitHub workflow (.github/workflows/worker-release.yml) builds and publishes the same assets.
 #
-# Runners: the Linux jobs run on any Docker runner. The Windows job needs a Windows runner with Rust and the MSVC build
-# tools: on GitLab.com it uses the shared Windows runner; on a self-managed instance set WINDOWS_RUNNER_TAG to the tag of
-# your own Windows runner (a project/group CI variable).
+# Runners: Linux jobs run on Docker runners. The Windows worker and native-runtime jobs need a Windows runner; on GitLab.com
+# they use the shared Windows runner, while self-managed instances can set WINDOWS_RUNNER_TAG to their runner tag.
 
 stages: [test, build, release]
 
@@ -15,9 +14,9 @@ variables:
   rules:
     - if: $CI_COMMIT_TAG =~ /^worker-v/
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes: ['worker/**/*', 'agents/flowkit/**/*', 'agents/agentdriver/**/*', '.gitlab-ci.yml']
+      changes: ['worker/**/*', 'agents/flowkit/**/*', 'agents/agentdriver/**/*', 'agents/native_engine_worker.py', '.gitlab-ci.yml']
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      changes: ['worker/**/*', 'agents/flowkit/**/*', 'agents/agentdriver/**/*', '.gitlab-ci.yml']
+      changes: ['worker/**/*', 'agents/flowkit/**/*', 'agents/agentdriver/**/*', 'agents/native_engine_worker.py', '.gitlab-ci.yml']
 
 worker:test:linux:
   stage: test
@@ -78,12 +77,34 @@ worker:build:confluence-runtime:
       dotenv: dist/worker/release.env
     expire_in: 30 days
 
+worker:build:native-runtime:linux:
+  stage: build
+  image: python:3.12-slim
+  <<: *worker-rules
+  needs: ["worker:build:confluence-runtime"]
+  script:
+    - python worker/ci/build-native-runtime.py --os linux
+  artifacts:
+    paths: [dist/worker/native-runtime-linux.tar.gz, dist/worker/native-runtime-linux.tar.gz.sha256]
+    expire_in: 30 days
+
+worker:build:native-runtime:windows:
+  stage: build
+  tags: [$WINDOWS_RUNNER_TAG]
+  <<: *worker-rules
+  needs: ["worker:build:confluence-runtime"]
+  script:
+    - pwsh -NoProfile -Command "python worker/ci/build-native-runtime.py --os windows"
+  artifacts:
+    paths: [dist/worker/native-runtime-windows.tar.gz, dist/worker/native-runtime-windows.tar.gz.sha256]
+    expire_in: 30 days
+
 worker:release:
   stage: release
   image: registry.gitlab.com/gitlab-org/cli:latest
   rules:
     - if: $CI_COMMIT_TAG =~ /^worker-v/
-  needs: ["worker:build:linux", "worker:build:windows", "worker:build:confluence-runtime"]
+  needs: ["worker:build:linux", "worker:build:windows", "worker:build:confluence-runtime", "worker:build:native-runtime:linux", "worker:build:native-runtime:windows"]
   before_script: [apk add --no-cache curl coreutils]
   script:
     - sh worker/ci/check-version.sh "$CI_COMMIT_TAG"
@@ -98,7 +119,7 @@ worker:release:
   release:
     tag_name: $CI_COMMIT_TAG
     name: agent-worker $CI_COMMIT_TAG
-    description: "The static agent-worker binaries for Windows x86_64 and Linux x86_64, plus the bundled Confluence runtimes (Linux runtime requires glibc 2.26+). Install from the Fleet tab; the coordinator serves these files (see worker/ci/fetch-release.sh)."
+    description: "The static agent-worker binaries for Windows x86_64 and Linux x86_64, plus the bundled Confluence runtimes (Linux runtime requires glibc 2.26+) and native Hatchet/Prefect runtimes."
     assets:
       links:
         - name: agent-worker-x86_64-pc-windows-msvc.exe
@@ -112,6 +133,12 @@ worker:release:
           link_type: package
         - name: confluence-runtime-linux.tar.gz
           url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/$WORKER_RELEASE_VERSION/confluence-runtime-linux.tar.gz
+          link_type: package
+        - name: native-runtime-windows.tar.gz
+          url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/$WORKER_RELEASE_VERSION/native-runtime-windows.tar.gz
+          link_type: package
+        - name: native-runtime-linux.tar.gz
+          url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/$WORKER_RELEASE_VERSION/native-runtime-linux.tar.gz
           link_type: package
         - name: SHA256SUMS
           url: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/agent-worker/$WORKER_RELEASE_VERSION/SHA256SUMS

@@ -85,11 +85,48 @@ def _valid_url(value: Any, field: str, *, allow_empty: bool = False) -> str:
 def config_for(engine: str) -> dict[str, str]:
     item = ENGINES[engine]
     saved = _read().get(engine, {})
-    return {
+    result = {
         "api_url": saved.get("api_url", os.environ.get(item["api_env"]) or item["api_default"]),
         "dashboard_url": saved.get("dashboard_url", os.environ.get(item["dashboard_env"]) or item["dashboard_default"]),
     }
+    if engine == "hatchet":
+        result.update(
+            hatchet_worker_grpc_host_port=saved.get("hatchet_worker_grpc_host_port", os.environ.get("HATCHET_WORKER_GRPC_HOST_PORT", "")),
+            hatchet_worker_tls_strategy=saved.get("hatchet_worker_tls_strategy", os.environ.get("HATCHET_WORKER_TLS_STRATEGY", "none")),
+        )
+    elif engine == "prefect":
+        result["prefect_worker_api_url"] = saved.get("prefect_worker_api_url", os.environ.get("PREFECT_WORKER_API_URL", ""))
+    return result
 
+def _valid_grpc_host_port(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 512:
+        raise ValueError("Hatchet worker gRPC endpoint must be host:port")
+    value = value.strip()
+    if not value:
+        return ""
+    parts = urlsplit("//" + value)
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Hatchet worker gRPC endpoint must be host:port") from exc
+    if not parts.hostname or port is None or not 1 <= port <= 65535 or parts.username or parts.password or parts.path or parts.query or parts.fragment:
+        raise ValueError("Hatchet worker gRPC endpoint must be host:port")
+    return value
+
+
+def _valid_tls_strategy(value: Any) -> str:
+    if value not in ("none", "tls"):
+        raise ValueError("hatchet_worker_tls_strategy must be none or tls")
+    return value
+
+
+def _save_fields(engine: str) -> set[str]:
+    fields = {"api_url", "dashboard_url"}
+    if engine == "hatchet":
+        fields |= {"hatchet_worker_grpc_host_port", "hatchet_worker_tls_strategy"}
+    elif engine == "prefect":
+        fields.add("prefect_worker_api_url")
+    return fields
 
 async def record(engine: str, *, check: bool = False, app: Any = None) -> dict[str, Any]:
     item = ENGINES[engine]
@@ -117,7 +154,13 @@ async def record(engine: str, *, check: bool = False, app: Any = None) -> dict[s
             previous = app.setdefault("engine_status", {}).get(engine)
             if previous:
                 status, checked, error = previous
+    worker_endpoint_configured = None
+    if engine == "hatchet":
+        worker_endpoint_configured = bool(cfg["hatchet_worker_grpc_host_port"])
+    elif engine == "prefect":
+        worker_endpoint_configured = bool(cfg["prefect_worker_api_url"])
     return {"id": engine, "label": item["label"], "enabled": enabled, **cfg,
+            "worker_endpoint_configured": worker_endpoint_configured,
             "status": status, "checked_at": checked, "error": error}
 
 
@@ -128,10 +171,17 @@ async def check(engine: str, app: Any) -> dict[str, Any]:
 
 
 def save(engine: str, body: Any) -> dict[str, str]:
-    if not isinstance(body, dict) or set(body) != {"api_url", "dashboard_url"}:
-        raise ValueError("body must contain api_url and dashboard_url")
+    if not isinstance(body, dict) or set(body) != _save_fields(engine):
+        raise ValueError(f"body must contain {', '.join(sorted(_save_fields(engine)))}")
     values = {"api_url": _valid_url(body["api_url"], "api_url"),
               "dashboard_url": _valid_url(body["dashboard_url"], "dashboard_url", allow_empty=True)}
+    if engine == "hatchet":
+        values.update(
+            hatchet_worker_grpc_host_port=_valid_grpc_host_port(body["hatchet_worker_grpc_host_port"]),
+            hatchet_worker_tls_strategy=_valid_tls_strategy(body["hatchet_worker_tls_strategy"]),
+        )
+    elif engine == "prefect":
+        values["prefect_worker_api_url"] = _valid_url(body["prefect_worker_api_url"], "prefect_worker_api_url", allow_empty=True)
     settings = _read()
     settings[engine] = values
     _write(settings)

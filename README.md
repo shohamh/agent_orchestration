@@ -170,9 +170,9 @@ the local npm mirror on port `4873`. On the offline host:
    `COMPOSE_FILE=docker-compose.yml:docker-compose.agents.yml` (`;` instead of `:` on Windows
    Docker Desktop). Run `docker compose up -d`, then `./scripts/create-token.sh`.
 2. In `/opt/agent_orchestration`, copy `.env.example` to `.env` and set `FLOW_HOST_TOKEN`,
-   `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`, and `ENGINES=hatchet`. Copy
-   `board/.env.example` to `board/.env`; set `BOARD_PASSWORD`, `HATCHET_CLIENT_TOKEN` from step 1,
-   and `HATCHET_DASHBOARD_URL=http://<server>:8080`. Then start from the repo root:
+   `HATCHET_WORKER_CLIENT_TOKEN` from step 1, `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`,
+   and `ENGINES=hatchet`. Copy `board/.env.example` to `board/.env`; set `BOARD_PASSWORD`,
+   `HATCHET_CLIENT_TOKEN` from step 1, and `HATCHET_DASHBOARD_URL=http://<server>:8080`. Then start from the repo root:
 
    ```bash
    docker compose --profile hatchet up -d --no-build

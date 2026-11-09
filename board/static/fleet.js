@@ -1,8 +1,8 @@
 /* Fleet tab: the registered execution PCs, their live CPU/RAM, capabilities and settings, and
  * the registration form with engine- and OS-specific setup instructions. Pure helpers are
  * exported for node tests. Worker data is only ever placed in text nodes and attributes; the
- * board's fleet API never returns endpoints, token names or tokens, and this page never asks
- * for a token value. */
+ * board's fleet API never returns endpoints, token names or tokens. The per-PC Hatchet token is
+ * submitted only when creating an install and is never retained after that request. */
 (function (root) {
   'use strict';
   const ENGINES = ['hatchet', 'prefect', 'trigger'];
@@ -70,13 +70,21 @@
 
   function engineText(engine, status, worker) {
     const label = ENGINE_LABELS[engine] || engine;
+    const sharedBridge = status?.route === 'shared_service' || engine === 'trigger';
+    const nativeWorker = ['native', 'pc_native'].includes(status?.route);
     if (status?.state === 'unconfirmed' || (worker.online && status?.coordinator === 'unconfirmed')) {
-      return `${label}: Unconfirmed: the PC is online, but the flow host cannot check the ${engine === 'trigger' ? 'trigger dev worker' : `${label} worker`} on the coordinator`;
+      return sharedBridge
+        ? `${label}: Unconfirmed: the PC is online, but the flow host cannot check the trigger dev worker on the coordinator`
+        : `${label}: Unconfirmed: the PC is online, but the backend cannot confirm its ${nativeWorker ? `native ${label}` : label} worker`;
     }
-    if (status?.connected) return `${label}: Connected through the shared execution service`;
+    if (status?.connected) return sharedBridge
+      ? `${label}: Connected through the shared Fleet execution bridge`
+      : nativeWorker ? `${label}: Connected as a native worker on this PC` : `${label}: Connected`;
     if (!worker.online) return `${label}: Not connected: the PC is ${(STATUS[worker.status] || 'offline').replace(/^Offline: /, 'offline: ').toLowerCase()}`;
     if (status?.coordinator === 'not_enabled') return `${label}: Not connected: ${label} is not enabled on the flow host (FLOW_BACKENDS)`;
-    if (status?.coordinator === 'stopped') return `${label}: Not connected: the ${label} flow worker is not running on the coordinator`;
+    if (status?.coordinator === 'stopped') return sharedBridge
+      ? `${label}: Not connected: the ${label} flow worker is not running on the coordinator`
+      : `${label}: Not connected: the ${nativeWorker ? `native ${label} worker` : `${label} worker`} is not running on this PC`;
     return `${label}: Unknown`;
   }
 
@@ -88,53 +96,24 @@
     return `Limits not applied yet: ${sync.message || 'the PC did not accept them'}.`;
   }
 
-  /* Setup steps for a PC, from how this repository starts workers: every engine places work
-   * on a PC through agents/flow_execution_worker.py (the shared execution service); native
-   * engine placement on remote PCs is not enabled (docs/workers-and-context.md). */
-  function instructions({ engines = [], os = 'windows', id = '', tokenEnv, slots = 1, existing = null } = {}) {
-    const win = os === 'windows';
-    const worker = id || '<worker ID>';
-    const token = tokenEnv || tokenEnvFor(id);
-    const py = win ? 'agents\\.venv\\Scripts\\python.exe' : 'agents/.venv/bin/python';
+  /* Setup guidance for the selected engine workers. The backend's status is authoritative about
+   * runtime readiness; these instructions describe the intended per-PC setup. */
+  function instructions({ engines = [], os = 'windows', existing = null } = {}) {
     const sections = [], warnings = [];
     const chosen = ENGINES.filter((e) => engines.includes(e));
     const adding = existing ? chosen.filter((e) => !existing.includes(e)) : chosen;
     if (existing) {
-      sections.push({ title: 'This PC is already registered', steps: [{ text: 'Nothing new is needed on the PC: its execution service already serves every engine. Saving records which engines may place work on it.' }] });
+      sections.push({ title: 'This PC is already registered', steps: [{ text: 'Nothing new is needed on the PC; saving updates the engines enabled for this registration. Engine status reflects what the backend has actually confirmed.' }] });
     } else {
       sections.push({ title: `1. Prepare the PC (${OS_LABELS[os] || os})`, steps: [
-        { text: 'Copy this repository to the PC (offline: unpack source.tar from the offline bundle, or copy a checkout) and open a terminal in it.' },
-        { text: `Install the agents environment from a local wheelhouse and npm mirror. The wheelhouse must hold ${OS_LABELS[os]} wheels for agents/requirements.txt: `
-            + (os === 'linux' ? 'add agents/requirements.txt to PY_REQUIREMENTS when building the offline bundle (its wheels are Linux x86_64, Python 3.12), '
-              : `build it on a connected ${OS_LABELS[os]} PC with the same Python version (pip download -r agents/requirements.txt -d wheelhouse), `)
-            + 'and install the agents ACP adapters from the bundle\'s offline npm mirror. The mirror holds only the projects listed in NPM_PROJECTS '
-            + 'when the offline bundle is built (default trigger.dev/example-project): add agents to it (NPM_PROJECTS="trigger.dev/example-project agents") '
-            + 'or npm ci fails offline.',
-          code: win
-            ? 'python -m venv agents\\.venv\nagents\\.venv\\Scripts\\python.exe -m pip install --no-index --find-links <wheelhouse folder> -r agents\\requirements.txt\nnpm.cmd ci --prefix agents --registry <offline npm mirror URL>'
-            : 'python3 -m venv agents/.venv\nagents/.venv/bin/python -m pip install --no-index --find-links <wheelhouse folder> -r agents/requirements.txt\nnpm ci --prefix agents --registry <offline npm mirror URL>' },
-        { text: 'Install and sign in to the coding agent CLIs this PC should run (see agents/README.md). The fleet tab shows each as installed, absent or unknown after the PC connects; sign-in is not checked.' },
+        { text: 'Run the one-line install command below on the PC. It downloads and installs the Fleet worker from this server; these instructions do not assert that an engine runtime is ready.' },
       ] });
-      sections.push({ title: '2. Create the token (protected)', steps: [
-        { text: 'On the coordinator, generate a random token with its agents Python:', code: '<coordinator agents Python> -c "import secrets; print(secrets.token_urlsafe(32))"' },
-        { text: 'Add it to the coordinator\'s ignored workers.local.env (readable only by the account running the flow host). The flow host reads it from there; the board never sees it.', code: `${token}=<generated token>` },
-        { text: 'Copy the same value to a file on the PC that only the account running the service can read, through your protected transfer process. Never paste a token into the board or a shared terminal history.' },
-      ] });
-      sections.push({ title: '3. Start the execution service on the PC', steps: [
-        { code: win
-          ? `$env:FLOW_WORKER_ID = '${worker}'\n$env:FLOW_WORKER_BIND = '0.0.0.0'\n$env:FLOW_WORKER_PORT = '8096'\n$env:FLOW_WORKER_SLOTS = '${slots}'\n$env:FLOW_WORKER_TOKEN = (Get-Content '<protected token file>' -TotalCount 1).Trim()\nagents\\.venv\\Scripts\\python.exe -u agents\\flow_execution_worker.py`
-          : `export FLOW_WORKER_ID='${worker}'\nexport FLOW_WORKER_BIND='0.0.0.0'\nexport FLOW_WORKER_PORT='8096'\nexport FLOW_WORKER_SLOTS='${slots}'\nexport FLOW_WORKER_TOKEN="$(head -n 1 '<protected token file>')"\nagents/.venv/bin/python -u agents/flow_execution_worker.py` },
-        { text: `FLOW_WORKER_ID must equal the worker ID; the coordinator checks it when the PC connects. The service refuses a network bind without FLOW_WORKER_TOKEN. Allow inbound TCP 8096 only from the coordinator, over a private network or HTTPS termination. FLOW_WORKER_SLOTS caps one service process; keep it at least the fleet slot count. Pools, tags and limits come from this fleet tab. All services on one PC share one capacity store (FLOW_CAPACITY_DB, default ${win ? '%PROGRAMDATA%\\agent-orchestration\\capacity.db' : '/var/tmp/agent-orchestration/capacity.db'}); never put it on a network drive.` },
-      ] });
-      sections.push({ title: '4. Register it here', steps: [
-        { text: `Enter the PC's endpoint (http(s)://<pc host>:8096) and the token variable ${token} below. Leave the endpoint blank to save the PC as awaiting connection and add it later. When it connects, the coordinator verifies its identity, then applies the slots and CPU/RAM limits set here; they affect new work only.` },
-      ] });
-      if (os === 'macos') warnings.push('macOS: the execution service starts, but its CPU/RAM sampler supports only Windows and Linux. A macOS PC always reports unknown capacity, so its gate never admits work; new work for it waits with "missing metrics".');
+      if (os === 'macos') warnings.push('macOS: its CPU/RAM sampler supports only Windows and Linux. The PC reports unknown capacity, so capacity-gated new work waits with "missing metrics".');
     }
     const notes = {
-      hatchet: 'Hatchet tasks reach this PC through its execution service, so the PC needs no Hatchet token or connection. On the coordinator the flow host runs the Hatchet flow worker (FLOW_BACKENDS includes hatchet); standalone coding-agent cards with a worker selection run through agents/hatchet_worker.py there. Native Hatchet placement on remote workers is not enabled (docs/workers-and-context.md).',
-      prefect: 'Prefect flow runs stay in the coordinator\'s serve process (the flow host runs flow_worker_prefect.py; FLOW_BACKENDS includes prefect) and send each step to this PC\'s execution service. Cards with a worker selection go through agents/prefect_worker.py on the coordinator. The PC needs no Prefect API access.',
-      trigger: 'Only the local development worker is supported: trigger dev runs on the coordinator (trigger.dev/example-project/scripts/dev-worker.ps1) and sends flow steps to this PC\'s execution service. Standalone Trigger.dev cards always run on the coordinator, never on this PC. Trigger.dev production deployment to other PCs is not supported.',
+      hatchet: 'Hatchet is intended to run as a native worker on this PC. Enter a dedicated, worker-capable (non-read-only) Hatchet token for this PC in the registration form; do not use the Board-global token. Its configured worker endpoint must be reachable from this PC and use the deployment TLS strategy. Readiness is shown only after the backend confirms the worker.',
+      prefect: 'Prefect is intended to run as a native worker on this PC. Its configured API URL must be reachable from this PC. Readiness is shown only after the backend confirms the worker.',
+      trigger: 'Trigger.dev runs through the shared Fleet execution bridge; only the bridge’s backend availability is reported.',
     };
     const listed = existing ? (adding.length ? adding : chosen) : chosen;
     if (listed.length) sections.push({ title: existing && adding.length ? 'Engines you are adding' : 'Engines', steps: listed.map((e) => ({ engine: e, text: `${ENGINE_LABELS[e]}: ${notes[e]}` })) });
@@ -146,6 +125,16 @@
   const INSTALL_STEPS = { check: 'Checking the PC', download: 'Downloading the worker', python: 'Installing Python packages', npm: 'Installing the agent adapters',
     token: 'Creating its token', service: 'Starting the worker', register: 'Registering', connect: 'Waiting for the connection', boot: 'Setting up start at boot (approve the administrator prompt on the PC)' };
   const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?)$/i;
+
+  function privateNetworkHost(hostname) {
+    const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    if (host.endsWith('.ts.net')) return true;
+    if (/^(fc|fd)[0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host)) return true;
+    const octets = host.split('.');
+    if (octets.length !== 4 || octets.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false;
+    const [a, b] = octets.map(Number);
+    return a === 10 || a === 192 && b === 168 || a === 172 && b >= 16 && b <= 31 || a === 169 && b === 254;
+  }
 
   /* The server address as the server will accept it: scheme://host[:port] and never a loopback name. */
   function serverAddress(value) {
@@ -198,6 +187,8 @@
     else if (taken.includes(id)) errors.id = `${id} is already registered; edit it instead`;
     if (!OS_LABELS[v.os]) errors.os = "Choose the PC's operating system";
     if (!(v.engines || []).length) errors.engines = 'Choose at least one engine';
+    const hatchetToken = String(v.hatchet_token || '').trim();
+    if ((v.engines || []).includes('hatchet') && !hatchetToken) errors.hatchet_token = 'Enter a dedicated worker-capable Hatchet token for this PC; do not use the Board-global token';
     if (!validLabel(String(v.pool || '').trim())) errors.pool = 'A pool is 1 to 100 characters without commas';
     const tags = (v.tags || []).map((t) => String(t).trim());
     if (tags.some((t) => !validLabel(t))) errors.tags = 'A tag is 1 to 100 characters without commas';
@@ -213,8 +204,10 @@
     if (typeof autoRestart !== 'boolean') errors.auto_restart = 'Auto restart is on or off';
     if (!AUTOSTARTS.includes(autostart)) errors.autostart = 'Choose when the worker starts';
     if (Object.keys(errors).length) return { errors, body: null };
-    return { errors, body: { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
-      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart, auto_restart: autoRestart } };
+    const body = { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
+      slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart, auto_restart: autoRestart };
+    if (body.engines.includes('hatchet')) body.hatchet_token = hatchetToken;
+    return { errors, body };
   }
 
   /* The commands to show for the chosen operating system, with the elevation note. */
@@ -676,7 +669,7 @@
       const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon', autoRestart: preset.auto_restart !== false };
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
       const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
-      const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
+      const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), hatchet_token: fieldError('hatchet_token'), pool: fieldError('pool'), tags: fieldError('tags'),
         slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart'), auto_restart: fieldError('auto_restart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
@@ -693,7 +686,7 @@
       const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartLabel.title = restartHelp.textContent; restartBox.disabled = state.autostart === 'none'; };
       const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines'),
         h('div', { class: 'fl-choices' }, ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
-          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`))), errors.engines);
+          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); drawHatchetToken(); } }), ` ${ENGINE_LABELS[e]}`))), errors.engines);
 
       const poolSelect = h('select', { name: 'pool', 'aria-describedby': 'fl-err-pool' });
       const newPoolInput = h('input', { name: 'new_pool', maxlength: 100, autocomplete: 'off', 'aria-label': 'New pool name', placeholder: 'New pool name', hidden: true });
@@ -729,18 +722,22 @@
       const drawServerWarning = () => {
         const check = serverAddress(serverInput.value);
         const plain = check.value && check.value.startsWith('http://');
-        const private_ = plain && (/^http:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(check.value) || /^http:\/\/[^./:]+(:\d+)?$/.test(check.value) || /\.ts\.net/i.test(check.value));
-        serverWarning.textContent = plain && !private_ ? 'This address uses plain http outside a private network or tailnet: the install command and the PC\'s token would cross it unencrypted. Prefer https.' : '';
+        serverWarning.textContent = plain && !privateNetworkHost(new URL(check.value).hostname) ? 'This address uses plain http outside a private network or tailnet: the registration request and per-PC credential would cross it unencrypted. Prefer https.' : '';
       };
       serverInput.addEventListener('input', drawServerWarning);
 
       const field = (label, input, helpText, helpId, name) => h('label', { class: 'fl-field' }, h('span', { class: 'fl-label' }, label, helpText ? info(helpText) : null), input, helpText ? h('small', { id: helpId, class: 'fl-help' }, helpText) : null, name ? errors[name] : null);
+      const hatchetTokenInput = h('input', { name: 'hatchet_token', type: 'password', autocomplete: 'new-password', spellcheck: 'false', 'aria-describedby': 'fl-hatchet-token-help fl-err-hatchet_token' });
+      const hatchetTokenField = field('Hatchet worker token', hatchetTokenInput,
+        'Required for Hatchet. Use a dedicated worker-capable (non-read-only) per-PC credential, never the Board-global token. It is sent only with this create request and is not included in the install command.',
+        'fl-hatchet-token-help', 'hatchet_token');
+      const drawHatchetToken = () => { hatchetTokenField.hidden = !f.engines.includes('hatchet'); if (!f.engines.includes('hatchet')) hatchetTokenInput.value = ''; };
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Create install command');
       const form = h('form', { class: 'fl-form-body', novalidate: true },
         h('div', { class: 'fl-form-head' }, h('h3', { id: 'fl-form-title' }, 'Register a PC'), info('Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.')),
         h('p', { class: 'fl-hint fl-help' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
-        osBoxes, autostartBox, restartLabel, engineBoxes,
+        osBoxes, autostartBox, restartLabel, engineBoxes, hatchetTokenField,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags'), chosen, tagInput, tagList, errors.tags),
         h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity', info('Slots: jobs at once, across all engines.\nNew work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
@@ -758,7 +755,7 @@
         for (const node of Object.values(errors)) node.textContent = '';
         for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
         const pool = state.newPool ? newPoolInput.value : poolSelect.value;
-        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, hatchet_token: hatchetTokenInput.value, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
@@ -769,6 +766,7 @@
         }
         S.busy = true; submit.disabled = true;
         const r = await request('POST', '/api/fleet/installs', result.body);
+        hatchetTokenInput.value = '';
         S.busy = false; submit.disabled = false;
         if (!r.ok) { errorBox.textContent = errorText(r); return; }
         say(`Install command created for ${result.body.id}.`);
@@ -776,7 +774,7 @@
         showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
       });
 
-      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart();
+      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart(); drawHatchetToken();
       formPanel.replaceChildren(form);
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
       formPanel.parentElement.scrollTop = 0;
@@ -876,8 +874,7 @@
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
 
       const drawSteps = () => {
-        const doc = instructions({ engines: f.engines, os: f.os, id: idInput.value.trim(), tokenEnv: tokenInput.value.trim() || undefined, slots: Number(slots.value) || 1,
-          existing: editing ? worker.engines : null });
+        const doc = instructions({ engines: f.engines, os: f.os, existing: editing ? worker.engines : null });
         steps.replaceChildren(
           ...doc.warnings.map((w) => h('p', { class: 'fl-warning' }, w)),
           ...doc.sections.map((s) => h('section', { class: 'fl-step' }, h('h4', {}, s.title),

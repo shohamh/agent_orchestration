@@ -1,8 +1,8 @@
 """Hatchet adapter: boards are `additional_metadata.board`, cards are workflow runs.
 
 Uses the hatchet_sdk client (env: HATCHET_CLIENT_TOKEN, HATCHET_CLIENT_HOST_PORT,
-HATCHET_CLIENT_SERVER_URL, HATCHET_CLIENT_TLS_STRATEGY). Intermediate results come from the
-run's persisted logs (ctx.log in the agent), so history survives board restarts.
+HATCHET_CLIENT_SERVER_URL, HATCHET_CLIENT_TLS_STRATEGY). Output comes from persisted task logs,
+including worker output, and is read incrementally so it survives board restarts.
 """
 
 import asyncio
@@ -29,6 +29,7 @@ _COLUMN = {
     V1TaskStatus.CANCELLED: "stopped",
     V1TaskStatus.FAILED: "stopped",
 }
+_FAILURE_EVENTS = {"FAILED", "SCHEDULING_TIMED_OUT", "MAX_RUNS_EXCEEDED", "DURATION_TIMEOUT"}
 
 
 class _ShapeItem(NamedTuple):
@@ -267,6 +268,15 @@ class HatchetAdapter:
         dag = Dag(model="declared")
         # A standalone task run may have no shape: show its task(s) as single nodes.
         shape = details.shape or [_ShapeItem(t.step_id, t.display_name, []) for t in details.tasks]
+        task_errors = {}
+        for event in getattr(details, "task_events", None) or []:
+            event_type = getattr(event, "event_type", "")
+            event_type = getattr(event_type, "value", event_type)
+            if event_type in _FAILURE_EVENTS and event.task_id not in task_errors:
+                task_errors[event.task_id] = (event.error_message or event.message
+                                               or ("Scheduling timed out" if event_type == "SCHEDULING_TIMED_OUT"
+                                                   else event_type.replace("_", " ").capitalize()))
+        run_error = getattr(getattr(details, "run", None), "error_message", None)
         for item in shape:
             task = tasks.get(item.step_id)
             if task:
@@ -282,7 +292,8 @@ class HatchetAdapter:
                     started_at=_iso(task.started_at) if task else None,
                     finished_at=_iso(task.finished_at) if task else None,
                     output=(task.output or None) if task else None,
-                    error=(task.error_message or None) if task else None,
+                    error=(task.error_message or task_errors.get(task.task_external_id)
+                           or (run_error if task.status == V1TaskStatus.FAILED else None)) if task else None,
                 )
             )
             dag.edges += [{"from": item.step_id, "to": child, "kind": "depends"} for child in item.children_step_ids]

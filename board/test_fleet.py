@@ -92,6 +92,41 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
         self.host.fleet_tags = AsyncMock(return_value=(200, {'tags': ['gpu']}))
         self.assertEqual((await (await self.client.get('/api/fleet/tags')).json())['tags'], ['gpu'])
 
+
+    async def test_install_uses_admin_endpoints_and_never_returns_private_claim_fields(self):
+        import engine_admin
+        public = {'id': 'pc-a', 'os': 'windows', 'engines': ['hatchet', 'prefect'],
+                  'hatchet_token': 'per-pc-secret'}
+        self.host.create_install = AsyncMock(return_value=(200, {
+            'id': 'pc-a', 'hatchet_token': 'per-pc-secret',
+            'hatchet_api_url': 'https://hatchet.example/api',
+            'hatchet_worker_grpc_host_port': 'hatchet.example:7070',
+            'hatchet_worker_tls_strategy': 'tls',
+            'prefect_worker_api_url': 'https://prefect.example/api',
+            'commands': {'powershell': 'agent-worker install <code>'},
+        }))
+        settings = {
+            'hatchet': {'api_url': 'https://hatchet.example/api',
+                        'hatchet_worker_grpc_host_port': 'hatchet.example:7070',
+                        'hatchet_worker_tls_strategy': 'tls'},
+            'prefect': {'prefect_worker_api_url': 'https://prefect.example/api'},
+        }
+        with patch.object(engine_admin, 'config_for', side_effect=lambda name: settings[name]):
+            response = await self.client.post('/api/fleet/installs', json=public)
+        self.assertEqual(response.status, 200)
+        self.host.create_install.assert_awaited_once_with({
+            **public,
+            'hatchet_api_url': 'https://hatchet.example/api',
+            'hatchet_worker_grpc_host_port': 'hatchet.example:7070',
+            'hatchet_worker_tls_strategy': 'tls',
+            'prefect_worker_api_url': 'https://prefect.example/api',
+        })
+        data = await response.json()
+        text = json.dumps(data)
+        for private in ('per-pc-secret', 'hatchet_worker_grpc_host_port',
+                        'hatchet_worker_tls_strategy', 'prefect_worker_api_url', 'hatchet_api_url'):
+            self.assertNotIn(private, text)
+        self.assertEqual(data['commands']['powershell'], 'agent-worker install <code>')
     async def test_flow_host_requests_use_the_authenticated_fleet_paths(self):
         calls = []
         async def call(method, path, body=None, timeout=10):

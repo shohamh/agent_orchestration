@@ -1,5 +1,4 @@
-/* Admin settings for the board's workflow engines. Only URL settings are editable here; credentials
- * stay in the server environment and are never requested or rendered by this page. */
+/* Admin engine settings. Credentials are never requested or rendered here. */
 (function (root) {
   'use strict';
 
@@ -43,35 +42,64 @@
     let loading = false;
     let mounted = true;
 
-    const status = el('p', { class: 'ad-status', role: 'status', 'aria-live': 'polite' }, 'Loading engine settings…');
-    const list = el('div', { class: 'ad-list', 'aria-label': 'Workflow engines' });
-    const heading = el('div', { class: 'ad-heading' },
-      el('h2', { id: 'ad-title', class: 'ad-title' }, 'Engine settings'),
-      el('p', { class: 'ad-hint' }, 'Configure service and dashboard URLs. Credentials remain in the board server environment.'));
+    const status = el('p', { class: 'engine-settings-status', role: 'status', 'aria-live': 'polite' }, 'Loading engine settings…');
+    const list = el('div', { class: 'engine-card-list', 'aria-label': 'Workflow engines' });
+    const heading = el('div', { class: 'engine-settings-heading' },
+      el('h2', { id: 'engine-settings-title', class: 'engine-settings-title' }, 'Engine settings'),
+      el('p', { class: 'engine-settings-hint' }, 'Configure engine and PC-worker endpoints. Hatchet worker tokens are supplied separately in Fleet registration.'));
     const reload = el('button', { type: 'button', class: 'secondary', onclick: () => refresh() }, 'Refresh');
     const close = el('button', { type: 'button', class: 'close', 'aria-label': 'Close Admin', onclick: () => onClose ? onClose() : dialog.close() }, '×');
-    const top = el('header', { class: 'ad-top' }, heading, el('div', { class: 'ad-actions' }, reload, close), status);
+    const top = el('header', { class: 'engine-settings-top' }, heading, el('div', { class: 'engine-settings-actions' }, reload, close), status);
 
     function createRow(engine) {
-      const state = el('span', { class: 'ad-state', 'data-status': 'unknown' }, 'Loading…');
-      const enabled = el('span', { class: 'ad-enabled' }, '');
+      const state = el('span', { class: 'engine-state', 'data-status': 'unknown' }, 'Loading…');
+      const enabled = el('span', { class: 'engine-enabled' }, '');
       const apiUrl = el('input', { type: 'url', required: 'required', autocomplete: 'url', spellcheck: 'false', 'aria-label': `${engine.label} API URL`, placeholder: 'https://engine.example.com' });
       const dashboardUrl = el('input', { type: 'url', autocomplete: 'url', spellcheck: 'false', 'aria-label': `${engine.label} dashboard URL`, placeholder: 'https://dashboard.example.com' });
-      const apiField = el('label', { class: 'ad-field' }, el('span', {}, 'API URL'), apiUrl);
-      const dashboardField = el('label', { class: 'ad-field' }, el('span', {}, 'Browser dashboard URL'), dashboardUrl);
-      const checked = el('p', { class: 'ad-checked' }, 'Not checked yet');
-      const error = el('p', { class: 'ad-error', hidden: true });
-      const save = el('button', { type: 'button', class: 'primary', 'data-action': 'save' }, 'Save URLs');
+      const apiField = el('label', { class: 'engine-field' }, el('span', {}, 'API URL'), apiUrl);
+      const dashboardField = el('label', { class: 'engine-field' }, el('span', {}, 'Browser dashboard URL'), dashboardUrl);
+      const workerGrpcHostPort = engine.id === 'hatchet'
+        ? el('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Hatchet worker gRPC host and port', placeholder: 'hatchet.example.com:7077' })
+        : null;
+      const hatchetTlsStrategy = engine.id === 'hatchet'
+        ? el('select', { 'aria-label': 'Hatchet worker TLS strategy' },
+          el('option', { value: 'none' }, 'No TLS'),
+          el('option', { value: 'tls' }, 'TLS'))
+        : null;
+      const prefectWorkerApiUrl = engine.id === 'prefect'
+        ? el('input', { type: 'url', autocomplete: 'url', spellcheck: 'false', 'aria-label': 'Prefect worker API URL', placeholder: 'https://prefect.example.com/api' })
+        : null;
+      const fields = [apiField, dashboardField];
+      let workerHint = '';
+      if (engine.id === 'hatchet') {
+        fields.push(
+          el('label', { class: 'engine-field' }, el('span', {}, 'Worker gRPC host:port'), workerGrpcHostPort),
+          el('label', { class: 'engine-field' }, el('span', {}, 'Worker TLS'), hatchetTlsStrategy));
+        workerHint = 'Must be reachable from the PC. Fleet registration asks for a dedicated Hatchet worker token.';
+      } else if (engine.id === 'prefect') {
+        fields.push(el('label', { class: 'engine-field' }, el('span', {}, 'PC worker API URL'), prefectWorkerApiUrl));
+        workerHint = 'Must be reachable from the PC running the Prefect process worker.';
+      } else if (engine.id.startsWith('trigger')) {
+        workerHint = 'Trigger.dev runs on its deployment workers; Fleet PCs remain execution bridges.';
+      }
+      const workerStatus = el('p', { class: 'engine-worker-status', role: 'status' }, workerHint);
+      const checked = el('p', { class: 'engine-checked' }, 'Not checked yet');
+      const error = el('p', { class: 'engine-error', hidden: true });
+      const save = el('button', { type: 'button', class: 'primary', 'data-action': 'save' }, 'Save settings');
       const check = el('button', { type: 'button', class: 'secondary', 'data-action': 'check' }, 'Check now');
-      const actions = el('div', { class: 'ad-row-actions' }, check, save);
-      const card = el('section', { class: 'ad-engine', 'data-engine': engine.id, 'aria-labelledby': `ad-engine-${engine.id}` },
-        el('div', { class: 'ad-engine-head' }, el('h3', { id: `ad-engine-${engine.id}`, class: 'ad-engine-title' }, engine.label), state, enabled),
-        el('div', { class: 'ad-fields' }, apiField, dashboardField),
-        el('div', { class: 'ad-meta' }, checked, error), actions);
-      const row = { ...engine, card, state, enabled, apiUrl, dashboardUrl, checked, error, save, check,
-        enabledValue: false, dirty: { api: false, dashboard: false }, saving: false, checking: false };
+      const actions = el('div', { class: 'engine-row-actions' }, check, save);
+      const card = el('section', { class: 'engine-card', 'data-engine': engine.id, 'aria-labelledby': `engine-card-${engine.id}` },
+        el('div', { class: 'engine-card-head' }, el('h3', { id: `engine-card-${engine.id}`, class: 'engine-card-title' }, engine.label), state, enabled),
+        el('div', { class: 'engine-fields' }, fields, workerStatus),
+        el('div', { class: 'engine-meta' }, checked, error), actions);
+      const row = { ...engine, card, state, enabled, apiUrl, dashboardUrl, workerGrpcHostPort, hatchetTlsStrategy,
+        prefectWorkerApiUrl, workerHint, workerStatus, checked, error, save, check,
+        enabledValue: false, dirty: { api: false, dashboard: false, grpc: false, tls: false, prefectWorker: false }, saving: false, checking: false };
       apiUrl.addEventListener('input', () => { row.dirty.api = true; });
       dashboardUrl.addEventListener('input', () => { row.dirty.dashboard = true; });
+      workerGrpcHostPort?.addEventListener('input', () => { row.dirty.grpc = true; });
+      hatchetTlsStrategy?.addEventListener('change', () => { row.dirty.tls = true; });
+      prefectWorkerApiUrl?.addEventListener('input', () => { row.dirty.prefectWorker = true; });
       save.addEventListener('click', () => saveRow(row));
       check.addEventListener('click', () => checkRow(row));
       rows.set(engine.id, row);
@@ -79,7 +107,7 @@
     }
 
     list.replaceChildren(...ENGINES.map(createRow));
-    dialog.replaceChildren(el('div', { class: 'ad' }, top, el('div', { class: 'ad-body' }, list)));
+    dialog.replaceChildren(el('div', { class: 'engine-settings-content' }, top, el('div', { class: 'engine-settings-body' }, list)));
 
     function applyRecord(row, record, { saved = false } = {}) {
       row.enabledValue = record.enabled === true;
@@ -89,7 +117,13 @@
       row.enabled.textContent = row.enabledValue ? 'Enabled' : 'Disabled';
       if (saved || !row.dirty.api) row.apiUrl.value = record.api_url || '';
       if (saved || !row.dirty.dashboard) row.dashboardUrl.value = record.dashboard_url || '';
-      if (saved) row.dirty = { api: false, dashboard: false };
+      if (row.workerGrpcHostPort && (saved || !row.dirty.grpc)) row.workerGrpcHostPort.value = record.hatchet_worker_grpc_host_port || '';
+      if (row.hatchetTlsStrategy && (saved || !row.dirty.tls)) row.hatchetTlsStrategy.value = record.hatchet_worker_tls_strategy || 'none';
+      if (row.prefectWorkerApiUrl && (saved || !row.dirty.prefectWorker)) row.prefectWorkerApiUrl.value = record.prefect_worker_api_url || '';
+      if (saved) row.dirty = { api: false, dashboard: false, grpc: false, tls: false, prefectWorker: false };
+      if (record.worker_endpoint_configured === true) row.workerStatus.textContent = 'PC worker endpoint configured.';
+      else if (record.worker_endpoint_configured === false) row.workerStatus.textContent = 'PC worker endpoint not configured.';
+      else row.workerStatus.textContent = row.workerHint;
       row.checked.textContent = `Last checked: ${checkedText(record.checked_at)}`;
       row.checked.title = record.checked_at || '';
       row.error.textContent = record.error ? `Error: ${record.error}` : '';
@@ -141,22 +175,26 @@
 
     async function saveRow(row) {
       if (row.saving) return;
-      if (!row.apiUrl.checkValidity() || (row.dashboardUrl.value && !row.dashboardUrl.checkValidity())) {
-        (row.apiUrl.checkValidity() ? row.dashboardUrl : row.apiUrl).reportValidity();
+      if (!row.apiUrl.checkValidity() || (row.dashboardUrl.value && !row.dashboardUrl.checkValidity()) ||
+          (row.prefectWorkerApiUrl?.value && !row.prefectWorkerApiUrl.checkValidity())) {
+        const invalid = !row.apiUrl.checkValidity() ? row.apiUrl
+          : row.dashboardUrl.value && !row.dashboardUrl.checkValidity() ? row.dashboardUrl : row.prefectWorkerApiUrl;
+        invalid.reportValidity();
         return;
       }
       row.saving = true;
       updateButtons(row);
       try {
-        const record = await request(`/api/admin/engines/${encodeURIComponent(row.id)}`, 'PUT', {
-          api_url: row.apiUrl.value.trim(),
-          dashboard_url: row.dashboardUrl.value.trim(),
-        });
+        const settings = { api_url: row.apiUrl.value.trim(), dashboard_url: row.dashboardUrl.value.trim() };
+        if (row.workerGrpcHostPort) {
+          settings.hatchet_worker_grpc_host_port = row.workerGrpcHostPort.value.trim();
+          settings.hatchet_worker_tls_strategy = row.hatchetTlsStrategy.value;
+        }
+        if (row.prefectWorkerApiUrl) settings.prefect_worker_api_url = row.prefectWorkerApiUrl.value.trim();
+        const record = await request(`/api/admin/engines/${encodeURIComponent(row.id)}`, 'PUT', settings);
         if (!mounted) return;
         applyRecord(row, record, { saved: true });
-        setStatus(`${row.label} URLs saved.`);
-      } catch (error) {
-        if (mounted) setStatus(`Could not save ${row.label}: ${error.message}`, true);
+        setStatus(`${row.label} settings saved.`);
       } finally {
         row.saving = false;
         updateButtons(row);

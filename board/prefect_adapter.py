@@ -1,7 +1,7 @@
 """Prefect adapter: boards are flow run tags (`board:<name>`), cards are flow runs.
 
 Talks to the Prefect REST API (env: PREFECT_API_URL, e.g. http://host.docker.internal:4200/api).
-- Intermediate results are the flow run's logs; agent sessions log `EVT <json>` transcript events.
+- Output streams from flow/task logs; agent sessions use `EVT <json>` transcript events.
 - The DAG is the run's task runs, with edges from `task_inputs`: Prefect records which task run's
   result each task received, so the graph shows real data dependencies as they happened.
 - Steering and agent-session input use flow run inputs, the same channel as Prefect's

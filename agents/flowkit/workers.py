@@ -133,6 +133,7 @@ async def catalog(snapshot=None):
         async def health(worker):
             public = {k: worker[k] for k in ('id', 'pools', 'tags', 'slots', 'cpu_limit', 'ram_limit')}
             public.update({'pool': worker['pools'][0], 'engines': list(worker.get('engines') or ENGINES),
+                           'native_engines': list(worker.get('native_engines') or []),
                            'connection': 'relay' if relayed(worker.get('url')) else 'configured' if worker.get('url') else 'awaiting'})
             from .fleet_registry import warnings
             if warnings(worker): public['warnings'] = warnings(worker)
@@ -147,10 +148,16 @@ async def catalog(snapshot=None):
                     if response.status != 200: raise ValueError('Worker health failed')
                     if data.get('id') != worker['id'] or (worker.get('uuid') and data.get('uuid') != worker['uuid']): raise _Mismatch('Worker identity mismatch')
                     # Registry settings are authoritative; legacy worker-reported pool and tags are informational.
+                    native = data.get('native_engines') if isinstance(data.get('native_engines'), dict) else {}
                     result = {**public, **{k: data[k] for k in ('hostname', 'active')}, 'online': True, 'status': 'online',
                               **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {}),
                               **({'worker_version': str(data['worker_version'])[:64]} if data.get('worker_version') else {})}
-                    if data.get('draining'): result.update(online=False, status='updating')  # an update is waiting for running work: no new work
+                    result['_native_worker_status'] = {
+                        engine: {key: native.get(engine, {}).get(key) for key in ('state', 'worker_id', 'worker_name', 'work_pool', 'work_queue', 'deployment')
+                                 if isinstance(native.get(engine), dict) and isinstance(native[engine].get(key), str)}
+                        for engine in worker.get('native_engines', [])
+                    }
+                    if data.get('draining'): result.update(online=False, status='updating')
                 result['settings_sync'] = await push_limits(client, worker, result.get('capacity'))
                 return result
             except _Mismatch:
@@ -204,10 +211,11 @@ def with_last_known(public):
 
 
 def engine_status(worker, engine, coordinators):
-    """Every engine reaches the PC through its execution service (native placement is not
-    enabled). state: connected when the PC is online and that engine's coordinator worker runs;
-    unconfirmed when the PC is online but the coordinator worker cannot be checked (Trigger.dev's
-    `trigger dev` runs outside the flow host); not_connected otherwise."""
+    """Selected Hatchet/Prefect workers are live on the PC; Trigger and legacy routes use Fleet."""
+    if engine in worker.get('native_engines', []):
+        status = worker.get('_native_worker_status', {}).get(engine, {})
+        ready = worker.get('online') and status.get('state') == 'ready'
+        return {'route': 'native', 'coordinator': 'not_required', 'state': 'connected' if ready else 'not_connected', 'connected': bool(ready)}
     coordinator = (coordinators or {}).get(engine, 'unknown')
     if not worker.get('online') or coordinator in ('stopped', 'not_enabled'): state = 'not_connected'
     elif coordinator == 'running': state = 'connected'
@@ -228,6 +236,7 @@ async def fleet_view(coordinators=None, inventory=True):
     for worker in public:
         worker.pop('reason', None)  # status carries it as a code
         worker['engine_status'] = {e: engine_status(worker, e, coordinators) for e in worker['engines']}
+        worker.pop('_native_worker_status', None)
         if not inventory: continue
         if 'inventory' in worker:
             worker['inventory'] = {**worker['inventory'], 'cached': False}

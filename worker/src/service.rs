@@ -131,6 +131,10 @@ fn valid_uuid(text: &str) -> Option<String> {
         .ok()
         .map(|u| u.hyphenated().to_string())
 }
+fn valid_native_engine(engine: &str) -> bool {
+    matches!(engine, "hatchet" | "prefect")
+}
+
 
 // --------------------------------------------------------------------------- routes
 pub fn router(app: Arc<App>) -> Router {
@@ -144,6 +148,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/jobs/{id}", get(status).delete(cancel))
         .route("/jobs/{id}/input", post(receive))
         .route("/jobs/{id}/start", post(authorize))
+        .route("/native-dispatch", get(native_dispatch))
+        .route("/jobs/{id}/dispatch", post(request_dispatch))
+        .route("/jobs/{id}/dispatch/ack", post(ack_dispatch))
         .layer(DefaultBodyLimit::max(190 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         .with_state(app)
@@ -162,6 +169,43 @@ async fn auth(State(app): State<Arc<App>>, request: Request, next: Next) -> Resp
     }
     next.run(request).await
 }
+fn native_engine_status(root: &PathBuf) -> Value {
+    let mut engines = serde_json::Map::new();
+    let components = read_json(&root.join("components.json")).unwrap_or(json!({}));
+    for engine in ["hatchet", "prefect"] {
+        let Some(status) = read_json(&root.join("native-engines").join(format!("{engine}.json"))) else {
+            continue;
+        };
+        let Some(reported_state) = status.get("state").and_then(Value::as_str) else {
+            continue;
+        };
+        let state = if reported_state == "ready"
+            && components
+                .get(engine)
+                .and_then(|component| component.get("state"))
+                .and_then(Value::as_str)
+                != Some("running")
+        {
+            "starting"
+        } else {
+            reported_state
+        };
+        if !["starting", "ready", "failed"].contains(&state) {
+            continue;
+        }
+        let mut safe = json!({"state": state});
+        for key in ["worker_id", "worker_name", "work_pool", "work_queue", "deployment"] {
+            if let Some(value) = status.get(key).and_then(Value::as_str) {
+                if value.len() <= 256 {
+                    safe[key] = json!(value);
+                }
+            }
+        }
+        engines.insert(engine.to_string(), safe);
+    }
+    Value::Object(engines)
+}
+
 
 async fn health(State(app): State<Arc<App>>) -> ApiResult {
     let mut out = app.identity.clone();
@@ -170,6 +214,7 @@ async fn health(State(app): State<Arc<App>>) -> ApiResult {
     out["capacity"] = app.gate.metrics();
     out["draining"] = json!(app.draining.load(Ordering::SeqCst));
     out["worker_os"] = json!(crate::config::os_name());
+    out["native_engines"] = native_engine_status(&app.root);
     if !app.version.is_empty() {
         out["worker_version"] = json!(app.version);
     }
@@ -290,6 +335,21 @@ fn find(app: &App, id: &str) -> Result<Arc<Job>, ApiError> {
 }
 
 async fn create(State(app): State<Arc<App>>, Json(config): Json<Value>) -> ApiResult {
+    if let Some(authorize) = config.get("authorize") {
+        if !authorize.is_boolean() {
+            return Err(bad("'authorize' must be a boolean"));
+        }
+    }
+    if config.get("native_engine").is_some()
+        && config.get("authorize").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(bad("'native_engine' requires 'authorize': true"));
+    }
+    if let Some(engine) = config.get("native_engine") {
+        if !engine.as_str().map(valid_native_engine).unwrap_or(false) {
+            return Err(bad("'native_engine' must be 'hatchet' or 'prefect'"));
+        }
+    }
     let raw_id = config
         .get("id")
         .and_then(|i| i.as_str())
@@ -491,6 +551,81 @@ async fn authorize(
             Json(json!({"error": "No start authorization is pending for this job"})),
         )
             .into_response());
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+struct NativeDispatchQuery {
+    engine: String,
+}
+
+async fn native_dispatch(
+    State(app): State<Arc<App>>,
+    Query(query): Query<NativeDispatchQuery>,
+) -> ApiResult {
+    if !valid_native_engine(&query.engine) {
+        return Err(bad("'engine' must be 'hatchet' or 'prefect'"));
+    }
+    let jobs = app
+        .jobs
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|job| job.native_dispatch_item(&query.engine))
+        .map(|(id, nonce)| json!({"id": id, "nonce": nonce}))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"jobs": jobs})))
+}
+
+async fn request_dispatch(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let job = find(&app, &id)?;
+    job.touch();
+    let engine = body
+        .get("engine")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("'engine' must be 'hatchet' or 'prefect'"))?;
+    if !valid_native_engine(engine) {
+        return Err(bad("'engine' must be 'hatchet' or 'prefect'"));
+    }
+    let nonce = body.get("nonce").and_then(Value::as_str).unwrap_or("");
+    if !job.request_native_dispatch(engine, nonce) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "No native dispatch is pending for this job".into(),
+        ));
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn ack_dispatch(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let job = find(&app, &id)?;
+    let nonce = body.get("nonce").and_then(Value::as_str).unwrap_or("");
+    let run_id = body
+        .get("run_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| bad("'run_id'"))?;
+    if run_id.is_empty()
+        || run_id.len() > 150
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(bad("Invalid run id"));
+    }
+    if !job.acknowledge_native_dispatch(nonce, run_id) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "No native dispatch is pending for this job".into(),
+        ));
     }
     Ok(Json(json!({"ok": true})))
 }

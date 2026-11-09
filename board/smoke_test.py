@@ -3,7 +3,7 @@
   python smoke_test.py [hatchet|trigger ...]     (default: every enabled backend)
 
 Creates cards on a throwaway board, then checks: cards show up, a card reaches Running with
-intermediate results, steering changes its goal, a graceful stop finishes it early, a cancel
+live output, steering changes its goal, a graceful stop finishes it early, a cancel
 stops another card, and replay re-runs a finished card.
 """
 

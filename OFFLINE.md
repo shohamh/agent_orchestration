@@ -93,10 +93,14 @@ and generated registry password hash stay on the connected machine and are exclu
 `OUT=/path/to/bundle` selects another output directory. The script caches ACP adapter packages for
 both Windows x64 and Linux x64, plus Trigger's npm dependencies, Linux Python wheels, engine/app
 images, source, worker binaries/runtime archives, and official Node.js v24.22.2 x64 archives. On a
-Windows connected host, the Windows worker binary is built natively and needs Rust/cargo, rustup,
-and the MSVC C++ build tools; Docker can build the Linux musl worker and the Confluence runtimes.
-Alternatively, place all four worker/runtime artifacts in `dist/worker` or fetch them from a release
-before bundling. The script fails with the exact missing artifacts rather than silently omitting them.
+Windows connected host, the Windows worker binary needs Rust/cargo, rustup and MSVC build tools; the
+Windows native runtime needs Python 3.12 and pip. Docker builds the Linux worker and Linux native
+runtime. On Linux, build the Linux assets locally and provide the Windows assets from a Windows build
+or release. The Confluence runtime archives are reused as the CPython base for the native engine
+runtimes.
+Alternatively, place all six worker/runtime assets (two worker binaries, two Confluence runtimes,
+two native engine runtimes) in `dist/worker` or fetch them from a release before bundling. The
+script fails with the exact missing assets rather than silently omitting them.
 `PLATFORM_ARCH=arm64` selects ARM64 Linux engine/wheel assets; the Fleet binaries and bundled Node
 archives remain x64. Inspect the final summary for transfer size; it varies with image versions.
 

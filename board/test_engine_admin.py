@@ -18,9 +18,12 @@ class AdminEngineAPI(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(os.environ, {
             "BOARD_ENGINE_SETTINGS_PATH": str(Path(self.directory.name) / "settings.json"),
             "HATCHET_CLIENT_TOKEN": "hatchet-secret",
+            "HATCHET_WORKER_GRPC_HOST_PORT": "",
+            "HATCHET_WORKER_TLS_STRATEGY": "none",
             "TRIGGER_SECRET_KEY": "trigger-secret",
             "TRIGGER_DEV_SECRET_KEY": "",
             "PREFECT_API_URL": "",
+            "PREFECT_WORKER_API_URL": "",
             "BOARD_PASSWORD": "",
         }, clear=False)
         self.env.start()
@@ -40,24 +43,44 @@ class AdminEngineAPI(unittest.IsolatedAsyncioTestCase):
         data = await response.json()
         self.assertEqual([x['id'] for x in data['engines']], ['hatchet', 'trigger', 'trigger-dev', 'prefect'])
         self.assertIn(data['engines'][0]['status'], {'reachable', 'unreachable', 'unauthorized'})
+        self.assertFalse(data['engines'][0]['worker_endpoint_configured'])
         self.assertEqual(data['engines'][2]['status'], 'disabled')
         text = json.dumps(data)
         self.assertNotIn('hatchet-secret', text)
         self.assertNotIn('trigger-secret', text)
 
-    async def test_saves_urls_persistently_and_rejects_invalid_urls(self):
-        body = {'api_url': 'http://127.0.0.1:65530/api', 'dashboard_url': 'http://localhost:4200'}
+    async def test_saves_prefect_worker_endpoint_and_rejects_invalid_urls(self):
+        body = {'api_url': 'http://127.0.0.1:65530/api', 'dashboard_url': 'http://localhost:4200',
+                'prefect_worker_api_url': 'http://prefect-host:4200/api'}
         response = await self.client.put('/api/admin/engines/prefect', json=body)
         self.assertEqual(response.status, 200)
         saved = await response.json()
         self.assertEqual(saved['api_url'], body['api_url'])
+        self.assertEqual(saved['prefect_worker_api_url'], body['prefect_worker_api_url'])
+        self.assertTrue(saved['worker_endpoint_configured'])
         self.assertTrue(saved['enabled'])
         self.assertIn('prefect', (await (await self.client.get('/api/systems')).json())['systems'])
         self.assertEqual(json.loads((Path(self.directory.name) / 'settings.json').read_text())['prefect'], body)
-        bad = await self.client.put('/api/admin/engines/prefect', json={**body, 'api_url': 'file:///etc/passwd'})
+        bad = await self.client.put('/api/admin/engines/prefect', json={**body, 'prefect_worker_api_url': 'file:///etc/passwd'})
         self.assertEqual(bad.status, 400)
         unknown = await self.client.put('/api/admin/engines/nope', json=body)
         self.assertEqual(unknown.status, 404)
+
+    async def test_saves_hatchet_worker_endpoint_and_validates_grpc_port(self):
+        body = {'api_url': 'http://127.0.0.1:8080/api/v1', 'dashboard_url': 'http://localhost:8080',
+                'hatchet_worker_grpc_host_port': 'hatchet.internal:7077',
+                'hatchet_worker_tls_strategy': 'tls'}
+        response = await self.client.put('/api/admin/engines/hatchet', json=body)
+        self.assertEqual(response.status, 200)
+        saved = await response.json()
+        self.assertEqual(saved['hatchet_worker_grpc_host_port'], body['hatchet_worker_grpc_host_port'])
+        self.assertEqual(saved['hatchet_worker_tls_strategy'], 'tls')
+        self.assertTrue(saved['worker_endpoint_configured'])
+        self.assertEqual(json.loads((Path(self.directory.name) / 'settings.json').read_text())['hatchet'], body)
+        bad = await self.client.put('/api/admin/engines/hatchet', json={**body, 'hatchet_worker_grpc_host_port': 'hatchet.internal:70000'})
+        self.assertEqual(bad.status, 400)
+        bad_tls = await self.client.put('/api/admin/engines/hatchet', json={**body, 'hatchet_worker_tls_strategy': 'guess'})
+        self.assertEqual(bad_tls.status, 400)
 
     async def test_probe_maps_unreachable_and_disabled(self):
         await self.client.put('/api/admin/engines/trigger', json={'api_url': 'http://127.0.0.1:65530', 'dashboard_url': 'http://localhost:3000'})

@@ -48,6 +48,11 @@ enum Stop {
     Ended,
     Failed(String),
 }
+struct NativeDispatch {
+    nonce: String,
+    run_id: Option<String>,
+}
+
 
 struct Inner {
     state: JobState,
@@ -62,6 +67,8 @@ struct Inner {
     started: bool,
     result_path: Option<std::path::PathBuf>,
     lease_loss: Option<String>,
+    native_dispatch: Option<NativeDispatch>,
+    lease_fence: Option<String>,
     finished: bool,
 }
 
@@ -69,6 +76,7 @@ pub struct Job {
     app: Arc<App>,
     pub id: String,
     authorize: bool,
+    native_engine: Option<String>,
     config: Mutex<Value>,
     inner: Mutex<Inner>,
     last_seen: Mutex<f64>,
@@ -115,11 +123,16 @@ impl Job {
             .get("authorize")
             .and_then(|a| a.as_bool())
             .unwrap_or(false);
+        let native_engine = config
+            .get("native_engine")
+            .and_then(Value::as_str)
+            .map(String::from);
         let (input, inbox) = mpsc::unbounded_channel();
         Arc::new(Job {
             app,
             id,
             authorize,
+            native_engine,
             config: Mutex::new(config),
             inner: Mutex::new(Inner {
                 state: JobState::Queued,
@@ -129,6 +142,8 @@ impl Job {
                 events: vec![],
                 dropped: 0,
                 output: None,
+                native_dispatch: None,
+                lease_fence: None,
                 nonce: None,
                 confirm: None,
                 started: false,
@@ -185,12 +200,163 @@ impl Job {
         }
     }
 
+    fn native_gate_fence_valid(&self, inner: &Inner) -> bool {
+        if self.app.draining.load(Ordering::SeqCst)
+            || self.app.gate.gate_id() != self.app.gate_id
+        {
+            return false;
+        }
+        let Some(fence) = inner.lease_fence.as_deref() else {
+            return false;
+        };
+        if !self.app.gate.valid(&self.id, fence) {
+            return false;
+        }
+        let revision = self
+            .config
+            .lock()
+            .unwrap()
+            .get("settings_revision")
+            .and_then(Value::as_i64);
+        revision
+            .map(|expected| {
+                self.app.gate.metrics()["settings_revision"].as_i64() == Some(expected)
+            })
+            .unwrap_or(true)
+    }
+
+    pub fn request_native_dispatch(&self, engine: &str, nonce: &str) -> bool {
+        if self.native_engine.as_deref() != Some(engine) || nonce.is_empty() {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.finished || *self.cancel.borrow() {
+            return false;
+        }
+        match inner.state {
+            JobState::Queued => {
+                if let Some(dispatch) = inner.native_dispatch.as_ref() {
+                    return dispatch.nonce == nonce
+                        && ((inner.nonce.as_deref() == Some(nonce) && inner.confirm.is_some())
+                            || (inner.nonce.is_none() && inner.confirm.is_none()))
+                        && self.native_gate_fence_valid(&inner);
+                }
+                if inner.nonce.as_deref() != Some(nonce)
+                    || inner.confirm.is_none()
+                    || !self.native_gate_fence_valid(&inner)
+                {
+                    return false;
+                }
+                inner.native_dispatch = Some(NativeDispatch {
+                    nonce: nonce.to_string(),
+                    run_id: None,
+                });
+                true
+            }
+            JobState::Running => {
+                inner.started
+                    && self.native_gate_fence_valid(&inner)
+                    && inner
+                        .native_dispatch
+                        .as_ref()
+                        .map(|dispatch| dispatch.nonce == nonce)
+                        .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn native_dispatch_item(&self, engine: &str) -> Option<(String, String)> {
+        if self.native_engine.as_deref() != Some(engine) || *self.cancel.borrow() {
+            return None;
+        }
+        let inner = self.inner.lock().unwrap();
+        if inner.finished || inner.state != JobState::Queued {
+            return None;
+        }
+        let nonce = inner.nonce.as_deref()?;
+        if inner.confirm.is_none() || !self.native_gate_fence_valid(&inner) {
+            return None;
+        }
+        let dispatch = inner.native_dispatch.as_ref()?;
+        if dispatch.nonce != nonce || dispatch.run_id.is_some() {
+            return None;
+        }
+        Some((self.id.clone(), nonce.to_string()))
+    }
+
+    pub fn acknowledge_native_dispatch(&self, nonce: &str, run_id: &str) -> bool {
+        if self.native_engine.is_none() || *self.cancel.borrow() {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.finished {
+            return false;
+        }
+        let Some(dispatch) = inner.native_dispatch.as_ref() else {
+            return false;
+        };
+        if dispatch.nonce != nonce {
+            return false;
+        }
+        match inner.state {
+            JobState::Queued => {
+                let pending = inner.nonce.as_deref() == Some(nonce) && inner.confirm.is_some();
+                let accepted = inner.nonce.is_none() && inner.confirm.is_none();
+                if !(pending || accepted) || !self.native_gate_fence_valid(&inner) {
+                    return false;
+                }
+            }
+            JobState::Running if inner.started => {
+                if !self.native_gate_fence_valid(&inner) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if inner.finished || *self.cancel.borrow() {
+            return false;
+        }
+        let dispatch = inner.native_dispatch.as_mut().unwrap();
+        if let Some(previous) = dispatch.run_id.as_deref() {
+            return previous == run_id;
+        }
+        dispatch.run_id = Some(run_id.to_string());
+        true
+    }
+
+    fn native_start_fence_valid(&self, inner: &Inner, nonce: &str) -> bool {
+        self.native_engine.is_none()
+            || (inner.state == JobState::Queued
+                && !inner.finished
+                && !*self.cancel.borrow()
+                && inner.confirm.is_some()
+                && inner
+                    .native_dispatch
+                    .as_ref()
+                    .map(|dispatch| dispatch.nonce == nonce)
+                    .unwrap_or(false)
+                && self.native_gate_fence_valid(inner))
+    }
+    fn native_launch_fence_valid(&self, inner: &Inner) -> bool {
+        self.native_engine.is_none()
+            || (inner.state == JobState::Queued
+                && !inner.finished
+                && !*self.cancel.borrow()
+                && inner.nonce.is_none()
+                && inner.confirm.is_none()
+                && inner.native_dispatch.is_some()
+                && self.native_gate_fence_valid(inner))
+    }
+
     /// Confirm the pending start, if `nonce` is the one this admission is waiting for. One nonce per admission:
     /// a late confirmation can never authorize a later one.
     pub fn authorize_with(&self, nonce: Option<&str>) -> bool {
         let mut i = self.inner.lock().unwrap();
         match (nonce, i.nonce.as_deref()) {
-            (Some(given), Some(expected)) if eq_const(given, expected) => {
+            (Some(given), Some(expected))
+                if eq_const(given, expected) && self.native_start_fence_valid(&i, given) =>
+            {
                 if let Some(confirm) = i.confirm.take() {
                     let _ = confirm.send(());
                 }
@@ -331,7 +497,12 @@ impl Job {
             }
         }
         self.touch();
-        self.inner.lock().unwrap().finished = true;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.native_dispatch = None;
+            inner.lease_fence = None;
+            inner.finished = true;
+        }
         self.done.notify_waiters();
     }
 
@@ -463,6 +634,7 @@ impl Job {
                 }
                 Acquire::Granted { fence: f, .. } => {
                     *lease_slot.lock().unwrap() = Some(f.clone());
+                    self.inner.lock().unwrap().lease_fence = Some(f.clone());
                     fence = f;
                 }
             }
@@ -471,6 +643,7 @@ impl Job {
                 let (tx, rx) = oneshot::channel();
                 {
                     let mut i = self.inner.lock().unwrap();
+                    i.native_dispatch = None;
                     i.nonce = Some(random_hex(16));
                     i.confirm = Some(tx);
                     i.waiting_reason = Some("awaiting_authorization".into());
@@ -484,13 +657,56 @@ impl Job {
                 if !matches!(confirmed, Ok(Ok(()))) {
                     self.app.gate.release(&self.id);
                     *lease_slot.lock().unwrap() = None;
+                    let mut i = self.inner.lock().unwrap();
+                    i.native_dispatch = None;
+                    i.lease_fence = None;
                     continue;
                 }
             }
             if let Some(missing) = self.missing_software(&requirement).await {
                 self.app.gate.release(&self.id);
                 *lease_slot.lock().unwrap() = None;
+                let mut i = self.inner.lock().unwrap();
+                i.native_dispatch = None;
+                i.lease_fence = None;
+                drop(i);
                 self.reject(self.end_state(), &missing, "software_missing");
+                return Err(Stop::Ended);
+            }
+            if !self.native_launch_fence_valid(&self.inner.lock().unwrap()) {
+                self.app.gate.release(&self.id);
+                *lease_slot.lock().unwrap() = None;
+                {
+                    let mut i = self.inner.lock().unwrap();
+                    i.native_dispatch = None;
+                    i.lease_fence = None;
+                }
+                if *self.cancel.borrow() {
+                    self.mark_cancelled_if_active();
+                } else {
+                    let reason = if self.app.gate.gate_id() != self.app.gate_id {
+                        "gate_changed"
+                    } else {
+                        let expected = self
+                            .config
+                            .lock()
+                            .unwrap()
+                            .get("settings_revision")
+                            .and_then(Value::as_i64);
+                        if expected.is_some()
+                            && self.app.gate.metrics()["settings_revision"].as_i64() != expected
+                        {
+                            "settings_changed"
+                        } else {
+                            "revoked"
+                        }
+                    };
+                    self.reject(
+                        JobState::Rejected,
+                        "Job was revoked or worker settings changed before execution",
+                        reason,
+                    );
+                }
                 return Err(Stop::Ended);
             }
             break;

@@ -12,6 +12,7 @@
 #   trigger-base-images.tar  triggerdotdev/node base images for `trigger deploy` (OCI dirs, digests preserved)
 #   npm-storage.tar          Verdaccio storage with every npm package the JS projects need
 #   wheelhouse/              Python wheels for the Hatchet and Prefect example workers (linux x86_64, py3.12)
+#   worker/native-runtime-*.tar.gz  self-contained CPython 3.12 Hatchet/Prefect worker runtimes
 #   source.tar               this repo without secrets / node_modules
 #   load.sh, SHA256SUMS
 set -euo pipefail
@@ -28,7 +29,7 @@ PLATFORM_ARCH=${PLATFORM_ARCH:-amd64}
 
 SKOPEO_IMAGE=${SKOPEO_IMAGE:-quay.io/skopeo/stable:v1.20.0}
 BUILDKIT_IMAGE=${BUILDKIT_IMAGE:-moby/buildkit:buildx-stable-1}
-PY_IMAGE=${PY_IMAGE:-python:3.12-slim}  # downloads Linux wheels and builds cross-platform Confluence runtimes
+PY_IMAGE=${PY_IMAGE:-python:3.12-slim}  # downloads Linux wheels and builds Linux native runtimes in Docker
 WORKER_BUILD_IMAGE=${WORKER_BUILD_IMAGE:-rust:alpine}
 BUNDLE_IMAGE_SUFFIX="offline-bundle-${BASHPID:-$$}-$(date +%s)"
 BUNDLE_NPM_MIRROR_IMAGE="npm-mirror:$BUNDLE_IMAGE_SUFFIX"
@@ -68,6 +69,8 @@ package_worker_assets() (
     agent-worker-x86_64-unknown-linux-musl
     confluence-runtime-windows.tar.gz
     confluence-runtime-linux.tar.gz
+    native-runtime-windows.tar.gz
+    native-runtime-linux.tar.gz
   )
   mkdir -p "$OUT/worker"
   for asset in "${assets[@]}"; do
@@ -143,6 +146,39 @@ package_worker_assets() (
       fi
     fi
   done
+  local host_os
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) host_os=windows ;;
+    *) host_os=linux ;;
+  esac
+  for asset in native-runtime-windows.tar.gz native-runtime-linux.tar.gz; do
+    if [ -s "$stage/$asset" ]; then continue; fi
+    os=${asset#native-runtime-}
+    os=${os%.tar.gz}
+    if [ "$os" = "$host_os" ]; then
+      python_cmd=
+      for candidate in python3.12 python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 &&
+           "$candidate" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' 2>/dev/null; then
+          python_cmd=$candidate
+          break
+        fi
+      done
+      if [ -n "$python_cmd" ]; then
+        log "Building $asset with native $host_os Python into temporary bundle staging"
+        if ! "$python_cmd" "$ROOT/worker/ci/build-native-runtime.py" --os "$os" --out "$stage"; then
+          echo "Could not build $asset with $python_cmd; provide the archive or check pip/network access." >&2
+        fi
+      fi
+    elif [ "$os" = linux ] && [ "$host_os" = windows ] && command -v docker >/dev/null 2>&1; then
+      log "Building $asset in $PY_IMAGE into temporary bundle staging"
+      if ! docker run --rm -v "$root_native:/repo:ro" -v "$stage_native:/out" -w /repo \
+        "$PY_IMAGE" python worker/ci/build-native-runtime.py --os linux --out /out; then
+        echo "Could not build $asset in $PY_IMAGE; provide the archive or check online access." >&2
+      fi
+    fi
+  done
+
 
   for asset in "${assets[@]}"; do
     if [ -s "$stage/$asset" ]; then
@@ -155,16 +191,17 @@ package_worker_assets() (
     echo "Required Fleet worker assets are missing:" >&2
     printf '  %s\n' "${missing[@]}" >&2
     cat >&2 <<EOF
-Provide all four files in $ROOT/dist/worker and rerun, or build/fetch them online first:
+Provide all six files in $ROOT/dist/worker and rerun, or build/fetch them online first:
   Windows binary: worker/ci/build.ps1 on Windows with Rust/cargo, rustup, and the MSVC C++ build tools.
   Linux binary: worker/ci/build.sh on Linux with Rust/cargo, or rerun with Docker available (uses $WORKER_BUILD_IMAGE).
   Confluence runtimes: worker/ci/build-confluence-runtime.py --os windows and --os linux with Python 3.12, pip, and network access; Docker with $PY_IMAGE can build them automatically.
+  Native runtimes: build Windows on Windows and Linux on Linux with Python 3.12 and pip; Windows can build Linux in Docker with $PY_IMAGE. Each reuses its matching Confluence runtime archive.
   A published release can provide all assets via worker/ci/fetch-release.sh github <owner/repo> worker-v<version>.
 These build/fetch steps must run on the connected side; this bundler never writes to dist/worker.
 EOF
     exit 1
   fi
-  log "Packaged Windows/Linux worker binaries and Confluence runtimes"
+  log "Packaged Windows/Linux worker binaries, Confluence runtimes, and native engine runtimes"
 )
 
 download_worker_node() {

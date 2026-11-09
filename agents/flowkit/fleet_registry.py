@@ -16,7 +16,7 @@ from .capacity import MAX_SLOTS
 
 ROOT = Path(__file__).resolve().parents[2]
 _LOCK = threading.RLock()
-ENGINES = ('hatchet', 'prefect', 'trigger')  # every engine reaches a PC through its execution service
+ENGINES = ('hatchet', 'prefect', 'trigger')
 TOKEN_ENV = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,99}$')
 
 REVOCATION_MESSAGE = ('This worker has been unregistered from the fleet. Run agent-worker uninstall, '
@@ -91,6 +91,47 @@ def _normalize(item, stored=False):
     if not isinstance(engines, list) or not engines or len(set(engines)) != len(engines) or any(e not in ENGINES for e in engines):
         raise ValueError('Invalid worker engines: choose one or more of ' + ', '.join(ENGINES))
     w['engines'] = engines
+    native = w.get('native_engines', [])
+    if (not isinstance(native, list) or len(set(native)) != len(native)
+            or any(engine not in ('hatchet', 'prefect') or engine not in engines for engine in native)):
+        raise ValueError('Invalid worker native engines')
+    config = w.get('native_config', {})
+    allowed_config = {'hatchet_api_url', 'hatchet_worker_grpc_host_port', 'hatchet_worker_tls_strategy', 'prefect_worker_api_url'}
+    if not isinstance(config, dict) or set(config) - allowed_config:
+        raise ValueError('Invalid worker native engine configuration')
+    if 'hatchet' in native:
+        endpoint = config.get('hatchet_api_url')
+        grpc = config.get('hatchet_worker_grpc_host_port')
+        tls = config.get('hatchet_worker_tls_strategy')
+        if not isinstance(endpoint, str) or not isinstance(grpc, str) or tls not in ('none', 'tls', 'mtls'):
+            raise ValueError('Missing Hatchet worker endpoints or TLS strategy')
+        parsed = urlsplit(endpoint)
+        hostport = urlsplit('//' + grpc)
+        try:
+            api_port, grpc_port = parsed.port, hostport.port
+        except ValueError:
+            raise ValueError('Invalid Hatchet worker endpoint for native execution') from None
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or api_port == 0
+                or parsed.hostname.lower() in ('host.docker.internal', 'hatchet-dashboard')
+                or not hostport.hostname or grpc_port is None or grpc_port == 0 or hostport.path not in ('', '/')
+                or hostport.hostname.lower() in ('host.docker.internal', 'hatchet-engine')
+                or hostport.hostname.lower().endswith(('.docker.internal', '.localhost'))):
+            raise ValueError('Invalid Hatchet worker endpoint for native execution')
+    if 'prefect' in native:
+        endpoint = config.get('prefect_worker_api_url')
+        parsed = urlsplit(endpoint or '')
+        try:
+            api_port = parsed.port
+        except ValueError:
+            raise ValueError('Missing or invalid Prefect API endpoint for native execution') from None
+        if (not isinstance(endpoint, str) or parsed.scheme not in ('http', 'https') or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment or api_port == 0
+                or parsed.hostname.lower() in ('host.docker.internal', 'prefect-server')
+                or parsed.hostname.lower().endswith(('.docker.internal', '.localhost'))):
+            raise ValueError('Missing or invalid Prefect API endpoint for native execution')
+    w['native_engines'] = native
+    w['native_config'] = config
     if 'token_env' in w and (not isinstance(w['token_env'], str) or not TOKEN_ENV.match(w['token_env'])):
         raise ValueError('token_env must be an environment variable name (letters, digits and _)')
     revision = w.get('settings_revision', 0)
@@ -149,8 +190,8 @@ def relayed(url):
     return is_relayed(url)
 
 def _public(w):
-    # Connection details never leave the coordinator: only whether an endpoint is configured.
-    return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit')} | ({'uuid': w['uuid']} if w.get('uuid') else {})
+    # Engine endpoints and connection details stay on the coordinator; route choices are safe to display.
+    return ({k: w[k] for k in ('id', 'pools', 'tags', 'engines', 'native_engines', 'slots', 'cpu_limit', 'ram_limit')} | ({'uuid': w['uuid']} if w.get('uuid') else {})
             | {'connection': 'relay' if relayed(w.get('url')) else 'configured' if w.get('url') else 'awaiting', 'online': False}
             | ({'warnings': warnings(w)} if warnings(w) else {}))
 
@@ -202,7 +243,7 @@ def save_worker(worker, create=False):
     """Create or update one PC's registration. With create, an existing id is refused: one PC
     is one registration however many engines and pools it serves."""
     if not isinstance(worker, dict): raise ValueError('Invalid worker')
-    allowed = {'id', 'uuid', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
+    allowed = {'id', 'uuid', 'pools', 'tags', 'engines', 'native_engines', 'native_config', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
     if set(worker) - allowed: raise ValueError('Unknown worker fields')
     with _locked():
         doc = _load(); workers = doc['workers']; existing = next((w for w in workers if w['id'] == worker.get('id')), None)

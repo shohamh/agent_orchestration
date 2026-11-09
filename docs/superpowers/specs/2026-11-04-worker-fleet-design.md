@@ -2,13 +2,13 @@
 
 ## Intent and scope
 
-Make machine registration, capability requirements and placement understandable and manageable in the board for both standalone cards and portable flows. Each step may run on a different machine. Use each engine's native placement where it satisfies these requirements; use the shared execution service for an engine where it does not. Hatchet native placement is the preferred direction, subject to the feasibility checks below. Preserve native engine orchestration, existing interactive sessions, cancellation, retries, step restart and workspace transfer.
+Make machine registration, capability requirements and placement understandable and manageable in the board for standalone cards and portable flows. Each step may run on a different machine. When Hatchet is selected, a dedicated per-PC worker-capable token authenticates a real Hatchet SDK worker on that PC; compatible routed work executes there. When Prefect is selected, an idempotently created or reused work pool/queue is served by a per-PC Prefect process worker executing compatible routed work. Trigger.dev remains a shared Fleet relay bridge; deployed workers remain isolated containers, not per-PC native workers. Preserve the common per-PC admission gate, native orchestration, cancellation, retries, step restart and workspace-transfer guarantees.
 
 ## Fleet and registration
 
-One registered execution worker represents a PC; it may serve multiple engines and belong to multiple named pools. The fleet tab lists workers, per-engine connection status, online state, pools, tags, slots and usage, and supports editing settings and refreshing capabilities. Registration starts with engine- and operating-system-specific instructions, followed by worker details, tag autocomplete with inline creation, and selection of multiple pools. A registration can be saved as awaiting connection; verify identity when it connects. Keep credentials out of the general fleet view.
+One registered execution worker represents a PC and may serve multiple selected engines and pools. The Fleet view reports per-engine readiness separately. When Hatchet is selected, a dedicated per-PC worker-capable token is delivered only to that PC's valid protected claim; it must not appear in the install command, public registration/status data or logs. Native readiness must be established before registration completes.
 
-The fleet registry is authoritative for editable settings (including pools, tags, slot count and resource thresholds). Workers report identity, health and capabilities and receive settings required for enforcement. Import existing YAML registrations, preserving IDs, tags, their existing pool, endpoint and credential configuration; the old pool becomes one membership. Preserve existing flows and selectors when migrating. Define an explicit migration and rollback procedure before implementation, including the default local worker and secrets; avoid duplicate registrations or dual mutable sources of truth.
+The Fleet registry is authoritative for settings. Claim/install/update is idempotent for the same identity; updates occur in place and restore the previous working setup on failure. Unregister revokes routing and prevents new work; repeated unregister and replacement registration are safe. Keep the Hatchet secret in a separately protected local file.
 
 ## Capability and placement
 
@@ -28,23 +28,30 @@ Enforce the worker's slot limit across all engines sharing a PC. Serialize alloc
 
 Engine assignment is not itself admission: a single per-PC gate must enforce reservations across native and shared paths. Define lease ownership, cleanup and fencing after crashes, and preserve the cooldown across reconnects or conservatively restart it. Queued cancellation and board state must remain correct without falsely reporting engine failure.
 
-## Engine integration and feasibility gates
+## Engine integration and limits
 
-For Hatchet, prefer native worker assignment on each PC using native labels and slot management, while enforcing the fleet's cross-engine admission policy. Before committing to the detailed design, prove with the repository's pinned Hatchet SDK/server that per-step and per-run selectors, required rather than preferred labels, dynamic availability, cancellation, waiting and restarts work together. Native slots alone are insufficient to coordinate with other engines. If they cannot meet the contract, document the concrete limitation and use the shared execution service for the affected route; do not claim native placement succeeded.
+Selected Hatchet means a real Hatchet SDK worker on the registered PC, authenticated by that PC's dedicated worker-capable token; compatible routed work executes there. Admin configures the worker-reachable gRPC host/port and TLS strategy separately from coordinator REST/dashboard URLs.
 
-The pinned Hatchet SDK has a five-minute default scheduling timeout; verify and configure its lifecycle so intended waiting does not silently turn into a failure. Design immutable flow-revision distribution and registration for remote native workers, including failed updates and old runs still in flight.
+Selected Prefect means a per-PC Prefect process worker polling a work queue in an idempotently created or reused work pool. Compatible routed work executes there. Admin configures the API URL reachable from the PC, not merely a coordinator-internal Docker URL. Live endpoint reachability and failure reporting still require validation.
 
-For Prefect and Trigger.dev, evaluate native mechanisms against per-step PC affinity, dynamic eligibility, mixed-engine slots and current deployment modes. Prefer them where the full contract is feasible; otherwise use the shared execution service. The current Trigger flow integration is limited to its local development worker; any production expansion is a separate explicit design decision. Keep the engine-neutral fleet UI and requirement semantics consistent regardless of adapter. A worker may need both a native engine connection and a local coordination component.
+Trigger.dev remains a shared Fleet relay bridge. Its deployed workers remain isolated containers; do not advertise per-PC Trigger.dev native workers.
 
-Existing workspace publications are stored on the coordinator; direct remote native execution must preserve the current isolated workspace, transfer, conflict handling, fencing, cancellation and restart guarantees rather than assuming the filesystem is shared. Engine credentials and remote registration require engine-specific setup instructions. Keep tokens and executable endpoints out of browser-visible run parameters and apply existing network authentication requirements.
+Native Hatchet and Prefect work and relay-dispatched work share one per-PC capacity gate. Reservations, leases, start authorization, cancellation and fencing must prevent over-allocation, stale starts and stale publication across engines. Coordinator-owned workspaces must be transferred through authenticated artifact access or an equivalent mechanism, preserving isolation, publication locks, transfer limits and conflict detection; never assume a shared filesystem.
 
-Provide authenticated cross-PC artifact access or an equivalent mechanism, preserving the current publication locks, fencing and transfer limits. Make migration idempotent and protect ignored registry and credential files through migration and rollback.
+Offline installation has release and load paths for `worker/native-runtime-windows.tar.gz` and `worker/native-runtime-linux.tar.gz`, each bundling CPython and the combined Hatchet/Prefect SDK requirements; `requirements-worker.txt` alone omits the engine SDKs. The Windows archive build passed locally. Linux archive generation remains unverified because the upstream CPython asset fetch returned HTTP 504. Native runtime packaging does not currently target macOS.
+
+### Superseded historical feasibility probes
+
+The 2026-11-04 Hatchet probes used SDK 1.44.0 and server image v0.114.2. Selector composition, run-level worker-ID routing, queued cancellation, long scheduling waits and restart lifecycle were inconclusive or inconsistent; an eight-minute timeout probe also logged an unexplained slot-replenishment timeout after a 310-second wait. These are historical risk evidence, not proof that the current design is impossible or tested.
+
+The current local tests exercise service dispatch, local result ownership, cancellation and capacity fencing using the Python service and real Rust worker. Still unverified: live worker-reachable Hatchet gRPC/TLS and Prefect API endpoints, actual cross-PC execution, Prefect pool/queue reuse against the target server, combined native/relay contention with real engines, native engine-side cancellation/restart races, and artifact transfer between physical PCs. Do not describe those behaviors as live-tested.
 
 ## Acceptance and validation
 
-- Register an offline worker, connect it, configure multiple pools and create/reuse tags in the UI. Add a second engine to the same PC without creating a duplicate.
-- Migrate a representative existing registry, preserve secrets and selectors, and verify rollback. Show per-engine connectivity and actual executing worker for cards and flow steps.
-- Verify supported agent detection, adapter prerequisites, unknown and absent results, startup/daily/manual refresh, offline timestamps, pre-execution rechecks and command resolution, including ambiguous commands.
-- Exercise a flow with steps on different PCs and a standalone card, across supported engine modes. Prove engine-specific placement where claimed and shared-service fallback otherwise. Test registration, online/offline transitions, mismatches, queueing, cancellation and retries.
-- Feed controlled CPU/RAM samples across both limits, unknown and stale windows; verify admission resumes only after a complete eligible window. Concurrent engine requests must honor one worker-wide slot limit and the 10-second post-start cooldown. Existing jobs must continue above limits.
-- Verify file transfer, independent branches, restart, cancellation, authentication and no secret exposure. Document any engine mode or physical multi-PC scenario not actually tested.
+- Register an offline worker, connect it, configure multiple pools, reuse the same PC for an additional engine, and verify per-engine readiness precedes registration.
+- Confirm the valid PC claim alone receives the Hatchet token; verify command, public view, status and logs do not reveal it and the local secret file is protected.
+- Verify idempotent update, rollback after partial native setup, repeated unregister and replacement registration. Missing or unreachable engine endpoints must produce actionable errors and leave the worker not ready.
+- Verify Hatchet SDK execution from a physical PC over worker-reachable gRPC/TLS and Prefect process execution through the reused/created pool and queue; record exact versions and all untested modes.
+- Test per-step placement, capability checks, cancellation, restart, retry and queue-timeout behavior rather than inferring it from historical probes.
+- Exercise shared capacity admission with concurrent native and relay requests, CPU/RAM thresholds, cooldown, leases, cancellation and fencing. Verify transfer isolation, publication locks, conflicts and transfer limits across PCs.
+- Verify offline installation from the complete bundle on Windows and Linux without preinstalled Python; document missing artifacts or scenarios not actually tested.

@@ -1,8 +1,8 @@
 """Trigger.dev adapter: boards are run tags (`board:<name>`), cards are runs.
 
 Talks to the REST API with an environment secret key (env: TRIGGER_API_URL, TRIGGER_SECRET_KEY).
-Intermediate results are the run's live `metadata.transcript` (set by the agent), which the
-runs list already returns, so one request per board refresh covers every card.
+Output streams from run metadata events/transcripts published by the worker and is read from the
+run list / child-run API as it updates.
 """
 
 import json

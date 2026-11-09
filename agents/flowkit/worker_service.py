@@ -71,7 +71,156 @@ class Job:
         self.authorize = bool(config.get('authorize'))
         self.authorized = asyncio.Event()
         self.nonce = self.reason = None
+        self.native_engine = config.get('native_engine')
+        self.native_dispatch = None
+        self.lease = None
+        self.finished = False
+        self.cancel_requested = False
         self.task = asyncio.create_task(self.run())
+
+
+    async def _native_fence_valid(self):
+        lease = self.lease
+        if self.cancel_requested or self.finished or self.app.get('draining'):
+            return False
+        if self.native_engine not in ('hatchet', 'prefect') or not lease:
+            return False
+        metrics = await capacity_call(self.app['capacity'].metrics)
+        gate_id = metrics.get('gate_id')
+        if gate_id != self.app['gate_id'] or (self.config.get('gate_id') is not None and self.config['gate_id'] != gate_id):
+            return False
+        revision = self.config.get('settings_revision')
+        if revision is not None and metrics.get('settings_revision') != revision:
+            return False
+        if (self.lease is not lease or self.cancel_requested or self.finished
+                or self.app.get('draining')):
+            return False
+        valid = await capacity_call(self.app['capacity'].valid, self.id, lease['fence'])
+        return (valid and self.lease is lease and not self.cancel_requested and not self.finished
+                and not self.app.get('draining'))
+
+    async def request_native_dispatch(self, engine, nonce):
+        if self.native_engine != engine or not isinstance(nonce, str) or not nonce or self.cancel_requested or self.finished:
+            return False
+        dispatch = self.native_dispatch
+        if self.state == 'running':
+            if not self.started or dispatch is None or dispatch['nonce'] != nonce:
+                return False
+            if not await self._native_fence_valid():
+                return False
+            return (self.state == 'running' and self.started and not self.cancel_requested and not self.finished
+                    and self.native_dispatch is dispatch and dispatch['nonce'] == nonce)
+        if self.state != 'queued':
+            return False
+        pending = self.nonce == nonce and not self.authorized.is_set()
+        accepted = self.nonce is None and self.authorized.is_set() and dispatch is not None
+        if dispatch is not None and (dispatch['nonce'] != nonce or not (pending or accepted)):
+            return False
+        if dispatch is None and not pending:
+            return False
+        if not await self._native_fence_valid():
+            return False
+        if self.cancel_requested or self.finished or self.state != 'queued':
+            return False
+        if pending and self.nonce != nonce:
+            return False
+        if accepted and (self.nonce is not None or not self.authorized.is_set()):
+            return False
+        if self.native_dispatch is None:
+            self.native_dispatch = {'nonce': nonce, 'run_id': None}
+        return self.native_dispatch['nonce'] == nonce
+
+    async def native_dispatch_item(self, engine):
+        if self.native_engine != engine or self.state != 'queued' or self.cancel_requested or self.finished:
+            return None
+        dispatch = self.native_dispatch
+        nonce = self.nonce
+        if dispatch is None or dispatch['run_id'] is not None or dispatch['nonce'] != nonce or self.authorized.is_set():
+            return None
+        if not await self._native_fence_valid():
+            return None
+        if (self.state != 'queued' or self.cancel_requested or self.finished or self.nonce != nonce
+                or self.authorized.is_set() or self.native_dispatch is not dispatch):
+            return None
+        return {'id': self.id, 'nonce': nonce}
+
+    async def native_start_authorized(self, nonce):
+        if self.native_engine is None:
+            return True
+        dispatch = self.native_dispatch
+        if (self.state != 'queued' or self.finished or self.cancel_requested or self.nonce != nonce
+                or self.authorized.is_set() or dispatch is None or dispatch['nonce'] != nonce):
+            return False
+        if not await self._native_fence_valid():
+            return False
+        return (self.state == 'queued' and not self.finished and not self.cancel_requested
+                and self.nonce == nonce and not self.authorized.is_set()
+                and self.native_dispatch is dispatch and dispatch['nonce'] == nonce)
+
+    async def acknowledge_native_dispatch(self, nonce, run_id):
+        if self.native_engine not in ('hatchet', 'prefect') or self.cancel_requested or self.finished:
+            return False
+        dispatch = self.native_dispatch
+        if dispatch is None or dispatch['nonce'] != nonce:
+            return False
+        if self.state == 'queued':
+            pending = self.nonce == nonce and not self.authorized.is_set()
+            accepted = self.nonce is None and self.authorized.is_set()
+            if not (pending or accepted) or not await self._native_fence_valid():
+                return False
+        elif self.state == 'running' and self.started:
+            if not await self._native_fence_valid():
+                return False
+            if (self.cancel_requested or self.finished or self.state != 'running'
+                    or self.native_dispatch is not dispatch or dispatch['nonce'] != nonce):
+                return False
+        else:
+            return False
+        if (self.cancel_requested or self.finished or self.state not in ('queued', 'running')
+                or self.native_dispatch is not dispatch):
+            return False
+        previous = dispatch['run_id']
+        if previous is not None:
+            return previous == run_id
+        dispatch['run_id'] = run_id
+        return True
+
+    async def native_launch_fence_valid(self):
+        if self.native_engine is None:
+            return True
+        dispatch = self.native_dispatch
+        if (self.state != 'queued' or self.finished or self.cancel_requested or self.nonce is not None
+                or not self.authorized.is_set() or dispatch is None):
+            return False
+        if not await self._native_fence_valid():
+            return False
+        return (self.state == 'queued' and not self.finished and not self.cancel_requested
+                and self.nonce is None and self.authorized.is_set() and self.native_dispatch is dispatch)
+
+    async def reject_stale_native_start(self):
+        if self.native_engine is None or await self.native_launch_fence_valid():
+            return False
+        self.native_dispatch = None
+        if self.cancel_requested:
+            self.state, self.error = 'cancelled', 'Execution cancelled'
+        elif self.app.get('draining'):
+            self.state, self.error, self.reason = 'rejected', 'This PC is updating', 'updating'
+        else:
+            metrics = await capacity_call(self.app['capacity'].metrics)
+            if metrics.get('gate_id') != self.app['gate_id'] or (
+                    self.config.get('gate_id') is not None and self.config['gate_id'] != metrics.get('gate_id')):
+                reason = 'gate_changed'
+            elif (self.config.get('settings_revision') is not None
+                    and self.config['settings_revision'] != metrics.get('settings_revision')):
+                reason = 'settings_changed'
+            else:
+                reason = 'revoked'
+            self.state, self.error, self.reason = (
+                'rejected',
+                'Job was revoked or worker settings changed before execution',
+                reason,
+            )
+        return True
 
     async def missing_software(self):
         """Recheck the step's software immediately before launch, as execution resolves it."""
@@ -92,6 +241,7 @@ class Job:
             await asyncio.shield(work)
             await capacity_call(record_termination, self.app, self.id)
         except asyncio.CancelledError:
+            self.cancel_requested = True
             work.cancel()  # Exactly one cancellation reaches execution/cleanup.
             try: await finish_despite_cancellation(work)
             except asyncio.CancelledError: pass
@@ -100,6 +250,10 @@ class Job:
         except Exception as exc:
             self.state, self.error = 'failed', str(exc)[-8000:]
             raise
+        finally:
+            self.finished = True
+            self.lease = None
+            self.native_dispatch = None
 
     async def _run(self):
         completed = False
@@ -117,6 +271,8 @@ class Job:
                         # An update is waiting for running work to finish: never admit more, so the coordinator places it elsewhere.
                         if lease is not None: await capacity_call(self.app['capacity'].release, self.id)
                         lease = None
+                        self.lease = None
+                        self.native_dispatch = None
                         self.state, self.error, self.reason = ('rejected' if self.authorize else 'failed'), 'This PC is updating', 'updating'
                         return
                     if self.authorize and time.monotonic() - self.last_seen > COORDINATOR_STALE:
@@ -138,23 +294,31 @@ class Job:
                         self.waiting_reason = lease['reason']
                         await asyncio.sleep(1)
                         continue
+                    self.lease = lease
                     if self.authorize:
                         # The coordinator must confirm, after admission, that this attempt is still wanted.
                         # One nonce per admission: a late confirmation can never authorize a later one.
+                        self.native_dispatch = None
                         self.authorized.clear()
                         self.nonce, self.waiting_reason = uuid.uuid4().hex, 'awaiting_authorization'
                         try: await asyncio.wait_for(self.authorized.wait(), AUTHORIZATION_TIMEOUT)
                         except asyncio.TimeoutError:
                             self.nonce = None  # before any await, so no confirmation can still land
+                            self.native_dispatch = None
                             await capacity_call(self.app['capacity'].release, self.id)
                             lease = None
+                            self.lease = None
                             continue
                         finally: self.nonce = None
                     missing = await self.missing_software()
                     if missing:
                         await capacity_call(self.app['capacity'].release, self.id)
                         lease = None
+                        self.lease = None
+                        self.native_dispatch = None
                         self.state, self.error, self.reason = ('rejected' if self.authorize else 'failed'), missing, 'software_missing'
+                        return
+                    if await self.reject_stale_native_start():
                         return
                     break
                 self.waiting_reason = None
@@ -167,6 +331,7 @@ class Job:
                             lease['expires'] = time.monotonic() + 30
                         except Exception as exc:
                             self.lease_loss = str(exc)
+                            self.cancel_requested = True
                             self.task.cancel()
                             return
                 heartbeat = asyncio.create_task(renew())
@@ -195,6 +360,8 @@ class Job:
                     except asyncio.CancelledError:
                         await attach
                         raise
+                    if await self.reject_stale_native_start():
+                        return
                     self.process.stdin.write(b'{"type":"capacity_go"}\n')
                     await self.process.stdin.drain()
                     started = json.loads(await self.process.stdout.readline())
@@ -364,6 +531,12 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         return web.json_response({'settings': (await capacity_call(app['capacity'].metrics))['settings']})
     async def create(request):
         config = await request.json()
+        if 'authorize' in config and not isinstance(config['authorize'], bool):
+            raise ValueError("'authorize' must be a boolean")
+        if 'native_engine' in config and config.get('authorize') is not True:
+            raise ValueError("'native_engine' requires 'authorize': true")
+        if 'native_engine' in config and config['native_engine'] not in ('hatchet', 'prefect'):
+            raise ValueError("'native_engine' must be 'hatchet' or 'prefect'")
         job_id = str(uuid.UUID(config['id']))
         if config.get('gate_id') is not None and (config['gate_id'] != app['gate_id'] or config['gate_id'] != (await capacity_call(app['capacity'].metrics))['gate_id']):
             raise ValueError('Worker capacity gate identity changed')
@@ -423,7 +596,43 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         nonce = body.get('nonce') if isinstance(body, dict) else None
         if not isinstance(nonce, str) or not item.nonce or not hmac.compare_digest(nonce, item.nonce):
             return web.json_response({'error': 'No start authorization is pending for this job'}, status=409)
+        if not await item.native_start_authorized(nonce):
+            return web.json_response({'error': 'No start authorization is pending for this job'}, status=409)
         item.authorized.set()
+        return web.json_response({'ok': True})
+
+    async def native_dispatch(request):
+        engine = request.query.get('engine')
+        if engine not in ('hatchet', 'prefect'):
+            raise ValueError("'engine' must be 'hatchet' or 'prefect'")
+        jobs = []
+        for item in tuple(app['jobs'].values()):
+            pending = await item.native_dispatch_item(engine)
+            if pending is not None:
+                jobs.append(pending)
+        return web.json_response({'jobs': jobs})
+
+    async def request_dispatch(request):
+        item = job(request)
+        item.last_seen = time.monotonic()
+        body = await request.json()
+        engine = body.get('engine') if isinstance(body, dict) else None
+        nonce = body.get('nonce') if isinstance(body, dict) else None
+        if engine not in ('hatchet', 'prefect'):
+            raise ValueError("'engine' must be 'hatchet' or 'prefect'")
+        if not await item.request_native_dispatch(engine, nonce):
+            return web.json_response({'error': 'No native dispatch is pending for this job'}, status=409)
+        return web.json_response({'ok': True})
+
+    async def ack_dispatch(request):
+        item = job(request)
+        body = await request.json()
+        nonce = body.get('nonce') if isinstance(body, dict) else None
+        run_id = body.get('run_id') if isinstance(body, dict) else None
+        if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,150}', run_id):
+            raise ValueError('Invalid run id')
+        if not await item.acknowledge_native_dispatch(nonce, run_id):
+            return web.json_response({'error': 'No native dispatch is pending for this job'}, status=409)
         return web.json_response({'ok': True})
     async def cancel(request):
         expected = request.headers.get('X-Flow-Gate-ID')
@@ -447,6 +656,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
                 record_termination(app, canonical)
                 return web.json_response({'ok': True, 'terminated': True})
         item = job(request)
+        item.cancel_requested = True
         item.task.cancel()
         results = await asyncio.gather(item.task, return_exceptions=True)
         failure = results[0]
@@ -463,6 +673,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
             now=time.monotonic()
             for jid,item in list(app['jobs'].items()):
                 if item.state in ('queued','running') and now-item.last_seen>45:
+                    item.cancel_requested = True
                     item.task.cancel()
                     await asyncio.gather(item.task,return_exceptions=True)
                     item.state,item.error='cancelled','Coordinator lease expired'
@@ -493,11 +704,14 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         await asyncio.gather(app['inventory_task'], return_exceptions=True)
         app['reaper'].cancel()
         await asyncio.gather(app['reaper'],return_exceptions=True)
-        for item in app['jobs'].values(): item.task.cancel()
+        for item in app['jobs'].values():
+            item.cancel_requested = True
+            item.task.cancel()
         await asyncio.gather(*(j.task for j in app['jobs'].values()), return_exceptions=True)
     app.on_cleanup.append(cleanup)
     app.on_startup.append(startup)
     app.router.add_get('/health', health)
+    app.router.add_get('/native-dispatch', native_dispatch)
     app.router.add_post('/drain', drain)
     app.router.add_get('/capabilities', inventory)
     app.router.add_post('/capabilities/refresh', refresh_capabilities)
@@ -507,6 +721,8 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.router.add_post('/jobs/{id}/input', receive)
     app.router.add_post('/jobs/{id}/start', authorize)
     app.router.add_delete('/jobs/{id}', cancel)
+    app.router.add_post('/jobs/{id}/dispatch', request_dispatch)
+    app.router.add_post('/jobs/{id}/dispatch/ack', ack_dispatch)
     return app
 
 

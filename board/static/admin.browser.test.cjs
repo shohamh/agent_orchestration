@@ -14,19 +14,21 @@ const iso = () => new Date().toISOString();
 const ENGINE_IDS = ['hatchet', 'trigger', 'trigger-dev', 'prefect'];
 const records = new Map();
 let calls = [];
+let failAdminScript = false;
 function reset() {
   calls = [];
   records.clear();
-  records.set('hatchet', { id: 'hatchet', label: 'Hatchet', enabled: true, api_url: 'http://hatchet.internal:8080', dashboard_url: 'http://hatchet.internal:8080/ui', status: 'reachable', checked_at: iso(), error: null });
-  records.set('trigger', { id: 'trigger', label: 'Trigger.dev production', enabled: true, api_url: 'https://trigger.example.com', dashboard_url: 'https://cloud.trigger.dev', status: 'unreachable', checked_at: iso(), error: 'Connection refused' });
-  records.set('trigger-dev', { id: 'trigger-dev', label: 'Trigger.dev local', enabled: false, api_url: 'http://127.0.0.1:8030', dashboard_url: 'http://127.0.0.1:8030', status: 'disabled', checked_at: null, error: null });
-  records.set('prefect', { id: 'prefect', label: 'Prefect', enabled: true, api_url: 'http://prefect.internal:4200/api', dashboard_url: 'http://prefect.internal:4200', status: 'unreachable', checked_at: iso(), error: 'Service unavailable' });
+  records.set('hatchet', { id: 'hatchet', label: 'Hatchet', enabled: true, api_url: 'http://hatchet.internal:8080', dashboard_url: 'http://hatchet.internal:8080/ui', hatchet_worker_grpc_host_port: '', hatchet_worker_tls_strategy: 'none', worker_endpoint_configured: false, status: 'reachable', checked_at: iso(), error: null });
+  records.set('trigger', { id: 'trigger', label: 'Trigger.dev production', enabled: true, api_url: 'https://trigger.example.com', dashboard_url: 'https://cloud.trigger.dev', worker_endpoint_configured: null, status: 'unreachable', checked_at: iso(), error: 'Connection refused' });
+  records.set('trigger-dev', { id: 'trigger-dev', label: 'Trigger.dev local', enabled: false, api_url: 'http://127.0.0.1:8030', dashboard_url: 'http://127.0.0.1:8030', worker_endpoint_configured: null, status: 'disabled', checked_at: null, error: null });
+  records.set('prefect', { id: 'prefect', label: 'Prefect', enabled: true, api_url: 'http://prefect.internal:4200/api', dashboard_url: 'http://prefect.internal:4200', prefect_worker_api_url: '', worker_endpoint_configured: false, status: 'unreachable', checked_at: iso(), error: 'Service unavailable' });
 }
 reset();
 const STATIC = ['index.html', 'overlays.js', 'chat.js', 'chat.css', 'card-search.js', 'flow-graph.js', 'flow-graph.css', 'flow-builder.js', 'flow-builder.css',
   'fleet.js', 'fleet.css', 'admin.js', 'admin.css', 'new-card.js', 'new-card.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
+  if (url.pathname === '/static/admin.js' && failAdminScript) { response.writeHead(503).end('simulated script load failure'); return; }
   let raw = '';
   for await (const chunk of request) raw += chunk;
   const body = raw ? JSON.parse(raw) : undefined;
@@ -41,8 +43,9 @@ const server = http.createServer(async (request, response) => {
       const record = records.get(id);
       if (!record) return json(404, { error: 'Unknown engine' });
       if (request.method === 'PUT' && !check) {
-        record.api_url = body.api_url;
-        record.dashboard_url = body.dashboard_url;
+        Object.assign(record, body);
+        if (id === 'hatchet') record.worker_endpoint_configured = Boolean(record.hatchet_worker_grpc_host_port);
+        if (id === 'prefect') record.worker_endpoint_configured = Boolean(record.prefect_worker_api_url);
         record.checked_at = iso();
         return json(200, { ...record });
       }
@@ -149,43 +152,84 @@ const lastCall = (method, path) => calls.filter((entry) => entry.method === meth
 const waitForSaved = async (id, body) => {
   for (let i = 0; i < 100; i++) {
     const record = records.get(id);
-    if (record?.api_url === body.api_url && record?.dashboard_url === body.dashboard_url) return;
+    if (record && Object.entries(body).every(([key, value]) => record[key] === value)) return;
     await sleep(10);
   }
   throw new Error(`Timed out: ${id} URL settings were not saved`);
 };
 
 // ---------------------------------------------------------------- tests
+test('Admin content survives ad-prefix cosmetic filters', async () => {
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await evaluate('document.querySelector("#admin-btn").click()');
+  await waitFor('document.querySelector("#admin-dialog").open && document.querySelectorAll("#admin-dialog .engine-card").length === 4', 'Admin opens with four engines');
+  await waitFor('document.querySelector(".engine-settings-status")?.textContent.includes("refreshed")', 'engine status request completes before cleanup');
+  await evaluate('(() => { const style = document.createElement("style"); style.id = "ad-filter-test"; style.textContent = ".ad, :not(dialog)[class^=\\"ad-\\"], :not(dialog)[class*=\\"ad\\"] { display:none!important }"; document.head.append(style); })()');
+  const visible = await evaluate('[...document.querySelectorAll("#admin-dialog .engine-card")].length === 4 && [...document.querySelectorAll("#admin-dialog .engine-card")].every(card => card.getBoundingClientRect().width > 0)');
+  await evaluate('closeAdmin()');
+  await waitFor('!document.querySelector("#admin-dialog").open');
+  await evaluate('document.querySelector("#ad-filter-test").remove()');
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+  assert.equal(visible, true, 'engine cards must remain visible despite generic ad-related cosmetic filters');
+  assert.deepEqual(errors, []);
+});
+
 test('Admin saves URLs, checks status, polls while open, respects disabled engines and stops when hidden or closed', async () => {
   assert.deepEqual(await evaluate('(() => { const svg = document.querySelector("#admin-btn svg"); return { gear: svg.querySelector("path")?.getAttribute("d").startsWith("M6.7 1.2"), viewBox: svg.getAttribute("viewBox") }; })()'),
     { gear: true, viewBox: '-1 -1 18 18' }, 'gear shape has padding so its outer teeth are not clipped');
   await evaluate('document.querySelector("#admin-btn").click()');
-  await waitFor('document.querySelector("#admin-dialog").open && document.querySelectorAll(".ad-engine").length === 4', 'Admin opens with all four engines');
-  await waitFor(`${q('.ad-engine[data-engine="hatchet"] .ad-state')}?.textContent === "Reachable"`, 'initial status loads');
-  assert.equal(await evaluate('[...document.querySelectorAll(".ad-engine")].map(row => row.querySelector(".ad-engine-title").textContent.trim()).join("|")'),
+  await waitFor('document.querySelector("#admin-dialog").open && document.querySelectorAll(".engine-card").length === 4', 'Admin opens with all four engines');
+  await waitFor(`${q('.engine-card[data-engine="hatchet"] .engine-state')}?.textContent === "Reachable"`, 'initial status loads');
+  assert.equal(await evaluate('[...document.querySelectorAll(".engine-card")].map(row => row.querySelector(".engine-card-title").textContent.trim()).join("|")'),
     'Hatchet|Trigger.dev · production|Trigger.dev · local|Prefect');
-  assert.equal(await evaluate(`${q('.ad-engine[data-engine="trigger"] .ad-state')}?.textContent`), 'Unreachable');
-  assert.equal(await evaluate(`${q('.ad-engine[data-engine="trigger-dev"] .ad-state')}?.textContent`), 'Disabled');
-  assert.equal(await evaluate(`${q('.ad-engine[data-engine="trigger-dev"] [data-action="check"]')}?.disabled`), true, 'disabled engines cannot be checked');
-  assert.ok(await evaluate(`${q('.ad-engine[data-engine="hatchet"] .ad-checked')}?.textContent.includes("Last checked:")`));
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="trigger"] .engine-state')}?.textContent`), 'Unreachable');
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="trigger-dev"] .engine-state')}?.textContent`), 'Disabled');
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="trigger-dev"] [data-action="check"]')}?.disabled`), true, 'disabled engines cannot be checked');
+  assert.ok(await evaluate(`${q('.engine-card[data-engine="hatchet"] .engine-checked')}?.textContent.includes("Last checked:")`));
   assert.equal(await evaluate('document.querySelectorAll("#admin-dialog input[type=password]").length'), 0, 'there are no credential inputs');
-  assert.equal(await evaluate('document.querySelectorAll("#admin-dialog input").length'), 8, 'only API and dashboard URLs are editable');
+  assert.equal(await evaluate('document.querySelectorAll("#admin-dialog input").length'), 10, 'worker connection endpoints are editable alongside engine URLs');
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="hatchet"] .engine-worker-status')}?.textContent.includes("not configured")`), true);
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="trigger"] .engine-worker-status')}?.textContent.includes("Fleet PCs remain execution bridges")`), true);
 
   await evaluate(`(() => {
-    const row = document.querySelector('.ad-engine[data-engine="hatchet"]');
+    const row = document.querySelector('.engine-card[data-engine="hatchet"]');
     const api = row.querySelector('input[aria-label="Hatchet API URL"]');
     const dashboard = row.querySelector('input[aria-label="Hatchet dashboard URL"]');
+    const grpc = row.querySelector('input[aria-label="Hatchet worker gRPC host and port"]');
+    const tls = row.querySelector('select[aria-label="Hatchet worker TLS strategy"]');
     api.value = 'https://hatchet-new.example/api'; api.dispatchEvent(new Event('input', { bubbles: true }));
     dashboard.value = 'https://hatchet-new.example/'; dashboard.dispatchEvent(new Event('input', { bubbles: true }));
+    grpc.value = 'hatchet-new.example:7077'; grpc.dispatchEvent(new Event('input', { bubbles: true }));
+    tls.value = 'tls'; tls.dispatchEvent(new Event('change', { bubbles: true }));
     row.querySelector('[data-action="save"]').click();
   })()`);
-  await waitForSaved('hatchet', { api_url: 'https://hatchet-new.example/api', dashboard_url: 'https://hatchet-new.example/' });
+  const hatchetSettings = { api_url: 'https://hatchet-new.example/api', dashboard_url: 'https://hatchet-new.example/',
+    hatchet_worker_grpc_host_port: 'hatchet-new.example:7077', hatchet_worker_tls_strategy: 'tls' };
+  await waitForSaved('hatchet', hatchetSettings);
   const saved = lastCall('PUT', '/api/admin/engines/hatchet');
-  assert.deepEqual(saved.body, { api_url: 'https://hatchet-new.example/api', dashboard_url: 'https://hatchet-new.example/' }, 'the save sends only the two URL settings');
-  assert.equal(await evaluate(`${q('.ad-engine[data-engine="hatchet"] input[aria-label="Hatchet API URL"]')}?.value`), 'https://hatchet-new.example/api');
+  assert.deepEqual(saved.body, hatchetSettings, 'the save includes the dedicated worker endpoint and transport mode');
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="hatchet"] input[aria-label="Hatchet API URL"]')}?.value`), hatchetSettings.api_url);
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="hatchet"] .engine-worker-status')}?.textContent`), 'PC worker endpoint configured.');
+  await evaluate(`(() => {
+    const row = document.querySelector('.engine-card[data-engine="prefect"]');
+    const workerApi = row.querySelector('input[aria-label="Prefect worker API URL"]');
+    workerApi.value = 'http://prefect-pc.example:4200/api';
+    workerApi.dispatchEvent(new Event('input', { bubbles: true }));
+    row.querySelector('[data-action="save"]').click();
+  })()`);
+  await waitForSaved('prefect', {
+    api_url: 'http://prefect.internal:4200/api', dashboard_url: 'http://prefect.internal:4200',
+    prefect_worker_api_url: 'http://prefect-pc.example:4200/api'
+  });
+  assert.deepEqual(lastCall('PUT', '/api/admin/engines/prefect').body, {
+    api_url: 'http://prefect.internal:4200/api', dashboard_url: 'http://prefect.internal:4200',
+    prefect_worker_api_url: 'http://prefect-pc.example:4200/api'
+  }, 'Prefect receives a PC-reachable API endpoint separately from Board status checks');
+  await waitFor(`${q('.engine-card[data-engine="prefect"] .engine-worker-status')}?.textContent === "PC worker endpoint configured."`, 'Prefect worker endpoint save renders as configured');
+  assert.equal(await evaluate(`${q('.engine-card[data-engine="hatchet"] input[aria-label="Hatchet API URL"]')}?.value`), 'https://hatchet-new.example/api');
 
-  await evaluate(`document.querySelector('.ad-engine[data-engine="prefect"] [data-action="check"]').click()`);
-  await waitFor(`${q('.ad-engine[data-engine="prefect"] .ad-state')}?.textContent === "Reachable"`, 'manual check returns and displays a fresh status');
+  await evaluate(`document.querySelector('.engine-card[data-engine="prefect"] [data-action="check"]').click()`);
+  await waitFor(`${q('.engine-card[data-engine="prefect"] .engine-state')}?.textContent === "Reachable"`, 'manual check returns and displays a fresh status');
   assert.ok(lastCall('POST', '/api/admin/engines/prefect/check'));
   assert.equal(lastCall('POST', '/api/admin/engines/prefect/check').body, undefined);
   assert.equal(lastCall('POST', '/api/admin/engines/trigger-dev/check'), undefined, 'disabled engines are not checked');
@@ -193,7 +237,7 @@ test('Admin saves URLs, checks status, polls while open, respects disabled engin
   records.get('hatchet').status = 'unreachable';
   records.get('hatchet').checked_at = iso();
   records.get('hatchet').error = 'Connection lost';
-  await waitFor(`${q('.ad-engine[data-engine="hatchet"] .ad-state')}?.textContent === "Unreachable"`, 'open dialog polls updated engine status');
+  await waitFor(`${q('.engine-card[data-engine="hatchet"] .engine-state')}?.textContent === "Unreachable"`, 'open dialog polls updated engine status');
   assert.ok(countGets() >= 2, 'opening and polling issue GET requests');
 
   await evaluate('Object.defineProperty(document, "hidden", { configurable: true, value: true }); document.dispatchEvent(new Event("visibilitychange"))');
@@ -212,7 +256,7 @@ test('Admin polling stops when the dialog closes and the dialog never renders cr
   // The prior test resumes visibility; opening again exercises the fresh load and close lifecycle.
   if (!(await evaluate('document.querySelector("#admin-dialog").open'))) await evaluate('document.querySelector("#admin-btn").click()');
   await waitFor('document.querySelector("#admin-dialog").open');
-  await evaluate('document.querySelector("#admin-dialog .ad-actions .close").click()');
+  await evaluate('document.querySelector("#admin-dialog .engine-settings-actions .close").click()');
   await waitFor('!document.querySelector("#admin-dialog").open', 'Admin closes');
   await sleep(350);
   const page = await evaluate('document.querySelector("#admin-dialog").innerHTML');
@@ -247,20 +291,31 @@ test('clicking outside every main app dialog closes it', async () => {
 test('mobile Admin dialog renders every engine and keeps the settings list scrollable', async () => {
   await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await evaluate('document.querySelector("#admin-btn").click()');
-  await waitFor('document.querySelector("#admin-dialog").open && document.querySelectorAll(".ad-engine").length === 4', 'Admin loads all engine settings');
-  await waitFor(`${q('.ad-status')}?.textContent.includes("refreshed")`, 'engine status loads');
+  await waitFor('document.querySelector("#admin-dialog").open && document.querySelectorAll(".engine-card").length === 4', 'Admin loads all engine settings');
+  await waitFor(`${q('.engine-settings-status')}?.textContent.includes("refreshed")`, 'engine status loads');
   const layout = await evaluate(`(() => {
     const dialog = document.querySelector('#admin-dialog');
-    const body = dialog.querySelector('.ad-body');
-    const rows = [...dialog.querySelectorAll('.ad-engine')];
+    const body = dialog.querySelector('.engine-settings-body');
+    const rows = [...dialog.querySelectorAll('.engine-card')];
     return { dialog: dialog.getBoundingClientRect().toJSON(), bodyHeight: body.clientHeight, bodyScrollHeight: body.scrollHeight,
-      rows: rows.map((row) => ({ visible: row.getBoundingClientRect().width > 0, name: row.querySelector('.ad-engine-title').textContent.trim() })) };
+      rows: rows.map((row) => ({ visible: row.getBoundingClientRect().width > 0, name: row.querySelector('.engine-card-title').textContent.trim() })) };
   })()`);
   assert.equal(layout.dialog.width, 390);
   assert.ok(layout.bodyHeight > 0 && layout.bodyScrollHeight > layout.bodyHeight, 'engine list can scroll within the viewport');
   assert.deepEqual(layout.rows.map((row) => row.name), ['Hatchet', 'Trigger.dev · production', 'Trigger.dev · local', 'Prefect']);
   assert.ok(layout.rows.every((row) => row.visible), 'all engine rows render');
-  await evaluate('document.querySelector("#admin-dialog .ad-actions .close").click()');
+  await evaluate('document.querySelector("#admin-dialog .engine-settings-actions .close").click()');
   await waitFor('!document.querySelector("#admin-dialog").open');
   assert.deepEqual(errors, []);
+});
+test('Admin shows a visible recovery state when its script fails to load', async () => {
+  failAdminScript = true;
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await call('Page.navigate', { url: `${base}/?failAdminScript=1` });
+  await waitFor('typeof window.openAdmin === "function" && typeof window.Admin === "undefined"', 'Admin fallback startup finishes after script failure');
+  await evaluate('document.querySelector("#admin-btn").click()');
+  assert.equal(await evaluate('document.querySelector("#admin-dialog").open'), true, 'Admin still opens');
+  const content = await evaluate('document.querySelector("#admin-dialog").textContent.trim()');
+  assert.match(content, /could not load|loading/i, 'the dialog is never blank');
+  failAdminScript = false;
 });

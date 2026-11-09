@@ -3,7 +3,7 @@
 A small kanban board over **Hatchet**, **Trigger.dev** and **Prefect** runs. Each board is a named lane of agent work. You can:
 - see cards move through **Scheduled → Queued → Running → Waiting → Done / Stopped**
 - see how many runs are ahead of a queued card
-- watch intermediate results while a card runs
+- stream output while a card runs
 - **steer**, **stop gracefully**, **cancel** or **replay** a card
 - jump straight to the sessions waiting on you: they're amber on the board, and **N need you** in the toolbar opens each in turn, oldest first
 
@@ -47,6 +47,10 @@ endpoint is constructed at startup, so changing its API URL takes effect after r
 For offline deployment, point each API URL at the engine address reachable from the board container;
 set dashboard URLs to addresses reachable by the browser (including remote phones). The two URL
 types can differ when Docker-internal and browser-visible hostnames differ.
+If Admin is blank with an ad blocker enabled, check cosmetic filters for the generic `.ad` selector
+and selectors matching classes beginning with `ad-` or containing `ad`. Admin settings use distinct
+`engine-settings-*` and `engine-*` classes to avoid those collisions.
+
 
 ### UI development auto-reload
 
@@ -101,7 +105,7 @@ instead (tailnet only; the phone needs the Tailscale app).
 |---|---|---|---|
 | Board | `additional_metadata.board` on the run | Run tag `board:<name>` | Flow run tag `board:<name>` |
 | Card title | Run input `goal` | Run metadata `title` (set when the card is created) | Parameter `goal` / `topic` |
-| Intermediate results | The run's persisted logs (`ctx.log` in the agent). History survives board restarts. | Run metadata `transcript` (`metadata.set` in the agent), returned by the runs list | The flow run's persisted logs |
+| Output | Hatchet task logs (including worker stdout/stderr and `ctx.log`); streamed while the task runs | Trigger.dev run metadata events/transcript, updated live by Realtime | Prefect task/flow logs, read incrementally and woken by `/logs/out` |
 | Waiting column | Durable task evicted while it waits (holds no worker slot) | `WAITING` (waitpoints, `wait.*`) | `PAUSED` (`pause_flow_run`) |
 | Queued position | Queued runs of the same task, oldest first | Same, plus queue `running` / `concurrencyLimit` | Scheduled/pending runs of the same deployment |
 | Steer / stop | Event `agent:steer` scoped to the run id | `steer` input stream on the run | Flow run input (`send_input` key format), read with `receive_input` |
@@ -283,7 +287,8 @@ log lines.
 ## DAG / run graph view
 
 Click a card to get a live graph of its run in the drawer. Click any node to see its status, timing,
-output, error and logs. Updates arrive live; see [Live updates](#live-updates).
+output, and worker logs. Output streams through each engine's native log or transcript channel while
+the step runs; no OpenTelemetry collector is required.
 
 Portable flow nodes open agent chat or a scrolling program log, with **Restart step** and backend
 links. Restart uses native Hatchet dependency replay and a flow-host runtime extension for

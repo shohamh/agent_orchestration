@@ -860,7 +860,7 @@ async def fleet_update(request: web.Request) -> web.Response:
 async def fleet_unregister(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].unregister_worker(request.match_info['worker_id']))
 
-INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart'}
+INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart', 'hatchet_token'}
 
 
 async def fleet_updates(request: web.Request) -> web.Response:
@@ -883,8 +883,25 @@ async def fleet_update_link(request: web.Request) -> web.Response:
     return passed_through(await request.app['flow_host'].update_link(body))
 
 
+INSTALL_PRIVATE_FIELDS = {
+    'hatchet_token', 'hatchet_api_url', 'hatchet_worker_grpc_host_port',
+    'hatchet_worker_tls_strategy', 'prefect_worker_api_url', 'prefect_api_url',
+}
+
+
+def public_install_answer(result: tuple[int, Any]) -> web.Response:
+    status, body = result
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items() if key not in INSTALL_PRIVATE_FIELDS}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+    return web.json_response(scrub(body), status=status)
+
+
 async def fleet_installs(request: web.Request) -> web.Response:
-    return passed_through(await request.app['flow_host'].fleet_installs())
+    return public_install_answer(await request.app['flow_host'].fleet_installs())
 
 
 async def fleet_install_create(request: web.Request) -> web.Response:
@@ -892,11 +909,21 @@ async def fleet_install_create(request: web.Request) -> web.Response:
     unknown = set(body) - INSTALL_FIELDS
     if unknown:
         raise ValueError('unknown install fields: ' + ', '.join(sorted(unknown)))
-    return passed_through(await request.app['flow_host'].create_install(body))
+    import engine_admin
+    engines = body.get('engines', [])
+    if 'hatchet' in engines:
+        config = engine_admin.config_for('hatchet')
+        body['hatchet_api_url'] = config['api_url']
+        body['hatchet_worker_grpc_host_port'] = config['hatchet_worker_grpc_host_port']
+        body['hatchet_worker_tls_strategy'] = config['hatchet_worker_tls_strategy']
+    if 'prefect' in engines:
+        config = engine_admin.config_for('prefect')
+        body['prefect_worker_api_url'] = config['prefect_worker_api_url']
+    return public_install_answer(await request.app['flow_host'].create_install(body))
 
 
 async def fleet_install_cancel(request: web.Request) -> web.Response:
-    return passed_through(await request.app['flow_host'].cancel_install(request.match_info['code']))
+    return public_install_answer(await request.app['flow_host'].cancel_install(request.match_info['code']))
 
 
 async def fleet_refresh(request: web.Request) -> web.Response:

@@ -215,6 +215,111 @@ class RustWorkerTests(FleetFixture):
         logs = [e for e in self.events if e.get('type') == 'log']
         self.assertEqual([(e['stream'], e['text']) for e in logs], [('stdout', 'from rust')])
 
+    async def create_native_dispatch_job(self, engine='hatchet'):
+        health = self.pc.get('/health')
+        job_id = str(uuid.uuid4())
+        program = (
+            "python -c \"from pathlib import Path; p=Path('dispatch-count.txt'); "
+            "n=int(p.read_text()) if p.exists() else 0; p.write_text(str(n+1)); import time; time.sleep(2); "
+            "print('native-dispatch-output')\""
+        )
+        config = {
+            'id': job_id,
+            'authorize': True,
+            'native_engine': engine,
+            'gate_id': health['capacity']['gate_id'],
+            'settings_revision': health['capacity']['settings_revision'],
+            'files': {},
+            'assets': {},
+            'start': {
+                'flow': {'steps': {'go': {'kind': 'program', 'run': program}}},
+                'step': 'go',
+                'context': {'input': {}, 'steps': {}},
+                'runId': 'native_dispatch',
+            },
+        }
+        status, body = self.pc.post('/jobs', config)
+        self.assertEqual((status, body), (200, {'id': job_id}))
+        self.addCleanup(self.pc.cancel, job_id)
+        await until(lambda: isinstance(self.pc.get(f'/jobs/{job_id}').get('authorization'), str),
+                    timeout=20, message='native job admission')
+        return job_id, self.pc.get(f'/jobs/{job_id}')['authorization'], health['capacity']
+
+    async def test_native_dispatch_is_engine_nonce_and_run_bound_and_returns_service_results(self):
+        for engine in ('hatchet', 'prefect'):
+            with self.subTest(engine=engine):
+                job_id, nonce, _ = await self.create_native_dispatch_job(engine)
+                other_engine = 'prefect' if engine == 'hatchet' else 'hatchet'
+                status, body = self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': other_engine, 'nonce': nonce})
+                self.assertEqual((status, body['error']), (409, 'No native dispatch is pending for this job'))
+                status, body = self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': engine, 'nonce': 'wrong'})
+                self.assertEqual((status, body['error']), (409, 'No native dispatch is pending for this job'))
+                self.assertEqual(self.pc.get(f'/native-dispatch?engine={other_engine}'), {'jobs': []})
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': engine, 'nonce': nonce}),
+                                 (200, {'ok': True}))
+                self.assertEqual(self.pc.get(f'/native-dispatch?engine={engine}'),
+                                 {'jobs': [{'id': job_id, 'nonce': nonce}]})
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch/ack',
+                                              {'nonce': 'wrong', 'run_id': 'engine-run-1'})[0], 409)
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/start', {'nonce': 'wrong'})[0], 409)
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/start', {'nonce': nonce}),
+                                 (200, {'ok': True}))
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/start', {'nonce': nonce})[0], 409)
+                await until(lambda: self.pc.get(f'/jobs/{job_id}')['state'] == 'running',
+                            timeout=20, message='native job running on its PC')
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': engine, 'nonce': nonce}),
+                                 (200, {'ok': True}))
+                for run_id in ('engine-run-1', 'engine-run-1'):
+                    self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch/ack',
+                                                  {'nonce': nonce, 'run_id': run_id}),
+                                     (200, {'ok': True}))
+                self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch/ack',
+                                              {'nonce': nonce, 'run_id': 'other-run'})[0], 409)
+                self.assertEqual(self.pc.get(f'/native-dispatch?engine={engine}'), {'jobs': []})
+                await until(lambda: self.pc.get(f'/jobs/{job_id}')['state'] in ('done', 'failed'),
+                            timeout=30, message='native job result')
+                result = self.pc.get(f'/jobs/{job_id}')
+                self.assertEqual(result['state'], 'done', result)
+                self.assertEqual(result['worker']['id'], 'rust-pc')
+                self.assertIn('native-dispatch-output', result['output']['stdout'])
+                self.assertEqual(base64.b64decode(result['files']['dispatch-count.txt']['data']), b'1')
+                self.assertEqual(self.pc.get(f'/native-dispatch?engine={engine}'), {'jobs': []})
+
+    async def test_cancelled_native_dispatch_rejects_a_late_scheduler_callback(self):
+        job_id, nonce, _ = await self.create_native_dispatch_job()
+        self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': 'hatchet', 'nonce': nonce}),
+                         (200, {'ok': True}))
+        self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch/ack',
+                                      {'nonce': nonce, 'run_id': 'engine-run-cancel'}),
+                         (200, {'ok': True}))
+        self.assertEqual(self.pc.cancel(job_id), {'ok': True, 'terminated': True})
+        self.assertEqual(self.pc.post(f'/jobs/{job_id}/start', {'nonce': nonce})[0], 409)
+        self.assertEqual(self.pc.get(f'/jobs/{job_id}')['state'], 'cancelled')
+        marker = self.pc.root / job_id / 'workspaces' / 'native_dispatch' / 'dispatch-count.txt'
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.pc.get('/native-dispatch?engine=hatchet'), {'jobs': []})
+
+    async def test_capacity_revision_change_fences_native_dispatch_and_start(self):
+        job_id, nonce, capacity = await self.create_native_dispatch_job()
+        revision = capacity['settings_revision'] + 1
+        status, _ = self.pc.post(
+            '/capacity/settings',
+            {'slots': 2, 'cpu_limit': 100, 'ram_limit': 100},
+            {'X-Flow-Gate-ID': capacity['gate_id'], 'X-Flow-Settings-Revision': str(revision)},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.pc.get('/native-dispatch?engine=hatchet'), {'jobs': []})
+        self.assertEqual(self.pc.post(f'/jobs/{job_id}/dispatch', {'engine': 'hatchet', 'nonce': nonce})[0], 409)
+        self.assertEqual(self.pc.post(f'/jobs/{job_id}/start', {'nonce': nonce})[0], 409)
+        marker = self.pc.root / job_id / 'workspaces' / 'native_dispatch' / 'dispatch-count.txt'
+        self.assertFalse(marker.exists())
+
+    def test_native_jobs_require_explicit_coordinator_authorization(self):
+        job_id = str(uuid.uuid4())
+        for config in ({'id': job_id, 'native_engine': 'hatchet'},
+                       {'id': job_id, 'native_engine': 'hatchet', 'authorize': 'yes'}):
+            self.assertEqual(self.pc.post('/jobs', config)[0], 400)
+
     async def test_the_step_receives_its_context_and_may_return_json_through_flow_output(self):
         code = ("import json, os, sys; ctx = json.load(sys.stdin); assert os.environ['FLOW_STEP'] == 'go'; "
                 "json.dump({'topic': ctx['input']['topic'], 'env_ok': json.loads(os.environ['FLOW_CONTEXT']) == ctx}, open(os.environ['FLOW_OUTPUT'], 'w'))")

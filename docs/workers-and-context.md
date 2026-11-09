@@ -1,15 +1,17 @@
 # Execution workers and environment setup
 
-Steps run on registered PCs, including the one the flow host runs on: there is no built-in worker,
-so a flow waits until a compatible PC is registered. Each PC runs an execution service and is listed
-in the coordinator's fleet registry, which the board's **Fleet** tab edits. Engine-launched flows without an explicit selection use any compatible fleet worker. Standalone sessions with an existing workspace or resume ID retain their local executor behavior.
+Steps run on registered PCs, including the one the flow host runs on: there is no built-in Fleet
+execution PC. Selected Hatchet work is executed by a Hatchet SDK worker on the registered PC;
+selected Prefect work is executed by that PC's process worker in its configured pool/queue.
+Trigger.dev remains a shared Fleet relay bridge, and its deployed workers remain isolated
+containers. Native Hatchet/Prefect and relay-dispatched work share the per-PC capacity gate.
+Engine-launched flows without an explicit selection use a compatible fleet worker. Standalone
+sessions with an existing workspace or resume ID retain their local executor behavior.
 
-Each native task is still scheduled, retried and cancelled by its engine. Its Python coordinator
-dispatches the command or agent to an execution service chosen from the fleet. The node panel
-reports the **actual execution worker**, hostname, pool and tags after the job is admitted. This
-is distinct from the native engine's coordinator process. Prefect serve and Trigger development
-execution are supported by the shared runtime extension; choosing a native queue is not a
-PC-affinity guarantee.
+Each engine keeps its native orchestration. The board reports the actual execution worker, hostname,
+pool and tags after admission. A worker is not considered ready until its selected native engine
+worker is ready. Engine endpoint reachability, cross-PC native transfer/cancellation and combined
+native/relay admission are not verified here.
 
 ## Register a PC
 
@@ -17,42 +19,38 @@ One registration is one PC, however many engines and pools it serves. In the boa
 **Fleet**, then **Register PC**. Registering is a short form plus one command:
 
 1. **Fill in the form.** Name, the PC's operating system, the engines it serves, a pool (or a new
-   one), optional tags, the slots and the CPU and RAM limits (defaults 1, 90% and 90%), and the
-   address the PC uses to reach this server (pre-filled from the page; it cannot be `localhost`), and
-   **when the worker starts** and whether it **restarts automatically** (see below).
-   Nothing is created until every field is valid: the page checks them first and the server checks
-   them again.
-2. **Copy the command.** The server generates a **uuid** for this install and the board shows one
-   command per shell. Each downloads the `agent-worker` program from this server and runs
-   `agent-worker install <uuid> --server <address>`; there is no script and there are no other flags:
+   one), optional tags, slots and CPU/RAM limits (defaults 1, 90% and 90%), the address the PC uses
+   to reach this server (pre-filled from the page; it cannot be `localhost`), and its startup and
+   restart choices. When Hatchet is selected, provide a dedicated worker-capable Hatchet token for
+   this PC; do not use the Board-global token. Nothing is created until every field is valid.
+2. **Copy the command.** The server generates a UUID for this install and shows one command per
+   shell. It downloads `agent-worker` and runs `agent-worker install <uuid> --server <address>`.
+   The token is never placed in the command:
    - Windows PowerShell: `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing 'http://<server>/install/<uuid>/agent-worker' -OutFile $f; & $f install <uuid> --server 'http://<server>'`
    - Windows Command Prompt: the same with `curl.exe`
    - Linux: `f=$(mktemp) && curl -fsSL '…/agent-worker' -o "$f" && chmod +x "$f" && "$f" install <uuid> --server 'http://<server>'`
 
    **Run it as a normal user. Do not use Administrator or sudo.** Everything installs for that
    user, and nothing on the PC is opened to the network.
-3. **Watch it connect.** The page shows each step (checking, contacting the server, installing,
-   service, registering, waiting for the connection) and then "Connected". A failed step is shown
-   with its reason. Closing the tab does not lose the install: it stays listed under "Waiting to be
+3. **Watch it connect.** The page shows each step and the reason for any failed step. A failed native
+   runtime setup must not leave a worker registered as ready; installation rolls back its partial
+   native setup. Closing the tab does not lose the install: it stays listed under "Waiting to be
    installed" with **Show command** and **Cancel**.
 
-The link works once, expires after 30 minutes, and the uuid is the only thing in it. The settings
-from the form stay on the server, and the PC receives them when it checks in.
-
-**Cancel** immediately invalidates that install uuid for both downloads and claims, and frees the
-name for a new install link. A new link always gets a new uuid.
+The install UUID is the only secret-like value in the command. On the valid PC claim, the server
+delivers the dedicated Hatchet token only in that claim response; it is not returned in install
+views, worker status or logs. It is stored in a separately protected local secret file for the
+native Hatchet component, never in generic worker configuration. It is never sent for an invalid
+claim or a different PC. Cancel invalidates that UUID for both downloads and claims.
 
 ### Unregistering a worker
 
 In **Fleet**, choose **Unregister** on the worker card or **Unregister from Fleet** in its
 context menu, then confirm the removal. The server removes the registration, closes its old install
-record, revokes its relay authorization, and makes the name immediately available for a new worker.
-It will not dispatch new work to that PC. Already-running jobs are not synchronously canceled; the
-existing worker lease cleanup handles work whose coordinator connection disappears.
-
-Unregistration does not uninstall the local service or erase its files. When it learns about the
-cutoff, the worker records it and `agent-worker status` explains that it is no longer registered.
-To use the PC again, run a new Fleet install command with the same name; it replaces the local worker identity in place.
+record and revokes its relay authorization and engine routing. Unregister must be safe to repeat.
+The local installation remains and must not accept new work; cancellation/fencing of work already
+running is not synchronous and remains unverified for native engine paths. A new install link is
+required to restore the PC and replaces the local worker identity in place.
 
 Opening the binary download URL in a browser supplies the platform's release filename:
 `agent-worker-x86_64-pc-windows-msvc.exe` on Windows or
@@ -71,22 +69,31 @@ An operating system that differs from the one in the form is refused too.
 ### What `agent-worker install <uuid>` does
 
 1. Contacts the server (`POST /install/<uuid>/claim`) before changing an existing local install.
-   A new install link creates a new worker identity. If the same name is still registered, the
-   server refuses the claim; unregister it in Fleet first.
-2. Receives its settings from the server (name, engines, pool, tags, slots, CPU and RAM limits), so
-   what runs on the PC is what was saved from the form.
-3. If this user already has a worker, waits for its running jobs to finish, stops it, then replaces its
-   configuration, token and executable in the existing install folder. Adapter packages and other
-   local files remain there; no separate `agent-worker uninstall` is needed.
-4. Installs or updates the per-user service, registers the new UUID with the server and waits until
-   it is connected.
+   The claim is bound to that PC identity; only a valid claim receives its dedicated Hatchet token,
+   and only when Hatchet was selected. The server refuses a duplicate live registration; unregister
+   it in Fleet before creating a replacement.
+2. Receives the saved worker settings and, when selected, the Hatchet token in the protected claim
+   response. The token is written to a separately protected local file, not generic worker
+   configuration, status, logs or the install command.
+3. Installs or updates the bundled native runtime and selected engine components. The release and
+   offline-load paths include Windows and Linux native-runtime archives with CPython and the
+   Hatchet/Prefect SDK dependencies; the Rust installer downloads the selected archive, checks its
+   version digest and starts the selected components before reporting readiness. A Windows archive
+   build succeeded in local verification. The Linux archive could not be verified here because
+   the upstream CPython download returned HTTP 504 on all bounded retries. Native engine runtime
+   packaging does not currently target macOS. Offline rollout needs both platform archives present
+   in the server's `dist/worker` directory.
+4. Starts the Hatchet SDK worker on this PC when Hatchet is selected. For Prefect, creates the
+   configured process work pool if absent, reuses it if present, and runs a process worker polling
+   the configured queue. Compatible routed work executes in those PC-native workers. Trigger.dev
+   remains a shared Fleet relay bridge; its deployed workers remain isolated containers.
+5. Completes Fleet registration only after native engine readiness. The worker stays registered
+   with the same identity during an update.
 
-The `agent-worker` executable is static and needs no Python. The Fleet install also runs `npm ci`
-for the pinned ACP adapters, so Node.js and npm must be available on the PC before installation.
-For offline PCs, point npm at the bundled server mirror before running the generated command:
-`npm config set registry http://<server>:4873/`. The worker connects outbound to the Board/relay
-server and the mirror; it does not need an inbound port. Real agents additionally need their CLI
-and model credentials/configuration. The built-in `demo` agent requires no model.
+The `agent-worker` executable is static and needs no Python. The native runtime archives and offline
+per-OS engine dependencies are bundle prerequisites, not assumed system packages. Other components,
+such as ACP adapters, may still need Node.js/npm or access to the bundled server mirror. Real agents
+also need their CLI and model credentials/configuration. The built-in `demo` agent requires no model.
 
 ### When the worker starts: logon, boot or never
 
@@ -328,18 +335,22 @@ again is refused with a pointer to the existing entry, so a PC is never register
 
 ### Per-engine registration
 
-Native engine placement is not enabled (see [Engine adapters](#engine-adapters-and-workspace-integrity)),
-so every engine reaches a PC through its execution service and the PC needs no engine connection:
+Each selected engine has a PC-native worker except Trigger.dev, which continues to use the shared
+Fleet relay bridge. Engine-native work still shares the same per-PC capacity gate as relay work:
+engine assignment alone does not grant admission.
 
-| Engine | On the coordinator | On the PC | Fleet tab engine status |
+| Engine | Coordinator side | Registered PC | Important limitation |
 |---|---|---|---|
-| Hatchet | The flow host runs the Hatchet flow worker (`FLOW_BACKENDS` includes `hatchet`). Placed standalone cards go through `agents/hatchet_worker.py`. | Execution service only; no Hatchet token. | Connected while the PC is online and the coordinator's Hatchet flow worker runs. |
-| Prefect | The flow host runs `flow_worker_prefect.py` (served deployments stay in the coordinator's serve process). Placed cards go through `agents/prefect_worker.py`. | Execution service only; no Prefect API access. | As for Hatchet. |
-| Trigger.dev | The local development worker (`trigger dev`, `scripts/dev-worker.ps1`) runs on the coordinator and sends flow steps to the PC. | Execution service only. | Unconfirmed: the flow host cannot check `trigger dev`. |
+| Hatchet | Submits compatible work with the Fleet placement and execution context. | A Hatchet SDK worker uses a dedicated per-PC worker-capable token and executes compatible routed work. | The PC needs the configured gRPC endpoint reachable with its TLS strategy; use a per-PC credential, never the Board-global token. |
+| Prefect | Schedules compatible runs onto the configured process work pool and queue. | A process worker creates the pool if needed, reuses it idempotently, and polls its configured queue. | The configured Prefect API URL must be reachable from the PC; coordinator-internal URLs may not be. |
+| Trigger.dev | Local development worker may route tasks through the Fleet bridge. | Shared Fleet relay bridge only; deployed workers remain isolated containers. | No per-PC Trigger.dev worker is advertised. |
 
-Standalone Trigger.dev cards always run on the coordinator, and Trigger.dev production deployment
-to other PCs is not supported. A worker's `engines` list (default: all three) limits which engines
-may place work on it; a step or card on another engine treats that PC as not compatible.
+Only compatible work routed to that PC executes in its native Hatchet or Prefect worker. A worker's
+`engines` selection limits eligible engines. Trigger.dev's service route remains relay-mediated.
+
+Admin settings provide Hatchet REST, worker gRPC host/port and TLS strategy, plus the Prefect
+worker API URL. These are deployment URLs and must be reachable from the selected PC; live endpoint
+reachability has not been verified against a configured Hatchet or Prefect deployment.
 
 ## Immutable flow assets and upgrade
 
@@ -641,49 +652,37 @@ without coordinator polling, including when an engine kills the coordinator proc
 Finished service workspaces expire after five minutes without polling. Canonical publications
 remain in `FLOW_WORKSPACES` on the coordinator PC for selective restart.
 
-## Fleet placement feasibility decision (2026-11-04)
+## Superseded historical feasibility probes (2026-11-04)
 
-For the current deployment modes, retain the shared execution service for Hatchet portable
-flows, Prefect served deployments, and Trigger.dev's local development worker. This is a
-conservative adapter decision, not proof that native placement cannot work. The existing
-service supports the documented flow and step selectors, but does not yet implement the new
-fleet contract: in particular, offline selections currently fail, and cross-engine admission,
-metrics, cooldown, leases and fencing still need implementation.
+The following probes describe an earlier design investigation, not the current routing contract.
+They remain relevant risk evidence but are superseded by the per-PC Hatchet/Prefect worker design
+above; they do not establish that today's implementation works or fails.
 
-The installed Hatchet SDK is 1.44.0; the isolated Compose stack used server image v0.114.2. The SDK
-surface exposes worker labels, task desired labels, and run desired worker ID/labels. Labels
-default to `required=False`, so merely supplying labels is insufficient for strict matching.
-The task scheduling timeout defaults to five minutes and is configurable. In a disposable stack, a run-level required station selector caused a task to execute on a
-worker lacking the task's required kind label: task and runtime selectors cannot be assumed to
-combine. A two-step probe placed distinct task selectors on the correct workers, but a run-level
-station selector sent both steps to that station. A separate run-level desired worker ID probe
-executed on a different worker. The SDK's public worker update request exposes pause only, and
-the runtime labels property has no setter; no in-place label-update facility was found in this
-pinned SDK. Without a run-level override, a queued task waited through disconnection and a worker label
-change, then executed on the re-registered matching worker. The queued cancellation probe did
-not execute after an eligible worker joined. A task configured with an eight-minute scheduling
-timeout did not execute within 90 seconds after an eligible worker joined following a 310-second
-wait; the engine logged a slot-replenishment timeout, so the cause is undetermined. These
-limited observations do not establish all cancellation and restart behavior. Native placement
-must not be enabled without resolving selector composition and verifying the complete lifecycle,
-including a timeout strategy that supports the intended indefinite wait.
+The installed Hatchet SDK was 1.44.0 and the disposable Compose stack used server image v0.114.2.
+Run-level required station selectors did not compose reliably with task selectors; separate probes
+also observed task selectors placing distinct steps correctly, a run-level selector overriding
+them, and a run-level desired worker ID not being honored. The SDK exposed pause but no in-place
+label update. A queued task survived disconnection and a label change when re-registered, while a
+queued cancellation probe did not execute after an eligible worker joined. An eight-minute task
+scheduling timeout did not run within 90 seconds after an eligible worker joined following a
+310-second wait; the engine logged a slot-replenishment timeout of undetermined cause. These were
+limited probes, not complete cancellation, restart or timeout validation.
 
-Prefect's current `serve()` process registers deployments and executes the flow and its tasks
-on the serving host; the repository dispatches each step through the shared service. Trigger
-currently generates flow and task code for the local `trigger dev` worker and uses the same
-service for step execution. Neither configured mode establishes direct per-step remote PC
-placement or the required cross-engine admission guarantees. Trigger production deployment is
-outside the current supported mode and requires a separate design and verification.
+Prefect `serve()` and Trigger.dev local development were previously configured around coordinator
+execution plus relay dispatch. Those historical deployment observations do not describe the new
+Prefect process worker route. Trigger.dev remains a shared Fleet relay bridge; deployed workers
+remain isolated containers, with no per-PC native Trigger worker.
 
-For any future native route, engine assignment must still pass a single per-PC admission gate
-shared with service routes, with crash-safe leases and fencing. A queued engine task must remain
-cancellable and must not silently fail at an engine scheduling timeout; waiting inside an engine
-slot can consume capacity, so queue behavior must be measured. Remote native workers also need
-immutable, versioned flow definitions, safe registration and update failure handling while old
-runs remain in flight. The coordinator owns workspace publications: remote execution needs
-authenticated artifact access or equivalent transfer preserving locks, limits, conflict handling
-and fencing; do not assume a shared filesystem. Existing coordinator-mediated HTTP transfer and
-its authentication remain the fallback path described above.
+Local integration tests exercise native dispatch against the Python worker service and the real Rust
+worker binary: engine/nonce/run binding, one local execution with returned output/files, cancellation
+before a late scheduler callback, and capacity-revision fencing. They do not connect to a live
+Hatchet or Prefect server, and do not validate a physical multi-PC deployment.
+
+Not verified here: live per-PC Hatchet gRPC/TLS or Prefect API reachability, endpoint failure
+reporting against a real engine, work-pool/queue reuse against the target Prefect server, combined
+native/relay admission under real engine contention, engine-side cancellation/restart behavior,
+artifact-transfer limits on native routes, and rollback after partial component failure. Treat
+these as validation limits, not as evidence that those live integration behaviors are tested.
 
 ## Placement, waiting and cancellation
 
@@ -705,54 +704,27 @@ after launch, the worker rejects the job before it starts and the step waits for
 worker; when no registered worker can satisfy it, the reason becomes `intervention_needed` with a
 resolution, and the step resumes automatically once the fleet or software is repaired.
 
-The coordinator submits a job with start authorization: after the worker's capacity gate admits
-the job and immediately before launch, the job waits up to 10 seconds for the coordinator to
-confirm the attempt is still current, then rechecks its software. Without that confirmation it
-releases its reservation, and it only seeks admission again while its coordinator keeps polling.
-A step cancelled while its worker is unreachable therefore never starts later, even if the worker
-returns with free capacity; the unpolled job is cancelled after 45 seconds. A job lost before
-authorization (worker restart or disconnection) is placed again; after authorization a lost
-worker fails the step as before, and the engine's retries apply. A restarted coordinator starts a
-new attempt with a new fence, so an older attempt can neither start nor publish.
-
-Fallback constraint: the current Hatchet, Prefect and Trigger.dev adapters run each portable-flow
-step as an engine task that calls the shared execution service, and none of them offers a queued
-alternative that preserves the native DAG, step restart and the cross-engine admission gate.
-Waiting therefore happens inside the step's engine task: it occupies one engine execution slot of
-the flow worker and counts toward the step's `timeout_minutes`, so it is bounded rather than
-indefinite. Raise `timeout_minutes` for steps expected to wait long. Engine scheduling timeouts do
-not apply because the task is already running. Native engine queueing remains a separate, unverified option.
-
-The default wait bound is therefore the step's `timeout_minutes`, 60 minutes unless the flow sets
-it (at most 1440). When it expires, the engine reports the step as timed out and the step's
-execution record shows `state: timed_out`, keeping the last `waiting_reason` and `message` (for
-example `offline`) so the board can show why it never ran. A cancellation through the board's
-cancel action records `state: cancelled`; any other engine-side cancellation of the task (from the
-engine's own UI or a worker shutdown) records `state: interrupted`. If the flow host is unreachable
-when the board cancels, the cancellation still happens but may be recorded as `interrupted`. A
-restart onto a selected worker is checked like a launch, including the step's software: a confirmed
-absence is refused with the explanation, while an offline, busy or unchecked worker is accepted and
-the restarted step waits for it. A worker that reports a job as started (running state, a worker
-identity or step events) is never replaced by another placement, even if it ignored start
-authorization; losing it then fails the step and the engine's retries apply.
+The native local-service and Rust-worker integration tests verify dispatch authorization, exact
+engine/nonce/run checks, single local execution and result ownership, cancellation before a late
+callback, and fencing after capacity settings change. They do not exercise real Hatchet or Prefect
+queueing, connectivity loss, engine-side retry/restart, or scheduling timeouts. Do not infer
+indefinite waiting or successful engine-side cancellation from the 2026-11-04 probes. Until live
+engine tests confirm the contract, a disconnected or incompatible endpoint must not be described as
+ready.
 
 ## Engine adapters and workspace integrity
 
-Native engine placement is not enabled for any engine. Hatchet's run-level selectors did not
-compose with task-level ones in the feasibility probes, routing by worker ID and waits longer than
-five minutes were not proven, and Prefect `serve()` and the Trigger.dev local development worker
-offer no per-step remote PC placement (see the feasibility decision above). Every supported mode
-therefore uses the shared execution service: Hatchet portable flows, Prefect served deployments,
-the Trigger.dev local development worker, and standalone agent cards on Hatchet and Prefect.
+Hatchet and Prefect selected in Fleet use per-PC native workers: the Hatchet SDK worker uses a
+dedicated PC token, and Prefect uses a process worker on a reused or created work pool/queue.
+Compatible routed work executes on that PC after admission through the shared per-PC capacity
+gate. Trigger.dev remains relay-mediated; deployed Trigger.dev workers are isolated containers,
+not per-PC native workers.
 
-Each adapter computes the same requirement object (selection plus software), waits with the same
-lifecycle, and submits the job to the chosen worker's service, whose capacity gate admits it. So
-one PC's slots, CPU/RAM limits and start cooldown apply to work from every engine at once. The
-execution record shows `engine` (`hatchet`, `prefect` or `trigger`), the executing `worker`
-(the identity reported by the service that started the job: id, hostname, pool, tags), `state`,
-and `waiting_reason`. For a flow step, the record is under `/execution/<run>` (`steps.<step>`).
-For a card, it is under `steps.card`, which the board serves at
-`GET /api/cards/<system>/<run>/execution`. The record never contains endpoints or credentials.
+The relay bridge remains available for Trigger.dev and any explicitly routed shared-service work.
+Its execution record shows `engine`, the actual execution `worker`, `state` and `waiting_reason`.
+For a flow step, the record is under `/execution/<run>` (`steps.<step>`); for a card, under
+`steps.card`, served at `GET /api/cards/<system>/<run>/execution`. Records must not expose engine
+tokens or endpoints.
 
 The board defaults a new blank-workspace Hatchet or Prefect card to any compatible fleet worker; its requirement includes the agent. The board sends an empty `tags` selection for this default. Existing engine jobs without a `worker` selection continue to run on the engine worker. A placed card runs in a new workspace on the executing PC, as a blank-workspace card does.
 A host workspace path or a resumed session (bound to its original workspace) is refused for a
@@ -760,13 +732,11 @@ placed card, both when it is created and by the worker service, rather than assu
 another PC. A card transcript keeps its event schema: the executing PC is in the record, not the
 transcript. Placed cards on Trigger.dev are not supported; that board backend refuses a selection.
 
-Queue timeouts: work waits for a fleet worker inside its engine task, which counts toward the
-step's `timeout_minutes`. Steps queued behind waiting ones at the engine must not expire first, so
-Hatchet flow tasks and the card task set a 24-hour `schedule_timeout` (the SDK default is five
-minutes). Trigger.dev flow and step tasks set a one-day `ttl` (development runs otherwise leave
-the queue after ten minutes). Neither setting has been verified against a live server here.
-Trigger.dev's configuration disables retries in development (`enabledInDev: false`), so a step's
-`retries` applies only on Hatchet and Prefect.
+Native wait bounds and engine-side queue/cancellation behavior are not verified against live
+Hatchet and Prefect servers. Keep the configured step timeout and engine queue timeout distinct;
+do not imply that a queued native task can wait indefinitely or that cancellation immediately
+stops a remote process. Trigger.dev development TTL and retry settings apply only to its bridge
+mode and do not create native workers.
 
 Revisions: each job carries the exact flow definition and the run's asset snapshot, so a worker
 never reads flows or assets from its own disk, and a worker update cannot change a running job. The
@@ -777,25 +747,20 @@ a new flow run" before anything is placed or published, so revisions never mix. 
 the new revision failed for an engine, that engine keeps serving the old revision and old runs
 finish on it.
 
-Workspaces and artifacts: the coordinator owns the run workspace. Each job receives its files
-over the authenticated service API, within the existing transfer limits, and runs in its own
-job directory on the executing PC, never at the coordinator's path. Results are published only
-while the attempt's fence is current. An engine retry or replay starts a new attempt, after which
-the superseded attempt can neither publish nor update the record. Parallel branches that change
-the same file on different PCs make the joining step fail with a workspace conflict before it is
-placed. A restart reuses the source run's exact results and places only the restarted subtree.
+The coordinator owns the run workspace. Relay-dispatched jobs receive files through the
+authenticated service API, within existing transfer limits, and run in a per-job directory on the
+executing PC. Results are published only while the attempt's fence is current; superseded attempts
+cannot publish. Parallel branches that change the same file on different PCs conflict before the
+joining step. Native Hatchet/Prefect workers must preserve the same authenticated transfer,
+workspace isolation, limits, conflict behavior and fencing; this end-to-end native path is not
+verified here and must not assume a shared filesystem.
 
-Limits: the registry's `slots`, `cpu_limit` and `ram_limit` are pushed to the worker's gate
-(authenticated `POST /capacity/settings`, limits only) when the registry entry is saved and
-whenever the coordinator finds a connected worker whose gate reports different limits, which
-covers connecting and reconnecting. The gate reads them at each admission, so a change affects
-new work only and never interrupts running jobs. Until the push succeeds (the PC is offline, or
-its service predates the route) the gate keeps its previous limits and the fleet tab says so.
-A failed push is retried after 30 seconds (5 minutes when the service predates the route), or at
-once when the registry value changes. Slots are at most 100, the gate's maximum: a save above it
-is refused, and an older registry entry above it is enforced as 100 with a warning in the fleet
-tab until the next save stores 100. `FLOW_WORKER_SLOTS` still caps each service process. A
-worker's `engines` list (default: all three) limits which engines may place work on it.
+The registry's `slots`, `cpu_limit` and `ram_limit` are synchronized to the PC's capacity gate.
+For native engine work, the gate must be the same per-PC admission authority used by relay tasks;
+engine-local concurrency limits alone are insufficient. Contention across native and relay routes,
+including lease cleanup, cancellation and fencing races, remains unverified. Registry updates
+affect new admission only. The configured `engines` list limits which engines may place work on a
+worker.
 
 ## Capability detection
 

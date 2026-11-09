@@ -1,39 +1,40 @@
-/* Admin engine settings share the board's light/dark theme and modal rhythm with Fleet and Flows. */
-dialog.ad-dialog { width: min(1080px, 96vw); height: min(880px, 94vh); max-width: none; max-height: none; padding: 0; overflow: hidden; }
-dialog.ad-dialog[open] { display: flex; flex-direction: column; }
-.ad { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; overscroll-behavior: contain; }
-.ad-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
-.ad-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 300px; }
-.ad-title { font-size: 16px; margin: 0; }
-.ad-hint { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
-.ad-actions { display: flex; gap: 8px; align-items: center; }
-.ad-status { flex: 1 1 100%; margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.ad-status.error { color: var(--danger); }
-.ad-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 20px; background: var(--bg); }
-.ad-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 12px; max-width: 1000px; margin: 0 auto; }
-.ad-engine { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow); }
-.ad-engine-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-.ad-engine-title { flex: 1 1 180px; min-width: 0; margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
-.ad-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; }
-.ad-state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-.ad-state[data-status="reachable"] { color: var(--ok); }
-.ad-state[data-status="unreachable"] { color: var(--danger); }
-.ad-state[data-status="unauthorized"] { color: var(--warn); }
-.ad-state[data-status="disabled"], .ad-state[data-status="unknown"] { color: var(--muted); }
-.ad-enabled { color: var(--muted); font-size: 12px; }
-.ad-fields { display: flex; flex-direction: column; gap: 9px; }
-.ad-field { display: grid; grid-template-columns: minmax(145px, 1fr) minmax(0, 2fr); align-items: center; gap: 8px 12px; color: var(--muted); font-size: 12px; }
-.ad-field input { width: 100%; min-width: 0; color: var(--ink); font-size: 13px; }
-.ad-field input:focus-visible, .ad button:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
-.ad-meta { min-width: 0; border-top: 1px solid var(--line); padding-top: 8px; }
-.ad-checked, .ad-error { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-.ad-checked { color: var(--muted); font-variant-numeric: tabular-nums; }
-.ad-error { color: var(--danger); margin-top: 4px; }
-.ad-row-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+/* Engine settings share the board's light/dark theme and modal rhythm with Fleet and Flows. */
+dialog.engine-settings-dialog { width: min(1080px, 96vw); height: min(880px, 94vh); max-width: none; max-height: none; padding: 0; overflow: hidden; }
+dialog.engine-settings-dialog[open] { display: flex; flex-direction: column; }
+.engine-settings-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; overscroll-behavior: contain; }
+.engine-settings-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+.engine-settings-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 300px; }
+.engine-settings-title { font-size: 16px; margin: 0; }
+.engine-settings-hint { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.engine-settings-actions { display: flex; gap: 8px; align-items: center; }
+.engine-settings-status { flex: 1 1 100%; margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.engine-settings-status.error { color: var(--danger); }
+.engine-settings-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 20px; background: var(--bg); }
+.engine-card-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 12px; max-width: 1000px; margin: 0 auto; }
+.engine-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--panel); box-shadow: var(--shadow); }
+.engine-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.engine-card-title { flex: 1 1 180px; min-width: 0; margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.engine-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; }
+.engine-state::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.engine-state[data-status="reachable"] { color: var(--ok); }
+.engine-state[data-status="unreachable"] { color: var(--danger); }
+.engine-state[data-status="unauthorized"] { color: var(--warn); }
+.engine-state[data-status="disabled"], .engine-state[data-status="unknown"] { color: var(--muted); }
+.engine-enabled { color: var(--muted); font-size: 12px; }
+.engine-fields { display: flex; flex-direction: column; gap: 9px; }
+.engine-field { display: grid; grid-template-columns: minmax(145px, 1fr) minmax(0, 2fr); align-items: center; gap: 8px 12px; color: var(--muted); font-size: 12px; }
+.engine-field input, .engine-field select { width: 100%; min-width: 0; color: var(--ink); font-size: 13px; }
+.engine-field input:focus-visible, .engine-field select:focus-visible, .engine-settings-content button:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+.engine-worker-status { grid-column: 2; margin: -3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.engine-meta { min-width: 0; border-top: 1px solid var(--line); padding-top: 8px; }
+.engine-checked, .engine-error { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.engine-checked { color: var(--muted); font-variant-numeric: tabular-nums; }
+.engine-error { color: var(--danger); margin-top: 4px; }
+.engine-row-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 600px), (pointer: coarse) {
-  dialog.ad-dialog { width: 100vw; height: 100dvh; max-width: 100vw; max-height: 100dvh; }
-  .ad-top { padding: 12px 14px; }
-  .ad-body { padding: 12px; }
-  .ad-field { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  dialog.engine-settings-dialog { width: 100vw; height: 100dvh; max-width: 100vw; max-height: 100dvh; }
+  .engine-settings-top { padding: 12px 14px; }
+  .engine-settings-body { padding: 12px; }
+  .engine-worker-status { grid-column: 1; }
 }
-@media (prefers-reduced-motion: reduce) { .ad * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { .engine-settings-content * { transition: none !important; } }

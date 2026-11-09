@@ -12,6 +12,7 @@ use crate::svc::{self, Kind, Svc};
 use crate::util::{atomic_json, now_unix};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,8 @@ pub struct Options {
     pub no_service: bool,
 }
 
-/// What the form saved, as the server hands it over.
+/// What the form saved, as the server hands it over. The Hatchet credential exists only in memory
+/// until it is written to the separately protected per-PC secret file.
 pub struct Settings {
     pub name: String,
     pub slots: u64,
@@ -30,6 +32,107 @@ pub struct Settings {
     pub autostart: String,
     /// restart the worker if it crashes or is killed
     pub auto_restart: bool,
+    pub native_engines: Vec<String>,
+    pub native_config: Value,
+    pub hatchet_token: Option<String>,
+    pub native_runtime_version: Option<String>,
+}
+
+fn settings_from_claim(given: &Value) -> Result<Settings, String> {
+    let native_engines = given["native_engines"]
+        .as_array()
+        .ok_or_else(|| "The install claim is missing its native-engine selection.".to_string())?
+        .iter()
+        .map(|engine| {
+            engine
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "The install claim contains an invalid native-engine selection.".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = std::collections::HashSet::new();
+    for engine in &native_engines {
+        if !matches!(engine.as_str(), "hatchet" | "prefect") || !seen.insert(engine) {
+            return Err("The install claim contains an unsupported native-engine selection.".into());
+        }
+        if !given["engines"]
+            .as_array()
+            .is_some_and(|engines| engines.iter().any(|selected| selected.as_str() == Some(engine)))
+        {
+            return Err("The install claim's native-engine selection is inconsistent.".into());
+        }
+    }
+    let native_config = given["native_config"]
+        .as_object()
+        .cloned()
+        .map(Value::Object)
+        .ok_or_else(|| "The install claim is missing native-engine configuration.".to_string())?;
+    if native_config.get("hatchet_token").is_some() {
+        return Err("The install claim contains an invalid native-engine configuration.".into());
+    }
+    let hatchet_token = given["hatchet_token"].as_str().map(str::to_owned);
+    if native_engines.iter().any(|engine| engine == "hatchet") {
+        let token = hatchet_token.as_deref().unwrap_or_default();
+        if token.len() < 8 || token.len() > 4096 || token.chars().any(char::is_control) {
+            return Err("The selected Hatchet worker requires a valid dedicated per-PC token.".into());
+        }
+        let config = native_config.as_object().unwrap();
+        if config
+            .get("hatchet_api_url")
+            .and_then(Value::as_str)
+            .map_or(true, str::is_empty)
+            || config
+                .get("hatchet_worker_grpc_host_port")
+                .and_then(Value::as_str)
+                .map_or(true, str::is_empty)
+            || !matches!(
+                config.get("hatchet_worker_tls_strategy").and_then(Value::as_str),
+                Some("none" | "tls" | "mtls")
+            )
+        {
+            return Err("The selected Hatchet worker is missing its server endpoint configuration.".into());
+        }
+    } else if hatchet_token.is_some() {
+        return Err("A Hatchet credential was provided when Hatchet was not selected.".into());
+    }
+    if native_engines.iter().any(|engine| engine == "prefect")
+        && native_config
+            .get("prefect_worker_api_url")
+            .and_then(Value::as_str)
+            .map_or(true, str::is_empty)
+    {
+        return Err("The selected Prefect worker is missing its API endpoint configuration.".into());
+    }
+    let native_runtime_version = given["native_runtime_version"]
+        .as_str()
+        .map(str::to_owned);
+    if !native_engines.is_empty()
+        && native_runtime_version
+            .as_deref()
+            .map_or(true, |version| version.is_empty() || version.len() > 64)
+    {
+        return Err("The native-engine runtime is not available for this install.".into());
+    }
+    if native_engines.is_empty() && native_runtime_version.is_some() {
+        return Err("The install claim has an unexpected native-engine runtime.".into());
+    }
+    Ok(Settings {
+        name: given["name"]
+            .as_str()
+            .ok_or_else(|| "The install claim is missing the PC name.".to_string())?
+            .to_string(),
+        slots: given["slots"].as_u64().unwrap_or(2).clamp(1, 256),
+        autostart: given["autostart"]
+            .as_str()
+            .filter(|value| ["logon", "boot", "none"].contains(value))
+            .unwrap_or("logon")
+            .to_string(),
+        auto_restart: given["auto_restart"].as_bool().unwrap_or(true),
+        native_engines,
+        native_config,
+        hatchet_token,
+        native_runtime_version,
+    })
 }
 
 fn origin(options: &Options) -> String {
@@ -424,7 +527,11 @@ impl Replacement {
             "worker.json",
             "token",
             "installed.json",
+            "components.json",
+            "native-secrets/hatchet.token",
             "runtime/connector.json",
+            "runtime/native-engines/hatchet.json",
+            "runtime/native-engines/prefect.json",
         ]
         .into_iter()
         .map(|name| FileSnapshot::read(home.file(name)))
@@ -541,11 +648,14 @@ impl Replacement {
         }
         for file in &self.files {
             file.restore()?;
-            if file.path.file_name().and_then(|name| name.to_str()) == Some("token")
-                && file.contents.is_some()
+            if file.contents.is_some()
+                && matches!(
+                    file.path.file_name().and_then(|name| name.to_str()),
+                    Some("token" | "hatchet.token")
+                )
             {
                 restrict_token(&file.path).map_err(|e| {
-                    format!("Could not restore the previous token permissions: {e}")
+                    format!("Could not restore protected worker secret permissions: {e}")
                 })?;
             }
         }
@@ -618,6 +728,257 @@ fn merge_local_config(previous: Option<&Value>, worker: &mut Value) {
     }
 }
 
+struct InstallTemp(PathBuf);
+
+impl Drop for InstallTemp {
+    fn drop(&mut self) {
+        if self.0.is_dir() {
+            let _ = std::fs::remove_dir_all(&self.0);
+        } else {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+fn system_tar() -> PathBuf {
+    if cfg!(windows) {
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            return PathBuf::from(root).join("System32").join("tar.exe");
+        }
+    }
+    PathBuf::from("tar")
+}
+
+fn native_runtime_python(path: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        path.join("python").join("python.exe")
+    } else {
+        path.join("python").join("bin").join("python3")
+    }
+}
+
+fn is_native_runtime(path: &std::path::Path) -> bool {
+    native_runtime_python(path).is_file()
+        && path.join("packages").is_dir()
+        && path.join("agents").join("native_engine_worker.py").is_file()
+}
+
+async fn unpack_native_runtime(archive: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
+    let parent = destination.parent().ok_or("The native runtime needs a parent folder")?;
+    let partial = InstallTemp(parent.join(format!(".unpacking-{}", crate::util::random_hex(6))));
+    std::fs::create_dir_all(&partial.0).map_err(|e| e.to_string())?;
+    let mut command = tokio::process::Command::new(system_tar());
+    command.arg("-xzf").arg(archive).arg("-C").arg(&partial.0)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    crate::procutil::prepare_child(&mut command);
+    let child = command.spawn().map_err(|e| format!("Could not run tar to unpack the native engine runtime: {e}"))?;
+    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("Could not unpack the native engine runtime: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    if !is_native_runtime(&partial.0) {
+        return Err("The native engine runtime archive is incomplete".into());
+    }
+    std::fs::rename(&partial.0, destination).map_err(|e| e.to_string())
+}
+
+async fn install_native_runtime(home: &Home, options: &Options, expected_version: &str) -> Result<PathBuf, String> {
+    if expected_version.len() != 16 || !expected_version.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("The server did not identify a valid native engine runtime".into());
+    }
+    let root = home.file("runtime/native-engines");
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let destination = root.join(expected_version);
+    if is_native_runtime(&destination) {
+        return Ok(destination);
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{}/install/{}/native-runtime", origin(options), options.uuid))
+        .timeout(Duration::from_secs(300))
+        .send().await
+        .map_err(|e| explain_network(&options.server, &e))?;
+    if !response.status().is_success() {
+        return Err(format!("The server has no native engine runtime for this PC (HTTP {})", response.status()));
+    }
+    let served_version = response.headers().get("x-native-runtime-version").and_then(|v| v.to_str().ok())
+        .ok_or("The server did not identify the native engine runtime")?;
+    if served_version != expected_version {
+        return Err("The native engine runtime changed after this install link was created; create a new link and retry".into());
+    }
+    let archive = InstallTemp(root.join(format!(".download-{}.tar.gz", crate::util::random_hex(6))));
+    let mut output = tokio::fs::File::create(&archive.0).await.map_err(|e| e.to_string())?;
+    let mut hash = sha2::Sha256::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await.map_err(|_| "The native engine runtime download was interrupted".to_string())? {
+        use tokio::io::AsyncWriteExt;
+        hash.update(&chunk);
+        output.write_all(&chunk).await.map_err(|e| e.to_string())?;
+    }
+    use tokio::io::AsyncWriteExt;
+    output.flush().await.map_err(|e| e.to_string())?;
+    drop(output);
+    let actual = hex::encode(&hash.finalize()[..8]);
+    if actual != expected_version {
+        return Err(format!("The native engine runtime failed its integrity check (expected {expected_version}, got {actual})"));
+    }
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination).map_err(|e| e.to_string())?;
+    }
+    unpack_native_runtime(&archive.0, &destination).await?;
+    Ok(destination)
+}
+
+fn write_hatchet_secret(home: &Home, token: Option<&str>) -> Result<(), String> {
+    let path = home.file("native-secrets/hatchet.token");
+    let Some(token) = token else {
+        match std::fs::remove_file(&path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(format!("Could not remove the previous Hatchet worker token: {error}")),
+        }
+        return Ok(());
+    };
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    crate::util::atomic_write(&path, token.as_bytes()).map_err(|e| e.to_string())?;
+    restrict_token(&path)
+}
+
+fn write_native_components(
+    home: &Home,
+    options: &Options,
+    settings: &Settings,
+    runtime: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let path = home.file("components.json");
+    let mut components = if path.exists() {
+        let value = crate::util::read_json(&path).ok_or("components.json is unreadable; refusing to replace local components")?;
+        value.get("components").and_then(Value::as_array).cloned().ok_or("components.json must contain a components list")?
+    } else {
+        Vec::new()
+    };
+    components.retain(|entry| !matches!(entry.get("name").and_then(Value::as_str), Some("hatchet" | "prefect")));
+    if !settings.native_engines.is_empty() {
+        let runtime = runtime.ok_or("The selected native engine runtime was not installed")?;
+        let python = native_runtime_python(runtime).to_string_lossy().to_string();
+        let source = runtime.join("agents");
+        for engine in &settings.native_engines {
+            if engine != "hatchet" && engine != "prefect" {
+                return Err(format!("Unsupported native engine {engine}"));
+            }
+            let mut env = serde_json::Map::new();
+            env.insert("AGENT_WORKER_NATIVE_RUNTIME".into(), json!(runtime.to_string_lossy().to_string()));
+            env.insert("AGENT_WORKER_NATIVE_ENGINE".into(), json!(engine));
+            env.insert("AGENT_WORKER_HOME".into(), json!(home.0.to_string_lossy().to_string()));
+            env.insert("AGENT_WORKER_UUID".into(), json!(options.uuid));
+            env.insert("AGENT_WORKER_PORT".into(), json!(options.port.to_string()));
+            env.insert("AGENT_WORKER_SLOTS".into(), json!(settings.slots.to_string()));
+            if engine == "hatchet" {
+                let config = &settings.native_config;
+                let token = settings.hatchet_token.as_deref().ok_or("The dedicated Hatchet worker token is missing")?;
+                env.insert("HATCHET_TOKEN_FILE".into(), json!(home.file("native-secrets/hatchet.token").to_string_lossy().to_string()));
+                env.insert("HATCHET_CLIENT_HOST_PORT".into(), config["hatchet_worker_grpc_host_port"].clone());
+                env.insert("HATCHET_CLIENT_TLS_STRATEGY".into(), config["hatchet_worker_tls_strategy"].clone());
+                env.insert("HATCHET_CLIENT_SERVER_URL".into(), config["hatchet_api_url"].clone());
+                if token.is_empty() { return Err("The dedicated Hatchet worker token is empty".into()); }
+            } else {
+                env.insert("PREFECT_API_URL".into(), settings.native_config["prefect_worker_api_url"].clone());
+            }
+            components.push(json!({
+                "name": engine,
+                "command": [python.clone(), "-c", "import native_engine_worker; native_engine_worker.main()"],
+                "cwd": source.to_string_lossy().to_string(),
+                "env": env
+            }));
+        }
+    }
+    if !components.is_empty() || path.exists() {
+        crate::util::atomic_json(&path, &json!({"components": components})).map_err(|e| e.to_string())?;
+    }
+    let active = &settings.native_engines;
+    let status_dir = home.file("runtime/native-engines");
+    for engine in ["hatchet", "prefect"] {
+        if !active.iter().any(|value| value == engine) {
+            let _ = std::fs::remove_file(status_dir.join(format!("{engine}.json")));
+        }
+    }
+    write_hatchet_secret(home, settings.hatchet_token.as_deref())
+}
+
+async fn wait_native_engines(home: &Home, worker: &Value, engines: &[String]) -> Result<(), String> {
+    if engines.is_empty() { return Ok(()); }
+    let deadline = Instant::now() + Duration::from_secs(210);
+    loop {
+        if let Some(health) = local_health(home, worker).await {
+            let ready = engines.iter().all(|engine| health["native_engines"][engine]["state"] == "ready");
+            if ready { return Ok(()); }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("The selected native engine worker did not connect and become ready; see {} and {}",
+                               home.file("component-hatchet.log").display(), home.file("component-prefect.log").display()));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn finish_registration(options: &Options, secret: &str) -> Result<(), String> {
+    let body = json!({"claim": secret});
+    let response = reqwest::Client::new()
+        .post(format!("{}/install/{}/ready", origin(options), options.uuid))
+        .json(&body).timeout(Duration::from_secs(15)).send().await
+        .map_err(|e| explain_network(&options.server, &e))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+    if status.is_success() && parsed.as_ref().map(|value| value["ok"] == true).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(parsed.and_then(|value| value["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("The server did not confirm worker readiness (HTTP {status})")))
+    }
+}
+
+async fn abort_install(options: &Options, secret: &str) -> Result<(), String> {
+    let response = reqwest::Client::new()
+        .post(format!("{}/install/{}/abort", origin(options), options.uuid))
+        .json(&json!({"claim": secret})).timeout(Duration::from_secs(15)).send().await
+        .map_err(|e| explain_network(&options.server, &e))?;
+    let status = response.status();
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(format!("The server could not confirm rollback (HTTP {status})"))
+}
+
+fn cleanup_failed_install(home: &Home) -> Result<(), String> {
+    if let Ok(worker) = home.config() {
+        let service = Svc::from_config(Home(home.0.clone()), &worker);
+        service.stop().map_err(|e| format!("Could not stop the failed worker: {e}"))?;
+        service.remove();
+    }
+    let components_path = home.file("components.json");
+    if components_path.exists() {
+        let value = crate::util::read_json(&components_path).ok_or("Could not safely restore local components after the failed install")?;
+        let mut components = value.get("components").and_then(Value::as_array).cloned()
+            .ok_or("Could not safely restore local components after the failed install")?;
+        components.retain(|entry| !matches!(entry.get("name").and_then(Value::as_str), Some("hatchet" | "prefect")));
+        if components.is_empty() {
+            std::fs::remove_file(&components_path).map_err(|e| e.to_string())?;
+        } else {
+            crate::util::atomic_json(&components_path, &json!({"components": components})).map_err(|e| e.to_string())?;
+        }
+    }
+    for name in ["worker.json", "token", "installed.json", "native-secrets/hatchet.token",
+                 "runtime/connector.json", "runtime/native-engines/hatchet.json", "runtime/native-engines/prefect.json"] {
+        match std::fs::remove_file(home.file(name)) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(format!("Could not remove failed worker configuration {}: {error}", home.file(name).display())),
+        }
+    }
+    Ok(())
+}
+
 async fn install_claimed(
     home: &Home,
     options: &Options,
@@ -632,6 +993,9 @@ async fn install_claimed(
         println!("==> {text}");
     };
     println!("    this PC will be {} ({})", settings.name, options.uuid);
+    if options.no_service && !settings.native_engines.is_empty() {
+        return Err("Native engine enrollment requires the supervised worker service; --no-service is not supported.".into());
+    }
     report(options, "check", "running", "").await;
     at(
         "npm",
@@ -645,6 +1009,15 @@ async fn install_claimed(
     if previous.is_none() {
         crate::acp::install_adapters(&home.file("adapters"), None)?;
     }
+    let runtime = if settings.native_engines.is_empty() {
+        None
+    } else {
+        at("engine", "Installing the selected native engine runtime from the offline bundle");
+        report(options, "engine", "running", "").await;
+        let version = settings.native_runtime_version.as_deref().ok_or("The install claim did not include a native runtime version")?;
+        Some(install_native_runtime(home, options, version).await?)
+    };
+    write_native_components(home, options, &settings, runtime.as_deref())?;
     let download = install_self(home)?;
     if let Some(replacement) = replacement.as_deref_mut() {
         replacement.binary_replaced = download.is_some();
@@ -721,8 +1094,13 @@ async fn install_claimed(
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    if !settings.native_engines.is_empty() {
+        at("engine", "Waiting for the selected native workers to connect");
+        report(options, "engine", "running", "").await;
+        wait_native_engines(home, &worker, &settings.native_engines).await?;
+    }
 
-    atomic_json(&home.file("installed.json"), &json!({"name": settings.name, "uuid": uuid, "at": now_unix(), "service": kind.name(), "version": config::self_version()})).map_err(|e| e.to_string())?;
+    // Persist installed.json only after the server confirms relay and native-engine readiness.
     at("register", "Registering this PC with the server");
     report(options, "register", "running", "").await;
     let host = crate::sysmetrics::host_name().unwrap_or_else(|| "unknown".into());
@@ -736,35 +1114,15 @@ async fn install_claimed(
         .timeout(Duration::from_secs(30))
         .send()
         .await;
-    match registration {
-        Ok(reply) => {
-            let status = reply.status();
-            let body = reply.text().await.unwrap_or_default();
-            let parsed: Option<Value> = serde_json::from_str(&body).ok();
-            if !(status.is_success()
-                && parsed
-                    .as_ref()
-                    .map(|value| value["ok"] == true)
-                    .unwrap_or(false))
-            {
-                if status.is_client_error() {
-                    return Err(format!("The server refused the registration: {body}"));
-                }
-                if let Some(replacement) = replacement.as_deref_mut() {
-                    replacement.commit();
-                }
-                return Err(format!("The server answered HTTP {status}, but registration could not be confirmed. The new local identity was kept because the server may have accepted it: {body}"));
-            }
-        }
-        Err(error) => {
-            if let Some(replacement) = replacement.as_deref_mut() {
-                replacement.commit();
-            }
-            return Err(format!("Could not confirm registration with the server ({error}); the new local identity was kept because the server may have accepted it."));
-        }
-    }
-    if let Some(replacement) = replacement.as_deref_mut() {
-        replacement.commit();
+    let response = registration.map_err(|error| explain_network(&options.server, &error))?;
+    let status = response.status();
+    let accepted = response
+        .json::<Value>()
+        .await
+        .map(|value| status.is_success() && value["ok"] == true)
+        .unwrap_or(false);
+    if !accepted {
+        return Err(format!("The server refused registration (HTTP {status})."));
     }
 
     at("connect", "Waiting for the connection");
@@ -797,6 +1155,28 @@ async fn install_claimed(
             ));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    at("ready", "Confirming local engine and relay readiness with the server");
+    report(options, "ready", "running", "").await;
+    let ready_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match finish_registration(options, secret).await {
+            Ok(()) => break,
+            Err(error) => {
+                if Instant::now() >= ready_deadline {
+                    return Err(format!("The selected engine workers did not become ready on the server: {error}"));
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+    atomic_json(
+        &home.file("installed.json"),
+        &json!({"name": settings.name, "uuid": uuid, "at": now_unix(), "service": kind.name(), "version": config::self_version()}),
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(replacement) = replacement.as_deref_mut() {
+        replacement.commit();
     }
     let mut starts =
         match settings.autostart.as_str() {
@@ -849,6 +1229,15 @@ fn rollback_error(replacement: &mut Replacement, original: String) -> String {
     }
 }
 
+async fn append_server_rollback(options: &Options, secret: &str, error: String) -> String {
+    match abort_install(options, secret).await {
+        Ok(()) => error,
+        Err(rollback) => format!(
+            "{error}. The server could not confirm enrollment rollback ({rollback}); the local candidate was kept so a server-side worker is not left absent."
+        ),
+    }
+}
+
 pub async fn install(home: Home, options: Options) -> Result<(), String> {
     let step = std::sync::Mutex::new("check".to_string());
     let result = run(&home, &options, &step).await;
@@ -891,35 +1280,31 @@ async fn run(
     println!("==> Contacting the server {}", options.server);
     let secret = claim_secret(home)?;
     let given = claim(options, &secret).await?;
-    let settings = Settings {
-        name: given["name"]
-            .as_str()
-            .ok_or("The server did not name this PC")?
-            .to_string(),
-        slots: given["slots"].as_u64().unwrap_or(1),
-        autostart: given["autostart"]
-            .as_str()
-            .filter(|a| ["logon", "boot", "none"].contains(a))
-            .unwrap_or("logon")
-            .to_string(),
-        auto_restart: given["auto_restart"] != false,
+    let settings = match settings_from_claim(&given) {
+        Ok(settings) => settings,
+        Err(error) => return Err(append_server_rollback(options, &secret, error).await),
     };
     if let Err(error) = save_claim_secret(home, &secret) {
-        return Err(error);
+        return Err(append_server_rollback(options, &secret, error).await);
     }
     let mut replacement = match previous.as_ref() {
-        Some(config) => Some(Replacement::snapshot(home, config.clone())?),
+        Some(config) => match Replacement::snapshot(home, config.clone()) {
+            Ok(replacement) => Some(replacement),
+            Err(error) => return Err(append_server_rollback(options, &secret, error).await),
+        },
         None => None,
     };
     if let Some(previous_config) = previous.as_ref() {
         if !crate::ctl::drain(home, previous_config, true, crate::ctl::DRAIN_TIMEOUT).await {
             crate::ctl::drain(home, previous_config, false, 0).await;
-            return Err(format!("The existing worker still has running jobs after {} seconds; nothing was changed. Try again later.", crate::ctl::DRAIN_TIMEOUT));
+            let error = format!("The existing worker still has running jobs after {} seconds; nothing was changed. Try again later.", crate::ctl::DRAIN_TIMEOUT);
+            return Err(append_server_rollback(options, &secret, error).await);
         }
     }
     if let Some(replacement) = replacement.as_mut() {
         if let Err(error) = replacement.stop_previous() {
-            return Err(rollback_error(replacement, error));
+            let error = rollback_error(replacement, error);
+            return Err(append_server_rollback(options, &secret, error).await);
         }
     }
     let result = install_claimed(
@@ -932,8 +1317,174 @@ async fn run(
         replacement.as_mut(),
     )
     .await;
-    match (result, replacement.as_mut()) {
-        (Err(error), Some(replacement)) => Err(rollback_error(replacement, error)),
-        (result, _) => result,
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match abort_install(options, &secret).await {
+            Ok(()) => match replacement.as_mut() {
+                Some(replacement) => Err(rollback_error(replacement, error)),
+                None => match cleanup_failed_install(home) {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(format!("{error}. Local cleanup also failed: {cleanup}")),
+                },
+            },
+            Err(rollback) => {
+                if let Some(replacement) = replacement.as_mut() {
+                    replacement.commit();
+                }
+                Err(format!(
+                    "{error}. The server could not confirm enrollment rollback ({rollback}); the local candidate was kept so a server-side worker is not left absent."
+                ))
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn options() -> Options {
+        Options {
+            uuid: "5a6f3f14-4157-4c62-b066-bc16a781cace".into(),
+            server: "http://192.168.1.10:8090".into(),
+            port: 8096,
+            no_service: false,
+        }
+    }
+
+    fn settings(engines: &[&str], hatchet_token: Option<&str>) -> Settings {
+        let mut native_config = serde_json::Map::new();
+        if engines.contains(&"hatchet") {
+            native_config.insert("hatchet_api_url".into(), json!("https://hatchet.example/api"));
+            native_config.insert("hatchet_worker_grpc_host_port".into(), json!("hatchet.example:7070"));
+            native_config.insert("hatchet_worker_tls_strategy".into(), json!("tls"));
+        }
+        if engines.contains(&"prefect") {
+            native_config.insert("prefect_worker_api_url".into(), json!("https://prefect.example/api"));
+        }
+        Settings {
+            name: "pc".into(),
+            slots: 2,
+            autostart: "logon".into(),
+            auto_restart: true,
+            native_engines: engines.iter().map(|engine| (*engine).to_string()).collect(),
+            native_config: Value::Object(native_config),
+            hatchet_token: hatchet_token.map(str::to_owned),
+            native_runtime_version: (!engines.is_empty()).then(|| "0123456789abcdef".into()),
+        }
+    }
+
+    #[test]
+    fn claim_settings_keep_only_the_selected_native_engines() {
+        let prefect = settings_from_claim(&json!({
+            "name": "pc", "slots": 2, "engines": ["prefect", "trigger"],
+            "native_engines": ["prefect"], "native_config": {
+                "prefect_worker_api_url": "https://prefect.example/api"
+            }, "native_runtime_version": "0123456789abcdef"
+        })).unwrap();
+        assert_eq!(prefect.native_engines, ["prefect"]);
+        assert!(prefect.hatchet_token.is_none());
+        assert!(!prefect.native_config.to_string().contains("token"));
+
+        let trigger = settings_from_claim(&json!({
+            "name": "pc", "engines": ["trigger"], "native_engines": [],
+            "native_config": {}
+        })).unwrap();
+        assert!(trigger.native_engines.is_empty());
+        assert!(trigger.native_runtime_version.is_none());
+        assert!(trigger.hatchet_token.is_none());
+    }
+
+    #[test]
+    fn native_claims_require_runtime_and_a_dedicated_hatchet_token() {
+        let missing_runtime = json!({
+            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"],
+            "native_config": {
+                "hatchet_api_url": "https://hatchet.example/api",
+                "hatchet_worker_grpc_host_port": "hatchet.example:7070",
+                "hatchet_worker_tls_strategy": "tls"
+            }, "hatchet_token": "dedicated-per-pc-token"
+        });
+        assert!(settings_from_claim(&missing_runtime).is_err());
+        let missing_token = json!({
+            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"],
+            "native_config": {
+                "hatchet_api_url": "https://hatchet.example/api",
+                "hatchet_worker_grpc_host_port": "hatchet.example:7070",
+                "hatchet_worker_tls_strategy": "tls"
+            }, "native_runtime_version": "0123456789abcdef"
+        });
+        assert!(settings_from_claim(&missing_token).is_err());
+    }
+
+    #[test]
+    fn component_generation_starts_only_selected_engines_and_never_writes_the_hatchet_secret() {
+        let temp = tempdir().unwrap();
+        let home = Home(temp.path().to_path_buf());
+        std::fs::create_dir_all(&home.0).unwrap();
+        std::fs::write(
+            home.file("components.json"),
+            json!({"components": [{"name": "other", "command": ["python", "other.py"]},
+                                 {"name": "hatchet", "command": ["old-hatchet"]}]}).to_string(),
+        ).unwrap();
+        std::fs::create_dir_all(home.file("native-secrets")).unwrap();
+        std::fs::write(home.file("native-secrets/hatchet.token"), "old-secret").unwrap();
+        let runtime = temp.path().join("native-runtime");
+        let prefect = settings(&["prefect"], None);
+        write_native_components(&home, &options(), &prefect, Some(&runtime)).unwrap();
+        let data = crate::util::read_json(&home.file("components.json")).unwrap();
+        let components = data["components"].as_array().unwrap();
+        let names = components.iter().filter_map(|component| component["name"].as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["other", "prefect"]);
+        assert!(!home.file("native-secrets/hatchet.token").exists());
+
+        let hatchet = settings(&["hatchet"], Some("dedicated-per-pc-token"));
+        write_native_components(&home, &options(), &hatchet, Some(&runtime)).unwrap();
+        let serialized = std::fs::read_to_string(home.file("components.json")).unwrap();
+        assert!(!serialized.contains("dedicated-per-pc-token"));
+        assert!(serialized.contains("native-secrets"));
+        assert_eq!(
+            std::fs::read_to_string(home.file("native-secrets/hatchet.token")).unwrap(),
+            "dedicated-per-pc-token",
+        );
+        let data = crate::util::read_json(&home.file("components.json")).unwrap();
+        let names = data["components"].as_array().unwrap().iter()
+            .filter_map(|component| component["name"].as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["other", "hatchet"]);
+    }
+
+    #[test]
+    fn replacement_rollback_restores_engine_configuration_and_secret() {
+        let temp = tempdir().unwrap();
+        let home = Home(temp.path().to_path_buf());
+        std::fs::create_dir_all(home.file("native-secrets")).unwrap();
+        std::fs::create_dir_all(home.file("runtime/native-engines")).unwrap();
+        for (name, content) in [
+            ("worker.json", r#"{"name":"old","uuid":"old"}"#),
+            ("token", "old-relay-secret"),
+            ("installed.json", r#"{"name":"old"}"#),
+            ("components.json", r#"{"components":[{"name":"hatchet"}]}"#),
+            ("native-secrets/hatchet.token", "old-hatchet-secret"),
+            ("runtime/native-engines/hatchet.json", r#"{"state":"ready"}"#),
+        ] {
+            std::fs::write(home.file(name), content).unwrap();
+        }
+        let previous = json!({
+            "name": "old", "uuid": "5a6f3f14-4157-4c62-b066-bc16a781cace",
+            "service": "process", "unit": "agent-worker", "port": 8096
+        });
+        let mut replacement = Replacement::snapshot(&home, previous).unwrap();
+        std::fs::write(home.file("components.json"), r#"{"components":[{"name":"prefect"}]}"#).unwrap();
+        std::fs::write(home.file("native-secrets/hatchet.token"), "new-hatchet-secret").unwrap();
+        std::fs::write(home.file("runtime/native-engines/hatchet.json"), r#"{"state":"failed"}"#).unwrap();
+        replacement.rollback().unwrap();
+        assert!(std::fs::read_to_string(home.file("components.json")).unwrap().contains("hatchet"));
+        assert_eq!(
+            std::fs::read_to_string(home.file("native-secrets/hatchet.token")).unwrap(),
+            "old-hatchet-secret",
+        );
+        assert!(std::fs::read_to_string(home.file("runtime/native-engines/hatchet.json")).unwrap().contains("ready"));
+        assert!(!std::fs::read_to_string(home.file("components.json")).unwrap().contains("prefect"));
     }
 }

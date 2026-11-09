@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 STALE_SECONDS = 86400  # a capability result older than the daily refresh is unknown again
 # Most actionable first; the first applicable one is the step's headline waiting reason.
-WAITING_ORDER = ('offline', 'credentials_unavailable', 'gate_unavailable', 'full_slots', 'high_cpu', 'high_ram', 'missing_metrics',
+WAITING_ORDER = ('offline', 'credentials_unavailable', 'native_engine_unavailable', 'gate_unavailable', 'full_slots', 'high_cpu', 'high_ram', 'missing_metrics',
                  'software_unknown', 'software_stale')
 RESOLUTIONS = {
     'no_workers': 'Register a worker in the fleet tab.',
@@ -19,6 +19,7 @@ RESOLUTIONS = {
     'pool': 'Add a worker to the selected pool in the fleet tab, or select another pool.',
     'software_absent': 'Install the required software on a matching worker, then refresh its capabilities.',
     'ambiguous_command': 'Add requires_command with the executable this program step runs.',
+    'native_engine_unavailable': 'The selected PC’s native engine worker must be connected and ready before it can receive work.',
 }
 ENGINE_LABELS = {'hatchet': 'Hatchet', 'prefect': 'Prefect', 'trigger': 'Trigger.dev'}
 
@@ -114,6 +115,10 @@ def match_worker(worker, requirements, now=None):
     engine, engines = requirements.get('engine'), worker.get('engines')
     if engine and isinstance(engines, list) and engine not in engines:
         incompatible.append(_reason('engine', f'{wid} is not registered for {ENGINE_LABELS.get(engine, engine)}', engine=engine))
+    if engine and engine in (worker.get('native_engines') or []):
+        native = worker.get('_native_worker_status') if isinstance(worker.get('_native_worker_status'), dict) else {}
+        if not isinstance(native.get(engine), dict) or native[engine].get('state') != 'ready':
+            unknown.append(_reason('native_engine_unavailable', f'{wid} has not connected its native {ENGINE_LABELS.get(engine, engine)} worker', engine=engine))
     for kind in ('agent', 'command'):
         name = requirements.get(kind)
         if not name: continue

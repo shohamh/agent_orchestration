@@ -34,7 +34,7 @@ const FLOW_RUN = [{ id: 'run1', title: 'Flow run', task: 'demo', flow: 'demo', c
 const DAG = { model: 'declared', edges: [{ from: 'n-a', to: 'n-b', kind: 'depends' }], nodes: [
   { id: 'n-a', step: 'a', label: 'a', ref: 'r-a', kind: 'program', column: 'done', status: 'COMPLETED', started_at: ago(800), finished_at: ago(760), restart_supported: true, execution: { state: 'done', worker: { id: 'pc-on', hostname: 'pc-on.lan', pool: 'build', tags: [] } } },
   { id: 'n-c', step: 'c', label: 'c', kind: 'agent', agent: 'pi', column: 'pending', status: 'PENDING' },
-  { id: 'n-b', step: 'b', label: 'b', ref: 'r-b', kind: 'agent', agent: 'codex', column: 'stopped', status: 'FAILED', error: 'Exit code 2', started_at: ago(760), finished_at: ago(700), restart_supported: false, restart_reason: 'No replay here', backend_url: 'http://localhost:1/x' }] };
+  { id: 'n-b', step: 'b', label: 'b', ref: 'r-b', kind: 'agent', agent: 'codex', column: 'stopped', status: 'FAILED', error: 'Scheduling timed out', started_at: ago(760), finished_at: ago(700), restart_supported: false, restart_reason: 'No replay here', backend_url: 'http://localhost:1/x' }] };
 const SAVED = { a: { x: 400, y: 30 }, b: { x: 40, y: 200 }, c: { x: 400, y: 200 } };
 const KINDS = [{ id: 'k-flow', title: 'A flow', flow: 'mirror-refresh', task: 'mirror-refresh', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800) },
   { id: 'k-prog', title: 'A program', task: 'echo', column: 'done', status: 'COMPLETED', created_at: ago(900), started_at: ago(800), finished_at: ago(700) },
@@ -395,10 +395,10 @@ test('a run shows its flow in the same viewer as the editor, at the saved layout
   assert.equal(await evaluate(`document.querySelector('[data-step="n-a"]').getAttribute('transform')`), 'translate(400,30)');
   // A step's right-click menu is about the run; nothing in it edits the flow.
   await rightClick('[data-step="n-b"] .box');
-  assert.deepEqual(await menuLabels(), ['Show output and logs', 'Restart step', 'Open in Hatchet', 'Copy step name', 'Copy run ID', 'Edit this flow']);
+  assert.deepEqual(await menuLabels(), ['Show output', 'Restart step', 'Open in Hatchet', 'Copy step name', 'Copy run ID', 'Edit this flow']);
   assert.equal(await evaluate(`[...document.querySelectorAll('.ctx-item')].find((n) => n.textContent === 'Restart step').disabled`), true, 'this engine can\'t replay it');
-  await choose('Show output and logs');
-  await waitFor(`/Exit code 2/.test(document.getElementById('d-node').textContent)`, 'the step panel');
+  await choose('Show output');
+  await waitFor(`document.querySelector('#d-node .node-output h4')?.textContent === 'Output' && document.querySelector('#d-node .node-output').textContent.includes('Scheduling timed out')`, 'the selected step shows the failure under Output');
   assert.equal(await evaluate(`document.querySelector('[data-step="n-b"]').classList.contains('selected')`), true);
   // Hover details come from the run: what happened, not how it's configured.
   assert.equal(await evaluate(`(() => { const r = document.querySelector('[data-step="n-b"] .box').getBoundingClientRect(); const top = document.elementFromPoint(r.x + 30, r.y + 20); return !!top.closest('[data-step="n-b"]'); })()`), true, 'the step panel never covers the graph');
@@ -406,9 +406,10 @@ test('a run shows its flow in the same viewer as the editor, at the saved layout
   const a = await evaluate(`(() => { const r = document.querySelector('[data-step="n-b"] .box').getBoundingClientRect(); return { x: r.x + 30, y: r.y + 20 }; })()`);
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a.x, y: a.y });
   await waitFor(`document.querySelector('.hover-card.on')`, 'the hover card');
-  assert.match(await evaluate(`document.querySelector('.hover-card').textContent`), /Exit code 2.*codex/s);
+  assert.match(await evaluate(`document.querySelector('.hover-card').textContent`), /Scheduling timed out.*codex/s);
   await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
   // "Edit this flow" goes to the editor, which has the same graph with the edits.
+  await evaluate(`document.querySelector('#d-dag').scrollIntoView({ block: 'center' })`);
   await rightClick('#d-dag .fg-svg');
   assert.ok((await menuLabels()).includes('Edit this flow'));
   await key('Escape');

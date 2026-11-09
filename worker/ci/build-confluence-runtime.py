@@ -6,7 +6,7 @@ confluence-markdown-exporter and the flowkit code around it, as one archive for 
     python3 worker/ci/build-confluence-runtime.py --os linux
 
 It builds for either OS from either OS (needs pip and network). Everything downloaded is pinned: CPython by its
-checksum below, the packages by confluence-runtime.txt. Linux uses the glibc build, because the musl one can't load the
+checksum in runtime_common.py, the packages by confluence-runtime.txt. Linux uses the glibc build, because the musl one can't load the
 exporter's compiled packages. The pinned lxml wheel sets the minimum supported glibc version to 2.26.
 """
 import argparse
@@ -16,18 +16,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path
+from runtime_common import CPYTHON, PYTHON_VERSION, WHEEL_PLATFORMS, download
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-RELEASE = 'https://github.com/astral-sh/python-build-standalone/releases/download/20261026/'
-PYTHON_VERSION = '3.12'
-CPYTHON = {
-    'windows': ('cpython-3.12.16%2B20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz', '1f2ab53880fc67ea323398c6388e05af28addc99a8e389209f08a51fdff4b149'),
-    'linux': ('cpython-3.12.16%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz', 'ce4f6d0a6cfdb3bed6e44c2f9affd85943c76a42e25ad3a259002f31d6fb8a20'),
-}
-WHEEL_PLATFORMS = {'windows': ['win_amd64'], 'linux': ['manylinux_2_26_x86_64', 'manylinux_2_17_x86_64', 'manylinux2014_x86_64']}
 # What the exporter never needs: most of the size that isn't the interpreter.
 DROP = ['test', 'tests', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'lib2to3', 'pydoc_data', 'venv', 'pip', 'setuptools', 'tcl', 'tcl8.6', 'tk8.6', 'include', 'Scripts', '__pycache__', 'share', 'man']
 DROP_FILES = ['_tkinter.pyd', 'tcl86t.dll', 'tk86t.dll', 'turtle.py']
@@ -35,14 +28,6 @@ FLOWKIT = ['__init__', 'artifacts', 'confluence_export', 'confluence_runner', 'd
 AGENTDRIVER = ['__init__', 'events', 'process_tree']
 
 
-def download(name, sha256, into):
-    path = into / 'cpython.tar.gz'
-    print(f'Downloading {name}', flush=True)
-    with urllib.request.urlopen(RELEASE + name, timeout=300) as response, path.open('wb') as out:
-        shutil.copyfileobj(response, out)
-    actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    if actual != sha256: raise SystemExit(f'{name} does not match its checksum: {actual}')
-    return path
 
 
 def prune(root):

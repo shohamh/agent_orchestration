@@ -225,6 +225,29 @@ class StepAPI(unittest.IsolatedAsyncioTestCase):
             watcher.unsubscribe(sub)
 
 
+class HatchetDagFailure(unittest.IsolatedAsyncioTestCase):
+    async def test_run_failure_is_attached_to_failed_step_when_step_error_is_missing(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from hatchet_sdk.clients.rest.models.v1_task_status import V1TaskStatus
+        import hatchet_adapter
+        with patch.object(hatchet_adapter, 'Hatchet'):
+            adapter = hatchet_adapter.HatchetAdapter()
+        task = SimpleNamespace(step_id='brief', display_name='brief', task_external_id='brief-run',
+                               status=V1TaskStatus.FAILED, started_at=None,
+                               finished_at=datetime.now(timezone.utc), output=None, error_message=None)
+        shape = [hatchet_adapter._ShapeItem('brief', 'brief', [])]
+        adapter.hatchet.runs.get.return_value = SimpleNamespace(
+            tasks=[task], shape=shape,
+            task_events=[SimpleNamespace(task_id='brief-run', event_type='SCHEDULING_TIMED_OUT',
+                                         message='', error_message='')],
+            run=SimpleNamespace(error_message=''))
+
+        dag = await adapter.dag('workflow-run')
+
+        self.assertEqual(dag.nodes[0].error, 'Scheduling timed out')
+
+
 class FinishedStepLogs(unittest.IsolatedAsyncioTestCase):
     """A finished step's log is read once: the board refreshes an open step every second, and an
     engine under load can take seconds (or minutes) to answer each read."""

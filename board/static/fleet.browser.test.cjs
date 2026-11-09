@@ -13,50 +13,52 @@ const { spawn } = require('node:child_process');
 // ---------------------------------------------------------------- pure helpers (no browser)
 const Fleet = require('./fleet.js');
 
-test('instructions fit the selected engines and operating system and never hold a token', () => {
-  const win = Fleet.instructions({ engines: ['hatchet'], os: 'windows', id: 'lab-pc', slots: 2 });
-  const text = (doc) => doc.sections.map((s) => [s.title, ...s.steps.map((x) => `${x.text || ''}\n${x.code || ''}`)].join('\n')).join('\n') + doc.warnings.join('\n');
-  const w = text(win);
-  assert.match(w, /\$env:FLOW_WORKER_ID = 'lab-pc'/);
-  assert.match(w, /agents\\\.venv\\Scripts\\python\.exe -u agents\\flow_execution_worker\.py/);
-  assert.match(w, /\$env:FLOW_WORKER_SLOTS = '2'/);
-  assert.match(w, /--no-index --find-links/);                       // offline install
-  for (const os of ['windows', 'linux', 'macos']) {                  // the mirror only holds NPM_PROJECTS
-    const t = text(Fleet.instructions({ engines: ['hatchet'], os, id: 'x' }));
-    assert.match(t, /npm(\.cmd)? ci --prefix agents --registry <offline npm mirror URL>/, os);
-    assert.match(t, /add agents to (it|NPM_PROJECTS)/, os);
-    assert.match(t, /NPM_PROJECTS="trigger\.dev\/example-project agents"/, os);
-  }
-  assert.match(w, /FLOW_WORKER_TOKEN_LAB_PC=<generated token>/);    // placeholder only
-  assert.match(w, /workers\.local\.env/);
-  assert.match(w, /no Hatchet (token|credentials)/i);
-  assert.doesNotMatch(w, /Trigger\.dev|Prefect/);
-  const linux = text(Fleet.instructions({ engines: ['prefect'], os: 'linux', id: 'lab-pc' }));
-  assert.match(linux, /export FLOW_WORKER_ID='lab-pc'/);
-  assert.match(linux, /agents\/\.venv\/bin\/python -u agents\/flow_execution_worker\.py/);
-  assert.match(linux, /\/var\/tmp\/agent-orchestration\/capacity\.db/);
-  assert.doesNotMatch(linux, /\$env:/);
-  assert.match(linux, /Prefect/);
-  const mac = Fleet.instructions({ engines: ['trigger'], os: 'macos', id: 'mac-pc' });
-  assert.ok(mac.warnings.some((x) => /macOS/.test(x) && /CPU\/RAM/.test(x)), 'macOS capacity limitation is stated');
-  const trigger = text(mac);
-  assert.match(trigger, /trigger dev/);
-  assert.match(trigger, /cards .*coordinator/i);
-  assert.match(trigger, /production .*not supported/i);
-  // Adding an engine to a registered PC needs nothing new on it.
-  const adding = text(Fleet.instructions({ engines: ['hatchet', 'prefect'], os: 'linux', id: 'pc-a', existing: ['hatchet'] }));
-  assert.match(adding, /Nothing new is needed on the PC/);
-  assert.doesNotMatch(adding, /pip install/);
-  for (const doc of [win, mac]) assert.doesNotMatch(text(doc), /[A-Za-z0-9_-]{40,}/, 'no generated secret');
+test('instructions distinguish native Hatchet and Prefect workers from the Trigger.dev Fleet bridge', () => {
+  const text = (engines) => Fleet.instructions({ engines, os: 'windows' }).sections.flatMap((s) => s.steps.map((x) => x.text || '')).join('\n');
+  assert.match(text(['hatchet']), /native worker on this PC/i);
+  assert.match(text(['prefect']), /native worker on this PC/i);
+  assert.match(text(['trigger']), /shared Fleet execution bridge/i);
+  assert.doesNotMatch(text(['trigger']), /native Trigger\.dev worker/i);
 });
 
-test('engine status words: Trigger.dev unconfirmed is never called connected', () => {
+test('Hatchet token validation adds it only for Hatchet installs', () => {
+  const valid = { id: 'worker-1', os: 'windows', engines: ['hatchet'], pool: 'default', tags: [], slots: 1, cpu_limit: 90, ram_limit: 90, server: 'https://board.example' };
+  assert.match(Fleet.validateInstall(valid).errors.hatchet_token, /dedicated worker-capable.*Board-global token/i);
+  for (const engine of ['prefect', 'trigger']) {
+    const result = Fleet.validateInstall({ ...valid, engines: [engine] });
+    assert.ok(result.body, `${engine} install is valid without Hatchet token`);
+    assert.equal(Object.hasOwn(result.body, 'hatchet_token'), false);
+  }
+  assert.equal(Fleet.validateInstall({ ...valid, hatchet_token: 'worker-secret' }).body.hatchet_token, 'worker-secret');
+});
+
+test('engine setup instructions match selected OS and do not claim unconfirmed readiness', () => {
+  const text = (doc) => doc.sections.map((s) => [s.title, ...s.steps.map((x) => `${x.text || ''}\n${x.code || ''}`)].join('\n')).join('\n') + doc.warnings.join('\n');
+  for (const os of ['windows', 'linux', 'macos']) {
+    const doc = Fleet.instructions({ engines: ['hatchet', 'prefect'], os, id: 'pc-a' });
+    assert.match(text(doc), /one-line install command/i, os);
+    assert.match(text(doc), /native worker on this PC/i, os);
+    assert.match(text(doc), /Readiness is shown only after the backend confirms/i, os);
+    assert.doesNotMatch(text(doc), /FLOW_WORKER_ID|FLOW_WORKER_TOKEN|workers\.local\.env/i, os);
+  }
+  const mac = Fleet.instructions({ engines: ['trigger'], os: 'macos', id: 'mac-pc' });
+  assert.ok(mac.warnings.some((x) => /macOS/.test(x) && /CPU\/RAM/.test(x)), 'macOS capacity limitation is stated');
+  assert.match(text(mac), /shared Fleet execution bridge/);
+  assert.doesNotMatch(text(mac), /native Trigger\.dev worker/i);
+  const adding = text(Fleet.instructions({ engines: ['hatchet', 'prefect'], os: 'linux', existing: ['hatchet'] }));
+  assert.match(adding, /engine status reflects what the backend has actually confirmed/i);
+  assert.doesNotMatch(adding, /native Trigger\.dev worker/i);
+});
+
+test('engine status reports native PC workers separately from the shared Trigger.dev bridge', () => {
   const online = { online: true, status: 'online' };
-  const unconfirmed = Fleet.engineText('trigger', { route: 'shared_service', coordinator: 'unconfirmed', state: 'unconfirmed', connected: false }, online);
-  assert.match(unconfirmed, /^Trigger\.dev: Unconfirmed: .*trigger dev worker/);
-  assert.doesNotMatch(unconfirmed, /Connected/);
-  assert.match(Fleet.engineText('hatchet', { coordinator: 'running', state: 'connected', connected: true }, online), /^Hatchet: Connected/);
-  assert.match(Fleet.engineText('trigger', { coordinator: 'unconfirmed', state: 'not_connected', connected: false }, { online: false, status: 'unreachable' }), /Not connected/);
+  assert.match(Fleet.engineText('hatchet', { route: 'pc_native', connected: true }, online), /Connected as a native worker on this PC/);
+  assert.match(Fleet.engineText('prefect', { route: 'pc_native', connected: true }, online), /Connected as a native worker on this PC/);
+  assert.match(Fleet.engineText('trigger', { route: 'shared_service', connected: true }, online), /Connected through the shared Fleet execution bridge/);
+  assert.match(Fleet.engineText('hatchet', { route: 'pc_native', state: 'unconfirmed' }, online), /backend cannot confirm its native Hatchet worker/);
+  const uncertain = Fleet.engineText('trigger', { route: 'shared_service', coordinator: 'unconfirmed', state: 'unconfirmed', connected: false }, online);
+  assert.match(uncertain, /^Trigger\.dev: Unconfirmed:/);
+  assert.doesNotMatch(uncertain, /Connected/);
 });
 
 test('tag suggestions autocomplete existing tags and offer to create new ones', () => {
@@ -109,7 +111,7 @@ function publicWorker(w) {
   const out = Object.fromEntries(Object.entries(w).filter(([k]) => !k.startsWith('_')));
   if (metrics[w.id] && w.online) out.capacity = metrics[w.id];
   const state = (e) => (!w.online || ['stopped', 'not_enabled'].includes(coordinators[e]) ? 'not_connected' : coordinators[e] === 'running' ? 'connected' : 'unconfirmed');
-  out.engine_status = Object.fromEntries(w.engines.map((e) => [e, { route: 'shared_service', coordinator: coordinators[e], state: state(e), connected: state(e) === 'connected' }]));
+  out.engine_status = Object.fromEntries(w.engines.map((e) => [e, { route: e === 'trigger' ? 'shared_service' : 'pc_native', coordinator: coordinators[e], state: state(e), connected: state(e) === 'connected' }]));
   return out;
 }
 const listing = () => ({ workers: [...workers.values()].map(publicWorker), tags: [...new Set([...tags, ...[...workers.values()].flatMap((w) => w.tags)])].sort(),
@@ -134,7 +136,7 @@ const installCommands = (record, origin) => {
     cmd: `curl.exe -fsSL "${link}" -o "%TEMP%\\agent-worker.exe" && "%TEMP%\\agent-worker.exe" install ${record.code} --server "${origin}"`,
     bash: `f=$(mktemp) && curl -fsSL '${link}' -o "$f" && chmod +x "$f" && "$f" install ${record.code} --server '${origin}'`, elevation: 'Run as a normal user. Do not use Administrator or sudo.' };
 };
-const installView = (r) => { const { commands, ...rest } = r; return rest; };
+const installView = (r) => { const { commands, form, ...rest } = r; return rest; };
 const STATIC = ['index.html', 'chat.js', 'card-search.js', 'chat.css', 'flow-builder.js', 'flow-builder.css', 'fleet.js', 'fleet.css', 'admin.js', 'admin.css', 'new-card.js', 'new-card.css', 'overlays.js', 'flow-graph.js', 'flow-graph.css'];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
@@ -340,8 +342,8 @@ test('fleet tab lists every PC with state, pools, tags, slots, per-engine status
   await shot('fleet-list');
   const a = await text(worker('pc-a'));
   for (const part of ['pc-a', 'BUILD-01', 'Online', 'build', 'gpu', 'windows', 'cuda', '1 of 2 slots in use']) assert.ok(a.includes(part), `pc-a shows ${part}: ${a}`);
-  assert.match(await text(`${worker('pc-a')} [data-engine="hatchet"]`), /Hatchet.*Connected.*shared execution service/);
-  assert.match(await text(`${worker('pc-a')} [data-engine="prefect"]`), /Prefect.*Not connected.*Prefect flow worker is not running/);
+  assert.match(await text(`${worker('pc-a')} [data-engine="hatchet"]`), /Hatchet.*Connected as a native worker on this PC/);
+  assert.match(await text(`${worker('pc-a')} [data-engine="prefect"]`), /Prefect.*Not connected.*native Prefect worker is not running on this PC/);
   assert.equal(await evaluate(`document.querySelectorAll('${worker('pc-a')} [data-engine]').length`), 2, 'only registered engines are listed');
   assert.match(await text(`${worker('pc-a')} [data-agent="codex"]`), /✓.*codex.*Installed.*checked \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
   assert.match(await text(`${worker('pc-a')} [data-agent="claude"]`), /✗.*Claude Code.*Absent/);
@@ -405,24 +407,22 @@ test('register an offline PC: engine and OS instructions, several engines and po
   const steps = () => text('.fl-instructions');
   assert.equal(await evaluate(`${q('.fl-form input[name="engine"][value="hatchet"]')}.checked`), true, 'Hatchet is preselected');
   assert.equal(await evaluate(`${q('.fl-form input[name="os"][value="windows"]')}.checked`), true);
-  assert.match(await steps(), /\$env:FLOW_WORKER_ID/);
-  assert.match(await steps(), /flow_execution_worker\.py/);
-  assert.doesNotMatch(await steps(), /trigger dev/);
+  assert.match(await steps(), /one-line install command/);
+  assert.match(await steps(), /do not assert that an engine runtime is ready/);
+  assert.doesNotMatch(await steps(), /trigger dev|FLOW_WORKER_ID|flow_execution_worker\.py/);
   await click('.fl-form label', 'Linux');
-  await waitFor(`/export FLOW_WORKER_ID/.test(document.querySelector('.fl-instructions').textContent)`, 'Linux instructions');
-  assert.doesNotMatch(await steps(), /\$env:/);
+  await waitFor(`/one-line install command/.test(document.querySelector('.fl-instructions').textContent)`, 'Linux install guidance');
   await click('.fl-form label', 'macOS');
   await waitFor(`/macOS/.test(document.querySelector('.fl-instructions').textContent)`);
   assert.match(await steps(), /CPU\/RAM/);
   await click('.fl-form label', 'Windows');
   await click('.fl-form label', 'Trigger.dev');
   await click('.fl-form label', 'Prefect');
-  await waitFor(`/trigger dev/.test(document.querySelector('.fl-instructions').textContent)`, 'Trigger.dev notes');
-  assert.match(await steps(), /Prefect/);
+  await waitFor(`/shared Fleet execution bridge/.test(document.querySelector('.fl-instructions').textContent)`, 'Trigger.dev bridge notes');
+  assert.match(await steps(), /Prefect.*native worker on this PC/);
   await type('.fl-form input[name="id"]', 'lab-pc');
-  await waitFor(`/FLOW_WORKER_ID = 'lab-pc'/.test(document.querySelector('.fl-instructions').textContent)`, 'instructions use the worker ID');
+  assert.match(await steps(), /Readiness is shown only after the backend confirms/);
   assert.equal(await evaluate(`${q('.fl-form input[name="token_env"]')}.value`), 'FLOW_WORKER_TOKEN_LAB_PC');
-  assert.match(await steps(), /FLOW_WORKER_TOKEN_LAB_PC=<generated token>/);
   // Limits default to 90/90 and one slot.
   assert.deepEqual(await evaluate(`['slots','cpu_limit','ram_limit'].map(n => document.querySelector('.fl-form input[name="' + n + '"]').value)`), ['1', '90', '90']);
   assert.equal(await evaluate(`${q('.fl-form input[name="slots"]')}.max`), '100', 'the slot maximum matches the registry and the gate');
@@ -495,7 +495,7 @@ test('the same PC connects to a second engine by editing it, never as a duplicat
   assert.deepEqual(await evaluate(`[...document.querySelectorAll('.fl-form input[name="engine"]:checked')].map(n => n.value)`), ['hatchet', 'prefect', 'trigger']);
   assert.equal(await evaluate(`${q('.fl-form input[name="id"]')}.readOnly`), true);
   assert.match(await text('.fl-instructions'), /Nothing new is needed on the PC/);
-  assert.match(await text('.fl-instructions'), /trigger dev/);
+  assert.match(await text('.fl-instructions'), /Trigger\.dev/);
   assert.equal(await evaluate(`${q('.fl-form input[name="url"]')}.value`), '', 'the endpoint is never shown');
   assert.match(await text('.fl-form'), /endpoint is configured/i);
   await click('.fl-form button', 'Save');
@@ -701,10 +701,10 @@ test('phone width: the list and the registration form never scroll sideways', as
 
 // ---------------------------------------------------------------- one-line install: pure helpers
 test('install form validation mirrors the server and builds the request only when valid', () => {
-  const valid = { id: 'build-pc', os: 'linux', engines: ['prefect', 'hatchet'], pool: 'build', tags: ['gpu', 'gpu', ' cuda '], slots: '2', cpu_limit: '80', ram_limit: '85.5', server: 'http://192.168.1.10:8090/' };
+  const valid = { id: 'build-pc', os: 'linux', engines: ['prefect', 'hatchet'], hatchet_token: 'worker-secret', pool: 'build', tags: ['gpu', 'gpu', ' cuda '], slots: '2', cpu_limit: '80', ram_limit: '85.5', server: 'http://192.168.1.10:8090/' };
   const ok = Fleet.validateInstall(valid, { taken: ['pc-a'] });
   assert.deepEqual(ok.errors, {});
-  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true });
+  assert.deepEqual(ok.body, { id: 'build-pc', os: 'linux', engines: ['hatchet', 'prefect'], hatchet_token: 'worker-secret', pool: 'build', tags: ['gpu', 'cuda'], slots: 2, cpu_limit: 80, ram_limit: 85.5, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true });
   const bad = (change, field) => { const r = Fleet.validateInstall({ ...valid, ...change }, { taken: ['pc-a'] }); assert.equal(r.body, null, field); assert.ok(r.errors[field], `${field} has a message`); };
   for (const id of ['', ' ', 'a b', '-x', 'x'.repeat(65), 'a/b', 'pc-a']) bad({ id }, 'id');
   bad({ os: '' }, 'os'); bad({ os: 'beos' }, 'os');
@@ -771,10 +771,11 @@ test('install progress words: waiting, each step, failure with its step, registe
 });
 
 // ---------------------------------------------------------------- one-line install: in the browser
-const fillInstall = async ({ id = 'build-pc', os = 'windows', server = 'http://192.168.1.10:8090' } = {}) => {
+const fillInstall = async ({ id = 'build-pc', os = 'windows', server = 'http://192.168.1.10:8090', token = 'pc-worker-secret' } = {}) => {
   await type('.fl-form input[name="id"]', id);
   await click(`.fl-form input[name="os"][value="${os}"]`);
   await type('.fl-form input[name="server"]', server);
+  if (token) await type('.fl-form input[name="hatchet_token"]', token);
 };
 const submitInstall = () => click('.fl-form button', 'Create install command');
 
@@ -792,6 +793,7 @@ test('register a PC: the form is checked first, and no install command exists un
   assert.equal(await evaluate('document.querySelector(".fl-form input[name=id]").getAttribute("aria-invalid")'), 'true');
   assert.equal(calls.slice(before).filter((c) => c.method === 'POST').length, 0, 'nothing is sent while the form is invalid');
   assert.equal(await evaluate('!!document.querySelector(".fl-command")'), false, 'no command is shown');
+  assert.match(await text('[data-error="hatchet_token"]'), /dedicated worker-capable/);
   await type('.fl-form input[name="id"]', 'pc-a');
   await type('.fl-form input[name="server"]', 'http://192.168.1.10:8090');
   await submitInstall();
@@ -805,7 +807,7 @@ test('register a PC: the form is checked first, and no install command exists un
   await shot('install-form-errors');
 });
 
-test('a valid form creates the install link and shows the Windows commands with the elevation advice', async () => {
+test('a valid form creates the install link and sends the Hatchet token only in the create request', async () => {
   await openFleet();
   await click('.fl-top button', 'Register PC');
   await waitFor('document.querySelector(".fl-form input[name=id]")');
@@ -819,7 +821,7 @@ test('a valid form creates the install link and shows the Windows commands with 
   await submitInstall();
   await waitFor('document.querySelectorAll(".fl-command").length === 2', 'both Windows commands shown');
   const sent = lastCall('POST', '/api/fleet/installs').body;
-  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true });
+  assert.deepEqual(sent, { id: 'build-pc', os: 'windows', engines: ['hatchet', 'prefect'], pool: 'default', tags: ['gpu'], slots: 2, cpu_limit: 80, ram_limit: 90, server: 'http://192.168.1.10:8090', autostart: 'logon', auto_restart: true, hatchet_token: 'pc-worker-secret' });
   const record = [...installs.values()][0];
   assert.equal(await text('[data-command="powershell"]'), `$f = Join-Path $env:TEMP 'agent-worker.exe'; iwr -UseBasicParsing 'http://192.168.1.10:8090/install/${record.code}/agent-worker' -OutFile $f; & $f install ${record.code} --server 'http://192.168.1.10:8090'`);
   assert.match(await text('[data-command="cmd"]'), /^curl\.exe -fsSL "http:\/\/192\.168\.1\.10:8090\/install\/.+\/agent-worker" -o/);
@@ -830,6 +832,17 @@ test('a valid form creates the install link and shows the Windows commands with 
   assert.match(await text('.fl-install-expiry'), /works once and expires in about (29|30) min/);
   assert.match(await text('.fl-install-status'), /Waiting for you to run the command/);
   assert.equal(await evaluate('document.querySelector(\'[data-action="install-done"]\').hidden'), true);
+  assert.equal(await evaluate('document.body.innerText.includes("pc-worker-secret") || document.body.innerHTML.includes("pc-worker-secret")'), false, 'secret is not rendered after create');
+  assert.equal(await evaluate('localStorage.length'), 0, 'secret is not persisted in browser storage');
+  assert.equal(Object.hasOwn(installView([...installs.values()][0]), 'form'), false, 'install listing omits submitted form data');
+  assert.equal(await evaluate('document.querySelector(".fl-install-status").textContent.includes("pc-worker-secret")'), false);
+  assert.equal(await evaluate('[...document.querySelectorAll(".fl-command")].some((n) => n.textContent.includes("pc-worker-secret"))'), false);
+  assert.deepEqual(calls.filter((call) => String(JSON.stringify(call.body) || '').includes('pc-worker-secret')).map(({ method, path }) => [method, path]),
+    [['POST', '/api/fleet/installs']], 'token appears only in the install-create POST');
+  const installListing = await (await fetch(`${base}/api/fleet/installs`)).json();
+  assert.doesNotMatch(JSON.stringify(installListing), /pc-worker-secret/, 'install listing omits token');
+  const workerListing = await (await fetch(`${base}/api/fleet`)).json();
+  assert.doesNotMatch(JSON.stringify(workerListing), /pc-worker-secret/, 'worker listing omits token');
   await click('[data-action="copy-powershell"]');
   await waitFor('/Copied|Select the command/.test(document.querySelector(\'[data-action="copy-powershell"]\').textContent)', 'copy gives feedback');
   await waitFor(`/command copied|Copy failed/.test(document.querySelector('.fl-live').textContent)`, 'the announcement');
@@ -850,6 +863,22 @@ test('Linux and macOS get one bash command, no cmd variant', async () => {
     assert.match(await text('.fl-command-block .fl-hint'), /no sudo/);
     await click('.fl-form-actions button', 'Cancel this install');
     await waitFor('document.querySelector(".fl-form").hidden', 'form closes after cancelling');
+  }
+});
+
+test('Prefect-only and Trigger-only install requests omit the Hatchet token', async () => {
+  for (const engine of ['prefect', 'trigger']) {
+    reset();
+    await openFleet();
+    await click('.fl-top button', 'Register PC');
+    await waitFor('document.querySelector(".fl-form input[name=id]")');
+    await fillInstall({ id: `${engine}-pc`, token: '' });
+    await click('.fl-form input[name="engine"][value="hatchet"]');
+    await click(`.fl-form input[name="engine"][value="${engine}"]`);
+    await submitInstall();
+    await waitFor('document.querySelectorAll(".fl-command").length === 2', `${engine} command shown`);
+    assert.equal(Object.hasOwn(lastCall('POST', '/api/fleet/installs').body, 'hatchet_token'), false, `${engine} POST omits Hatchet token`);
+    assert.equal(await evaluate('document.body.innerHTML.includes("pc-worker-secret")'), false);
   }
 });
 

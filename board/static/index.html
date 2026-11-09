@@ -397,9 +397,8 @@
       <div class="legend" id="d-legend"></div>
       <div class="node-panel" id="d-node" hidden style="margin-top:10px"></div>
     </section>
-    <section id="d-progress-section"><h4>Intermediate results</h4><ol class="progress" id="d-progress"></ol></section>
+    <section id="d-output-section"><h4 id="d-output-title">Output</h4><ol class="progress" id="d-progress"></ol><pre id="d-output" hidden></pre></section>
     <section id="d-input-section" hidden><details class="drawer-fold"><summary>Input</summary><pre id="d-input"></pre></details></section>
-    <section id="d-output-section"><h4 id="d-output-title">Output</h4><pre id="d-output"></pre></section>
     <section id="d-replay-section"><button class="secondary" id="d-replay" type="button">Run again (replay)</button></section>
   </div>
 </aside>
@@ -411,7 +410,20 @@
 <dialog id="flows-dialog" class="fb-dialog"></dialog>
 <!-- The fleet tab (fleet.js): registered execution PCs and their settings. -->
 <dialog id="fleet-dialog" class="fl-dialog" aria-labelledby="fl-title"></dialog>
-<dialog id="admin-dialog" class="ad-dialog" aria-labelledby="ad-title"></dialog>
+<dialog id="admin-dialog" class="engine-settings-dialog" aria-labelledby="engine-settings-title"></dialog>
+<template id="admin-fallback-template">
+  <div class="engine-settings-content">
+    <header class="engine-settings-top">
+      <div class="engine-settings-heading">
+        <h2 id="engine-settings-title" class="engine-settings-title">Engine settings</h2>
+        <p class="engine-settings-hint">Configure service and dashboard URLs. Credentials remain in the board server environment.</p>
+      </div>
+      <div class="engine-settings-actions"><button type="button" class="close" aria-label="Close Admin" data-admin-fallback-close>×</button></div>
+      <p class="engine-settings-status" role="status" aria-live="polite" data-admin-fallback-status>Loading engine settings…</p>
+    </header>
+    <div class="engine-settings-body"><p class="engine-settings-hint">Admin settings could not be initialized. Reload the board and try again.</p></div>
+  </div>
+</template>
 
 <script src="/static/overlays.js"></script>
 <script src="/static/chat.js"></script>
@@ -1109,7 +1121,7 @@ function renderDrawer() {
   $("drawer").classList.toggle("session-drawer", session);
   $("d-chat").hidden = !session;
   $("d-facts-section").hidden = session;
-  $("d-progress-section").hidden = session;
+  $("d-output-section").hidden = session;
   if (session) chat.render({ ...card, offline_worker: connection(card).state === "offline" ? connection(card).worker : null }, runKey());
   $("d-title").textContent = card.title;
   $("d-state").replaceChildren(...drawerState(card));
@@ -1131,10 +1143,10 @@ function renderDrawer() {
   $("d-queue-section").hidden = session || (!queueText(card) && pause.hidden);
   pause.textContent = card.queue?.paused ? "Resume queue" : "Pause queue";
   const output = card.error || (card.output != null ? JSON.stringify(card.output, null, 2) : "");
-  $("d-output-section").hidden = session || !output;
   $("d-output").textContent = output;
+  $("d-output").hidden = !output;
   $("d-output").classList.toggle("is-error", !!card.error);
-  $("d-output-title").textContent = card.error ? "Error" : "Output";
+  $("d-output-title").textContent = "Output";
   $("d-input-section").hidden = session || card.input == null;
   $("d-input").textContent = card.input != null ? JSON.stringify(card.input, null, 2) : "";
   $("d-replay-section").hidden = session || !["done", "stopped"].includes(card.column);
@@ -1240,9 +1252,9 @@ function pagedLines(list, options) {
     },
   };
 }
-const cardLog = pagedLines($("d-progress"), { empty: () => "No intermediate results yet" });
+const cardLog = pagedLines($("d-progress"), { empty: () => "No output yet" });
 const nodeLogList = el("ol", { class: "progress" });
-const nodeLog = pagedLines(nodeLogList, { map: readableLine, empty: () => (dag?.nodes.find((n) => n.id === selectedNode)?.ref ? "None" : "Not started yet") });
+const nodeLog = pagedLines(nodeLogList, { map: readableLine, empty: () => (dag?.nodes.find((n) => n.id === selectedNode)?.ref ? "No output yet" : "Not started yet") });
 const nodeChatRoot = el("div", { class: "session-chat node-chat" });
 const nodeStates = new Map();
 const selectedStep = () => dag?.nodes.find(n => n.id === selectedNode);
@@ -1336,7 +1348,7 @@ function renderDag() {
       return { id: n.id, label: n.label, sub: worker ? `${worker} · ${status}` : status + took, kind: n.kind, state, selected: n.id === selectedNode, problem: !!n.error, ariaLabel: `${n.label}: ${status}` };
     }),
     edges: edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
-    positions, ariaLabel: `Run graph with ${dag.nodes.length} steps. Tab to a step; Enter shows its output and logs.`,
+    positions, ariaLabel: `Run graph with ${dag.nodes.length} steps. Tab to a step; Enter shows its output.`,
   });
   // A new graph, or one whose steps changed, is fitted; a later update leaves the view where the user put it.
   const shape = `${openCardId}|${JSON.stringify(positions)}`;
@@ -1378,7 +1390,7 @@ function runGraphMenu(event, target) {
   const url = /^https?:\/\//.test(node.backend_url || "") ? node.backend_url : null;
   const copy = !navigator.clipboard;
   Overlays.menu(event, [
-    { label: selectedNode === node.id ? "Hide output and logs" : "Show output and logs", onSelect: () => selectNode(node.id) },
+    { label: selectedNode === node.id ? "Hide output" : "Show output", onSelect: () => selectNode(node.id) },
     ...(restart ? [{ label: "Restart step", disabled: restart.disabled, title: restart.title, onSelect: () => restartStep(node) }] : []),
     ...(url ? [{ label: `Open in ${SYSTEM_LABELS[system].split(" · ")[0]}`, onSelect: () => window.open(url, "_blank", "noopener,noreferrer") }] : []), null,
     { label: "Copy step name", disabled: copy, onSelect: () => copyText(node.step || node.label, "the step name") },
@@ -1427,14 +1439,16 @@ function renderNodePanel() {
   if (!node) { panel.hidden = true; return; }
   panel.hidden = false;
   if (node.kind) { renderFlowNode(panel, node); return; }
+  const runError = cards.find((c) => c.id === openCardId)?.error;
+  const error = node.error || (node.status.toUpperCase() === "FAILED" ? runError : null);
   const facts = [["Status", node.status], ["Started", AgentChat.localTime(node.started_at)], ["Finished", AgentChat.localTime(node.finished_at)],
     ["Took", node.started_at && node.finished_at ? secs(node.started_at, node.finished_at) : null], ["Run id", node.ref]];
+  const output = node.output != null ? JSON.stringify(node.output, null, 2) : error;
+  const outputView = output == null ? null : el("pre", {}, output);
   panel.replaceChildren(...[
     el("h5", {}, node.label),
     el("dl", {}, ...facts.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
-    node.error ? el("pre", {}, node.error) : null,
-    node.output != null ? el("div", {}, el("h4", {}, "Output"), el("pre", {}, JSON.stringify(node.output, null, 2))) : null,
-    el("div", {}, el("h4", {}, "Logs / intermediate results"), nodeLogList),
+    el("div", { class: "node-output" }, el("h4", {}, "Output"), outputView, nodeLogList),
   ].filter(Boolean));
   nodeLog.render();
 }
@@ -1462,6 +1476,7 @@ async function restartStep(node) {
 
 function renderFlowNode(panel, node) {
   const card = cards.find(c => c.id === openCardId), key = nodeKey(node.ref);
+  const runError = card?.error;
   const restart = el("button", { class: "secondary restart-step", type: "button", onclick: async () => {
     restart.disabled = true;
     if (!(await restartStep(node))) restart.disabled = false;
@@ -1475,18 +1490,25 @@ function renderFlowNode(panel, node) {
     : node.execution ? FlowBuilder.executionView(node.execution) : el('span', {class:'status'}, 'Execution worker not reported'));
   if (['done','stopped'].includes(card?.column)) header.append(workerPicker('Worker for step restart', restartWorkers.get(key), value => restartWorkers.set(key,value)));
   if (!node.restart_supported && node.restart_reason) header.append(el("p", { class: "status" }, node.restart_reason));
+  const error = node.error || (node.status.toUpperCase() === "FAILED" ? runError : null);
+  const output = node.output != null ? AgentChat.jsonView(node.output, el) : error ? el("pre", {}, error) : null;
+  const outputContents = node.kind === "agent" ? (node.ref ? nodeChatRoot : null) : nodeLogList;
+  const outputPanel = el("div", { class: "node-output" }, el("h4", {}, "Output"), output, outputContents);
   if (node.kind === "agent" && !node.ref) {
     // Nothing to load: the step has no run yet.
-    panel.replaceChildren(header, el("p", { class: "status" }, "This step hasn't started yet."));
+    panel.replaceChildren(header, outputPanel, el("p", { class: "status" }, "This step hasn't started yet."));
   } else if (node.kind === "agent") {
     // Keep the mounted chat and its focused composer in place across graph refreshes.
-    if (panel.dataset.nodeKey !== key) panel.replaceChildren(header, nodeChatRoot);
-    else panel.firstChild.replaceWith(header);
+    if (panel.dataset.nodeKey !== key) panel.replaceChildren(header, outputPanel);
+    else {
+      panel.firstChild.replaceWith(header);
+      panel.querySelector(".node-output")?.remove();
+      header.after(outputPanel);
+    }
     const stepOffline = runNodeStatus(node).offline ? stepWorkerOf(node) : null;
     nodeChat.render({ ...node, agent: node.agent, offline_worker: stepOffline, session_state: nodeStates.get(key) || (node.column === "pending" ? "starting" : "working") }, key);
   } else {
-    panel.replaceChildren(...[header, node.error ? el("pre", {}, node.error) : null,
-      node.output != null ? AgentChat.jsonView(node.output, el) : null, nodeLogList].filter(Boolean));
+    panel.replaceChildren(header, outputPanel);
     nodeLog.render();
   }
   panel.dataset.nodeKey = key;
@@ -1786,20 +1808,39 @@ $("fleet-btn").addEventListener("click", () => openFleet());
 fleetDialog.addEventListener("cancel", (e) => { e.preventDefault(); if (fleet.back()) closeFleet(); });
 // Admin changes only engine URLs; environment-provided credentials stay server-side.
 const adminDialog = $("admin-dialog");
-const admin = Admin.mount(adminDialog, { onClose: closeAdmin });
+let admin = null;
+function showAdminFallback(message) {
+  let status = adminDialog.querySelector("[data-admin-fallback-status]");
+  if (!status) {
+    const fallback = $("admin-fallback-template").content.firstElementChild.cloneNode(true);
+    adminDialog.replaceChildren(fallback);
+    fallback.querySelector("[data-admin-fallback-close]").addEventListener("click", closeAdmin);
+    status = fallback.querySelector("[data-admin-fallback-status]");
+  }
+  status.textContent = message;
+}
 function closeAdmin() {
-  admin.stop();
+  admin?.stop();
   if (adminDialog.open) { adminDialog.close(); return dropOverlay("admin"); }
   return Promise.resolve();
 }
 function openAdmin() {
-  adminDialog.showModal();
-  pushOverlay("admin", () => { admin.stop(); adminDialog.close(); });
-  admin.open();
+  if (!adminDialog.open) {
+    adminDialog.showModal();
+    pushOverlay("admin", () => { admin?.stop(); adminDialog.close(); });
+  }
+  if (admin) admin.open();
+  else showAdminFallback("Could not load Admin settings. Reload the board and try again.");
 }
 $("admin-btn").addEventListener("click", openAdmin);
 adminDialog.addEventListener("cancel", (e) => { e.preventDefault(); closeAdmin(); });
 closeOnBackdrop(adminDialog, () => closeAdmin());
+try {
+  if (!window.Admin || typeof window.Admin.mount !== "function") throw new Error("Admin script failed to load");
+  admin = window.Admin.mount(adminDialog, { onClose: closeAdmin });
+} catch (error) {
+  showAdminFallback(`Admin failed to initialize: ${error.message}`);
+}
 
 
 $("d-close").addEventListener("click", closeDrawer);

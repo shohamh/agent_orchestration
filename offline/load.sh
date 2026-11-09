@@ -84,7 +84,8 @@ install() {
   local asset node_tools
   mkdir -p "$target/dist/worker"
   for asset in agent-worker-x86_64-pc-windows-msvc.exe agent-worker-x86_64-unknown-linux-musl \
-    confluence-runtime-windows.tar.gz confluence-runtime-linux.tar.gz; do
+    confluence-runtime-windows.tar.gz confluence-runtime-linux.tar.gz \
+    native-runtime-windows.tar.gz native-runtime-linux.tar.gz; do
     [ -s "$BUNDLE/worker/$asset" ] || { echo "The bundle is missing worker asset $asset" >&2; exit 1; }
     cp -p "$BUNDLE/worker/$asset" "$target/dist/worker/$asset"
   done

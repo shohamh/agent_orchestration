@@ -25,9 +25,13 @@ from flowkit import install
 from flowkit.relay import make_app
 
 ROOT = Path(__file__).resolve().parents[2]
-FORM = {'id': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu'], 'slots': 2,
-        'cpu_limit': 80, 'ram_limit': 85, 'server': 'http://192.168.1.10:8090', 'autostart': 'boot', 'auto_restart': False}
 GOOD_TOKEN = 'abcdefghijklmnopqrstuvwxyzABCDEF0123456789_-'
+FORM = {'id': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'hatchet_token': GOOD_TOKEN,
+        'hatchet_api_url': 'http://192.168.1.20:8080/api',
+        'hatchet_worker_grpc_host_port': '192.168.1.20:7070', 'hatchet_worker_tls_strategy': 'none',
+        'prefect_worker_api_url': 'http://192.168.1.30:4200/api',
+        'pool': 'build', 'tags': ['gpu'], 'slots': 2,
+        'cpu_limit': 80, 'ram_limit': 85, 'server': 'http://192.168.1.10:8090', 'autostart': 'boot', 'auto_restart': False}
 
 
 SECRET = 'pc-claim-secret-0123456789abcdefghij'
@@ -44,6 +48,7 @@ class Isolated(unittest.TestCase):
         self.root = Path(self.tmp.name)
         binaries = self.root / 'binaries'; binaries.mkdir()
         for name in install.TARGETS.values(): (binaries / name).write_bytes(b'MZ-fake-worker-' + name.encode())
+        (binaries / install.NATIVE_RUNTIMES['windows']).write_bytes(b'fake-native-runtime')
         env = patch.dict(os.environ, {'FLOW_STATE_DIR': str(self.root/'state'), 'FLOW_WORKERS_FILE': str(self.root/'workers.yaml'),
                                       'FLOW_WORKERS_ENV_FILE': str(self.root/'workers.env'), 'FLOW_WORKER_BINARIES': str(binaries)})
         env.start(); self.addCleanup(env.stop)
@@ -83,6 +88,41 @@ class FormTests(Isolated):
     def test_a_valid_form_is_normalized(self):
         form = install.validate_form({**FORM, 'tags': ['gpu', 'gpu']})
         self.assertEqual((form['id'], form['engines'], form['pools'], form['tags'], form['server']), ('build-pc', ['hatchet', 'prefect'], ['build'], ['gpu'], 'http://192.168.1.10:8090'))
+
+    def test_native_selection_requires_private_endpoints_and_trigger_stays_a_bridge(self):
+        form = install.validate_form(FORM)
+        self.assertEqual(form['native_engines'], ['hatchet', 'prefect'])
+        self.assertEqual(form['native_config'], {
+            'hatchet_api_url': FORM['hatchet_api_url'],
+            'hatchet_worker_grpc_host_port': FORM['hatchet_worker_grpc_host_port'],
+            'hatchet_worker_tls_strategy': 'none',
+            'prefect_worker_api_url': FORM['prefect_worker_api_url'],
+        })
+        prefect = install.validate_form({**FORM, 'engines': ['prefect'], 'hatchet_token': '',
+                                         'prefect_worker_api_url': FORM['prefect_worker_api_url']})
+        self.assertEqual((prefect['native_engines'], prefect['native_config']),
+                         (['prefect'], {'prefect_worker_api_url': FORM['prefect_worker_api_url']}))
+        trigger = install.validate_form({**FORM, 'engines': ['trigger'], 'hatchet_token': ''})
+        self.assertEqual((trigger['native_engines'], trigger['native_config']), ([], {}))
+        self.assertNotIn('hatchet_token', trigger)
+        for changes in ({'hatchet_token': ''}, {'hatchet_worker_grpc_host_port': 'hatchet-engine:7070'},
+                        {'prefect_worker_api_url': 'http://prefect-server:4200/api'}):
+            with self.subTest(changes=changes), self.assertRaises(install.InstallError):
+                install.validate_form({**FORM, **changes})
+
+    def test_public_install_view_never_contains_engine_credentials_or_endpoints(self):
+        shown = install.view(install.create(FORM))
+        text = json.dumps(shown)
+        for value in (GOOD_TOKEN, FORM['hatchet_api_url'], FORM['hatchet_worker_grpc_host_port'],
+                      FORM['prefect_worker_api_url']):
+            self.assertNotIn(value, text)
+
+    def test_native_selection_refuses_to_create_without_offline_runtime(self):
+        path = install.native_runtime_path('windows')
+        self.assertIsNotNone(path)
+        path.unlink()
+        with self.assertRaisesRegex(install.InstallError, 'no native engine runtime'):
+            install.create(FORM)
 
     def test_autostart_defaults_to_logon_and_takes_boot_or_none(self):
         base = {k: v for k, v in FORM.items() if k != 'autostart'}
@@ -378,20 +418,73 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((shown['step'], shown['error']), ('check', 'A worker is already installed on this PC'))
         async with self.http.post(f'{self.url}/install/{record["code"]}/progress', json={'step': 'bogus'}) as response: self.assertEqual(response.status, 400)
 
-    async def test_completion_registers_the_pc_by_its_uuid_once_and_burns_the_link(self):
+    async def test_completion_registers_a_connecting_pc_but_readiness_burns_the_token(self):
         from flowkit.fleet_registry import _read
         record = self.make()
         self.assertEqual((await self.claim(record))[0], 200)
         async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET, 'hostname': 'PC-1'}) as response:
-            self.assertEqual((response.status, await response.json()), (200, {'ok': True, 'id': 'build-pc'}))
+            self.assertEqual((response.status, await response.json()), (200, {'ok': True, 'id': 'build-pc', 'state': 'connecting'}))
         worker = next(w for w in _read() if w['id'] == 'build-pc')
-        self.assertEqual(worker['uuid'], record['code'])
-        shown = install.view(install.read_record(record['code']))
-        self.assertEqual((shown['state'], shown['hostname'], shown['uuid']), ('registered', 'PC-1', record['code']))
+        self.assertEqual((worker['uuid'], worker['native_engines']), (record['code'], ['hatchet', 'prefect']))
+        private = install.read_record(record['code'])
+        self.assertEqual(private['state'], 'connecting')
+        self.assertEqual(private['hatchet_token'], GOOD_TOKEN)
+        shown = install.view(private)
+        self.assertEqual((shown['state'], shown['hostname'], shown['uuid']), ('connecting', 'PC-1', record['code']))
+        for value in (GOOD_TOKEN, FORM['hatchet_api_url'], FORM['hatchet_worker_grpc_host_port'], FORM['prefect_worker_api_url']):
+            self.assertNotIn(value, json.dumps(shown))
         async with self.http.get(f'{self.url}/install/{record["code"]}/agent-worker') as response: self.assertEqual(response.status, 404)
         async with self.http.post(f'{self.url}/install/{record["code"]}/claim', json=claim_body()) as response: self.assertEqual(response.status, 404)
-        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': 'q' * 40, 'claim': SECRET}) as response: self.assertEqual(response.status, 404)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete', json={'token': GOOD_TOKEN, 'claim': SECRET}) as response:
+            self.assertEqual((response.status, (await response.json())['state']), (200, 'connecting'))
         self.assertEqual(len([w for w in _read() if w['id'] == 'build-pc']), 1)
+
+    async def test_readiness_requires_the_relay_and_every_selected_native_engine(self):
+        from unittest.mock import AsyncMock
+        from flowkit.fleet_registry import _read
+        from flowkit import workers
+        record = self.make()
+        await self.claim(record)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete',
+                                  json={'token': GOOD_TOKEN, 'claim': SECRET}) as response:
+            self.assertEqual(response.status, 200)
+        ready_status = {'online': True, '_native_worker_status': {
+            'hatchet': {'state': 'ready', 'worker_id': 'hatchet-id'},
+            'prefect': {'state': 'starting', 'worker_id': 'prefect-id'},
+        }}
+        with patch.object(workers, 'catalog', AsyncMock(return_value=[{'online': False}])):
+            async with self.http.post(f'{self.url}/install/{record["code"]}/ready', json={'claim': SECRET}) as response:
+                self.assertEqual(response.status, 409)
+                self.assertIn('execution service', (await response.json())['error'])
+        self.server.app['relay'].peer(record['code']).last_poll = time.monotonic()
+        with patch.object(workers, 'catalog', AsyncMock(return_value=[ready_status])):
+            async with self.http.post(f'{self.url}/install/{record["code"]}/ready', json={'claim': SECRET}) as response:
+                self.assertEqual(response.status, 409)
+                self.assertIn('native prefect', (await response.json())['error'])
+        ready_status['_native_worker_status']['prefect']['state'] = 'ready'
+        with patch.object(workers, 'catalog', AsyncMock(return_value=[ready_status])):
+            async with self.http.post(f'{self.url}/install/{record["code"]}/ready', json={'claim': SECRET}) as response:
+                self.assertEqual((response.status, (await response.json())['state']), (200, 'registered'))
+        saved = install.read_record(record['code'])
+        self.assertEqual(saved['state'], 'registered')
+        self.assertNotIn('hatchet_token', saved)
+        self.assertEqual(next(w for w in _read() if w['id'] == 'build-pc')['native_engines'], ['hatchet', 'prefect'])
+
+    async def test_abort_unregisters_a_candidate_and_scrubs_its_private_token(self):
+        from flowkit.fleet_registry import _read
+        record = self.make()
+        await self.claim(record)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/complete',
+                                  json={'token': GOOD_TOKEN, 'claim': SECRET}) as response:
+            self.assertEqual(response.status, 200)
+        async with self.http.post(f'{self.url}/install/{record["code"]}/abort',
+                                  json={'claim': SECRET}) as response:
+            self.assertEqual((response.status, (await response.json())['state']), (200, 'failed'))
+        self.assertFalse(any(worker['id'] == 'build-pc' for worker in _read()))
+        saved = install.read_record(record['code'])
+        self.assertEqual(saved['state'], 'failed')
+        self.assertNotIn('hatchet_token', saved)
+        self.assertNotIn(GOOD_TOKEN, json.dumps(install.view(saved)))
 
     async def test_a_registration_from_a_pc_that_did_not_claim_the_link_is_refused(self):
         record = self.make()
@@ -416,7 +509,7 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         async with self.http.get(f'{self.url}/install/{record["code"]}/state') as response: self.assertFalse((await response.json())['connected'])
         self.server.app['relay'].peer(record['code']).last_poll = time.monotonic()
         async with self.http.get(f'{self.url}/install/{record["code"]}/state') as response: body = await response.json()
-        self.assertEqual((body['state'], body['connected'], body['uuid']), ('registered', True, record['code']))
+        self.assertEqual((body['state'], body['connected'], body['uuid']), ('connecting', True, record['code']))
         self.assertNotIn(GOOD_TOKEN, json.dumps(body))
 
 
@@ -426,6 +519,15 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         import flow_host
         with patch.object(sys, 'path', [str(ROOT / 'board'), *sys.path]):
             import server as board_server
+            import engine_admin
+        admin_endpoints = {
+            'hatchet': {'api_url': FORM['hatchet_api_url'],
+                        'hatchet_worker_grpc_host_port': FORM['hatchet_worker_grpc_host_port'],
+                        'hatchet_worker_tls_strategy': FORM['hatchet_worker_tls_strategy']},
+            'prefect': {'prefect_worker_api_url': FORM['prefect_worker_api_url']},
+        }
+        endpoint_patch = patch.object(engine_admin, 'config_for', side_effect=lambda engine: admin_endpoints[engine])
+        endpoint_patch.start(); self.addCleanup(endpoint_patch.stop)
 
         env = patch.dict(os.environ, {'FLOW_HOST_TOKEN': 'install-test-host-secret',
                                       'BOARD_PASSWORD': 'install-test-password', 'BOARD_SECRET': 'install-test-cookie-key'})
@@ -459,11 +561,16 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 302)
 
     async def api(self, method, path='/api/fleet/installs', **kwargs):
+        if method == 'POST' and path == '/api/fleet/installs' and isinstance(kwargs.get('json'), dict):
+            hidden = {'hatchet_api_url', 'hatchet_worker_grpc_host_port',
+                      'hatchet_worker_tls_strategy', 'prefect_worker_api_url'}
+            kwargs['json'] = {key: value for key, value in kwargs['json'].items() if key not in hidden}
         async with self.client.request(method, path, **kwargs) as response:
             return response.status, await response.json()
 
     async def claim(self, code):
         async with self.pc.post(self.client.make_url(f'/install/{code}/claim'), json=claim_body()) as response:
+            self.assertEqual(response.headers.get('Cache-Control'), 'no-store')
             return response.status, await response.json()
 
     async def download(self, code):
@@ -477,6 +584,9 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
                     name = f'{autostart}-restart-{int(auto_restart)}'
                     status, created = await self.api('POST', json={**FORM, 'id': name, 'autostart': autostart, 'auto_restart': auto_restart})
                     self.assertEqual(status, 200, created)
+                    public_json = json.dumps(created)
+                    for secret in (GOOD_TOKEN, FORM['hatchet_api_url'], FORM['prefect_worker_api_url']):
+                        self.assertNotIn(secret, public_json)
                     code = created['install']['code']
                     self.assertEqual((str(uuid.UUID(code)), uuid.UUID(code).version), (code, 4))
                     status, listing = await self.api('GET')
@@ -491,6 +601,11 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
                                      {'ok': True, 'uuid': code, 'name': name, 'os': 'windows', 'engines': ['hatchet', 'prefect'],
                                       'pool': 'build', 'tags': ['gpu'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85,
                                       'autostart': autostart, 'auto_restart': auto_restart})
+                    self.assertEqual(settings['native_engines'], ['hatchet', 'prefect'])
+                    self.assertEqual(settings['native_config'], {key: FORM[key] for key in (
+                        'hatchet_api_url', 'hatchet_worker_grpc_host_port',
+                        'hatchet_worker_tls_strategy', 'prefect_worker_api_url')})
+                    self.assertEqual((settings['hatchet_token'], len(settings['native_runtime_version'])), (GOOD_TOKEN, 16))
 
     async def test_bad_startup_choices_and_unknown_fields_never_create_an_install(self):
         for changes in ({'autostart': 'startup'}, {'autostart': 'Boot'}, {'autostart': None}, {'autostart': True},

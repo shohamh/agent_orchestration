@@ -35,7 +35,7 @@ ENGINES = ('hatchet', 'prefect', 'trigger')
 AUTOSTARTS = ('logon', 'boot', 'none')  # when the worker starts on the PC: at the user's logon, at PC start-up, or only when told to
 MIN_TOKEN = 32
 WRONG_CODE_DELAY = 0.5  # seconds a wrong code is held before the generic answer
-STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'register', 'connect', 'boot')
+STEPS = ('check', 'download', 'python', 'npm', 'token', 'service', 'engine', 'register', 'connect', 'ready', 'boot')
 FAILED_ATTEMPTS = {}  # source address -> (count, window start): wrong codes are slowed per source
 
 
@@ -80,8 +80,9 @@ def validate_form(body, registered=(), pending=()):
     """The normalized, checked install request. `registered` and `pending` are names already taken."""
     from .capacity import MAX_SLOTS
     from .fleet_registry import label
-    if not isinstance(body, dict): raise InstallError('The install request must be an object')
-    unknown = set(body) - {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart'}
+    install_fields = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart',
+                      'hatchet_token', 'hatchet_api_url', 'hatchet_worker_grpc_host_port', 'hatchet_worker_tls_strategy', 'prefect_worker_api_url'}
+    unknown = set(body) - install_fields
     if unknown: raise InstallError(f'Unknown fields: {", ".join(sorted(unknown))}')
     name = body.get('id')
     if not isinstance(name, str) or not NAME.match(name): raise InstallError('The name is 1 to 64 letters, digits, dashes or underscores, starting with a letter or digit')
@@ -103,9 +104,88 @@ def validate_form(body, registered=(), pending=()):
     if autostart not in AUTOSTARTS: raise InstallError('Choose when the worker starts: when you log in, when the PC starts, or never automatically')
     auto_restart = body.get('auto_restart', True)
     if not isinstance(auto_restart, bool): raise InstallError('Auto restart is on or off')
-    return {'id': name, 'os': body['os'], 'autostart': autostart, 'auto_restart': auto_restart, 'engines': [e for e in ENGINES if e in engines], 'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
+    selected = set(engines)
+    native_engines = [engine for engine in ('hatchet', 'prefect') if engine in selected]
+    config = {}
+    if 'hatchet' in selected:
+        token = body.get('hatchet_token')
+        if (not isinstance(token, str) or not 8 <= len(token.strip()) <= 4096
+                or any(ord(char) < 32 or ord(char) == 127 for char in token)):
+            raise InstallError('Enter the dedicated per-PC Hatchet worker token')
+        config['hatchet_token'] = token.strip()
+        config['hatchet_api_url'] = engine_url(body.get('hatchet_api_url'), 'Hatchet')
+        config['hatchet_worker_grpc_host_port'] = hatchet_grpc_host_port(body.get('hatchet_worker_grpc_host_port'))
+        tls = body.get('hatchet_worker_tls_strategy')
+        if tls not in ('none', 'tls', 'mtls'):
+            raise InstallError('Choose the Hatchet worker gRPC TLS strategy in Admin')
+        config['hatchet_worker_tls_strategy'] = tls
+    elif body.get('hatchet_token') not in (None, ''):
+        raise InstallError('A Hatchet token is only accepted when Hatchet is selected')
+    if 'prefect' in selected:
+        config['prefect_worker_api_url'] = engine_url(body.get('prefect_worker_api_url'), 'Prefect')
+    return {'id': name, 'os': body['os'], 'autostart': autostart, 'auto_restart': auto_restart, 'engines': [e for e in ENGINES if e in engines], 'native_engines': native_engines,
+            'native_config': {key: value for key, value in config.items() if key != 'hatchet_token'},
+            **({'hatchet_token': config['hatchet_token']} if 'hatchet_token' in config else {}),
+            'pools': [pool], 'tags': list(dict.fromkeys(tags)), 'slots': slots,
             'cpu_limit': percent(body.get('cpu_limit', 90), 'The CPU limit'), 'ram_limit': percent(body.get('ram_limit', 90), 'The RAM limit'),
             'server': server_address(body.get('server'))}
+
+
+def engine_url(value, name):
+    """An engine endpoint the registered PC can use, not a Docker-only coordinator hostname."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 2048:
+        raise InstallError(f'Configure a {name} API URL reachable from the registered PC in Admin')
+    value = value.strip()
+    parts = urlsplit(value)
+    if (parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password
+            or parts.query or parts.fragment):
+        raise InstallError(f'The {name} API URL must be an http:// or https:// address without credentials, a query or fragment')
+    hostname = parts.hostname.lower()
+    if hostname in ('host.docker.internal', 'hatchet-dashboard', 'prefect-server') or hostname.endswith(('.docker.internal', '.localhost')):
+        raise InstallError(f'The {name} API URL uses a coordinator-only hostname; configure an address reachable from the registered PC in Admin')
+    try:
+        parts.port
+    except ValueError:
+        raise InstallError(f'The {name} API URL has an invalid port') from None
+    return value.rstrip('/')
+
+
+def hatchet_grpc_host_port(value):
+    """Validate the worker-reachable Hatchet gRPC authority in the SDK's host:port format."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 512:
+        raise InstallError('Configure the Hatchet worker gRPC host and port in Admin')
+    value = value.strip()
+    parts = urlsplit('//' + value)
+    if (not parts.hostname or parts.username or parts.password or parts.query or parts.fragment or parts.path not in ('', '/')):
+        raise InstallError('Hatchet worker gRPC must be a host:port reachable from the PC')
+    try:
+        port = parts.port
+    except ValueError:
+        raise InstallError('Hatchet worker gRPC endpoint has an invalid port') from None
+    hostname = parts.hostname
+    if not port:
+        raise InstallError('Hatchet worker gRPC endpoint needs a port')
+    if hostname.lower() in ('host.docker.internal', 'hatchet-engine') or hostname.lower().endswith(('.docker.internal', '.localhost')):
+        raise InstallError('Hatchet worker gRPC endpoint uses a coordinator-only hostname; configure the worker-reachable endpoint in Admin')
+    return f'[{hostname}]:{port}' if ':' in hostname else f'{hostname}:{port}'
+def _remove_hatchet_secret(record):
+    record.pop('hatchet_token', None)
+
+
+def _expire(record):
+    timestamp = now()
+    if record.get('state') == 'pending' and record.get('expires_at', 0) <= timestamp:
+        record.update(state='expired', error=None)
+        _remove_hatchet_secret(record)
+        write_record(record)
+    elif record.get('state') == 'connecting' and timestamp - record.get('registered_at', timestamp) > VALID_SECONDS:
+        from .fleet_registry import unregister_worker
+        unregister_worker(relay_id=record['code'])
+        record.update(state='failed', error='The worker did not reach readiness before the install timeout')
+        _remove_hatchet_secret(record)
+        write_record(record)
+
+
 
 
 def token_env_for(name, taken=()):
@@ -132,9 +212,10 @@ def mark_unregistered(worker):
     if not isinstance(worker, dict): return False
     code = worker.get('uuid')
     record = read_record(code)
-    if record is None or record.get('id') != worker.get('id') or record.get('state') not in ('pending', 'registered'):
+    if record is None or record.get('id') != worker.get('id') or record.get('state') not in ('pending', 'connecting', 'registered'):
         return False
     record.update(state='unregistered', error=None, unregistered_at=now())
+    _remove_hatchet_secret(record)
     try:
         write_record(record)
     except OSError:
@@ -157,6 +238,7 @@ def all_records():
     for path in paths:
         try: record = json.loads(path.read_text(encoding='utf-8'))
         except (OSError, ValueError): continue
+        _expire(record)
         if now() - record.get('expires_at', 0) > KEEP_SECONDS and record.get('state') != 'pending': path.unlink(missing_ok=True); continue
         out.append(record)
     return out
@@ -170,6 +252,8 @@ def create(body, registered=()):
     form = validate_form(body, registered, pending_names())
     if binary_path(form['os']) is None:
         raise InstallError(f"This server has no worker program for {form['os']} yet. Build it (worker/ci/build.sh) or download the release into {binaries_dir()} (worker/ci/fetch-release.sh), then try again.")
+    if form['native_engines'] and native_runtime_path(form['os']) is None:
+        raise InstallError(f"This server has no native engine runtime for {form['os']} yet. Build or download native-runtime-{form['os']}.tar.gz with worker/ci/build-confluence-runtime.py and worker/ci/fetch-release.sh, then try again.")
     record = {'code': str(uuid.uuid4()), 'state': 'pending', 'created_at': now(), 'expires_at': now() + VALID_SECONDS, **form}
     write_record(record)
     return record
@@ -178,8 +262,13 @@ def create(body, registered=()):
 def cancel(code):
     record = read_record(code)
     if record is None: raise InstallError('Unknown install link')
-    if record['state'] == 'pending': record.update(state='cancelled', error=None); write_record(record)
+    if record['state'] == 'pending':
+        record.update(state='cancelled', error=None)
+        _remove_hatchet_secret(record)
+        write_record(record)
     return view(record)
+
+
 
 
 def commands(record, server=None):
@@ -233,10 +322,11 @@ def bundle_version():
     return _bundle['version']
 
 
-# --------------------------------------------------------------------------- the Rust worker binaries
+# --------------------------------------------------------------------------- the worker binaries and offline runtimes
 TARGETS = {'windows': 'agent-worker-x86_64-pc-windows-msvc.exe', 'linux': 'agent-worker-x86_64-unknown-linux-musl'}
 _binary_versions = {}
 RUNTIMES = {'windows': 'confluence-runtime-windows.tar.gz', 'linux': 'confluence-runtime-linux.tar.gz'}
+NATIVE_RUNTIMES = {'windows': 'native-runtime-windows.tar.gz', 'linux': 'native-runtime-linux.tar.gz'}
 
 
 def binaries_dir():
@@ -265,6 +355,23 @@ def runtime_version(os_name):
     if cached and cached[0] == stamp: return cached[1]
     version = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     _binary_versions[('runtime', os_name)] = (stamp, version)
+    return version
+
+
+def native_runtime_path(os_name):
+    name = NATIVE_RUNTIMES.get(os_name)
+    path = binaries_dir() / name if name else None
+    return path if path is not None and path.is_file() else None
+
+
+def native_runtime_version(os_name):
+    path = native_runtime_path(os_name)
+    if path is None: return None
+    stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+    cached = _binary_versions.get(('native-runtime', os_name))
+    if cached and cached[0] == stamp: return cached[1]
+    version = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    _binary_versions[('native-runtime', os_name)] = (stamp, version)
     return version
 
 
@@ -297,24 +404,35 @@ def set_env_value(key, value, path=None):
 
 
 def register(record, token, hostname=None):
-    """Store the PC's token and register it as a relayed worker. Raises InstallError for a refusal."""
+    """Store the relay token and register native-engine route metadata without engine credentials."""
     from .fleet_registry import AlreadyRegistered, _read, save_worker
     from .relay import worker_url
     if not isinstance(token, str) or len(token) < MIN_TOKEN or len(token) > 200 or not re.fullmatch(r'[A-Za-z0-9_-]+', token): raise InstallError('The PC sent an invalid token')
-    taken = {w.get('token_env') for w in _read() if w.get('token_env')}
-    env = token_env_for(record['id'], taken)
-    set_env_value(env, token)
     pc = record['code']  # the install's uuid is the worker's uuid and keys the relay
+    existing = next((w for w in _read() if w.get('id') == record['id']), None)
+    if existing and existing.get('uuid') != pc:
+        raise InstallError(f"Worker {record['id']} is already registered; edit it to add engines, pools or tags")
+    env = (existing or {}).get('token_env')
+    if not env:
+        taken = {w.get('token_env') for w in _read() if w.get('token_env')}
+        env = token_env_for(record['id'], taken)
+    set_env_value(env, token)
     try:
-        save_worker({'id': record['id'], 'uuid': pc, 'pools': record['pools'], 'tags': record['tags'], 'engines': record['engines'], 'slots': record['slots'],
-                     'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'url': worker_url(pc), 'token_env': env}, create=True)
+        save_worker({'id': record['id'], 'uuid': pc, 'pools': record['pools'], 'tags': record['tags'], 'engines': record['engines'],
+                     'native_engines': record.get('native_engines', []), 'native_config': record.get('native_config', {}),
+                     'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'],
+                     'url': worker_url(pc), 'token_env': env}, create=existing is None)
     except AlreadyRegistered as exc: raise InstallError(str(exc))
     return env
 
 
 # --------------------------------------------------------------------------- routes
 def json_error(status, message):
-    return web.json_response({'error': message}, status=status)
+    return web.json_response({'error': message}, status=status, headers={'Cache-Control': 'no-store'})
+
+
+def claim_response(body, status=200):
+    return web.json_response(body, status=status, headers={'Cache-Control': 'no-store'})
 
 
 async def usable(request, require_pending=True):
@@ -322,13 +440,15 @@ async def usable(request, require_pending=True):
     source = request.headers.get('X-Relay-Client') or request.remote or '?'  # the board proxy names the real peer
     count, since = FAILED_ATTEMPTS.get(source, (0, now()))
     if now() - since > 600: count, since = 0, now()
-    if count >= 10: raise web.HTTPTooManyRequests(text=json.dumps({'error': 'Too many wrong links'}), content_type='application/json')
+    if count >= 10: raise web.HTTPTooManyRequests(text=json.dumps({'error': 'Too many wrong links'}), content_type='application/json', headers={'Cache-Control': 'no-store'})
     record = read_record(request.match_info['code'])
+    if record is not None and hmac.compare_digest(record['code'], request.match_info['code']):
+        _expire(record)
     ok = record is not None and (not require_pending or (record['state'] == 'pending' and record['expires_at'] > now()))
-    if ok and hmac.compare_digest(record['code'], request.match_info['code']): return record
+    if ok: return record
     FAILED_ATTEMPTS[source] = (count + 1, since)
     await asyncio.sleep(WRONG_CODE_DELAY)
-    raise web.HTTPNotFound(text=json.dumps({'error': 'This install link is unknown, expired or already used. Create a new one in the Fleet tab.'}), content_type='application/json')
+    raise web.HTTPNotFound(text=json.dumps({'error': 'This install link is unknown, expired or already used. Create a new one in the Fleet tab.'}), content_type='application/json', headers={'Cache-Control': 'no-store'})
 
 
 def claim_hash(secret):
@@ -347,24 +467,32 @@ async def claim(request):
     taken = record.get('claim_hash')
     if taken and taken != claim_hash(secret):
         when = time.strftime('%Y-%m-%d %H:%M', time.localtime(record.get('claimed_at', 0)))
-        return web.json_response({'ok': False, 'error': f"This install command was already used by another PC ({record.get('claimed_host') or 'unknown host'}, {when}). Each command installs one PC: create a new link in the Fleet tab for this one."}, status=409)
+        return claim_response({'ok': False, 'error': f"This install command was already used by another PC ({record.get('claimed_host') or 'unknown host'}, {when}). Each command installs one PC: create a new link in the Fleet tab for this one."}, status=409)
     host_os = body.get('host_os')
     if host_os and host_os != record['os']:
-        return web.json_response({'ok': False, 'error': f"The form says this PC runs {record['os']} but it runs {host_os}. Create a new link for this PC in the Fleet tab and choose {host_os}."}, status=409)
+        return claim_response({'ok': False, 'error': f"The form says this PC runs {record['os']} but it runs {host_os}. Create a new link for this PC in the Fleet tab and choose {host_os}."}, status=409)
     from .fleet_registry import _read
     workers = _read()
-    uuid_clash = next((w.get('id') for w in workers if w.get('uuid') == record['code']), None)
-    if uuid_clash:
-        return web.json_response({'ok': False, 'error': f'This install is already registered as {uuid_clash}.'}, status=409)
-    name_clash = next((w.get('id') for w in workers if w.get('id') == record['id']), None)
-    if name_clash:
-        return web.json_response({'ok': False, 'error': f'The Fleet name {name_clash} is already registered. Unregister that worker in the Fleet tab before using this name, or create the install link with a different name.'}, status=409)
+    uuid_worker = next((w for w in workers if w.get('uuid') == record['code']), None)
+    if uuid_worker and (uuid_worker.get('id') != record['id'] or not taken or not hmac.compare_digest(taken, claim_hash(secret))):
+        return claim_response({'ok': False, 'error': f'This install is already registered as {uuid_worker.get("id")}.'}, status=409)
+    if not taken and uuid_worker:
+        return claim_response({'ok': False, 'error': 'This install is already registered by another claim.'}, status=409)
+    name_worker = next((w for w in workers if w.get('id') == record['id']), None)
+    if name_worker and name_worker.get('uuid') != record['code']:
+        return claim_response({'ok': False, 'error': f'The Fleet name {name_worker["id"]} is already registered. Unregister that worker in the Fleet tab before using this name, or create the install link with a different name.'}, status=409)
     if not taken:
         record.update(claim_hash=claim_hash(secret), claimed_host=host, claimed_at=now())
         write_record(record)
-    return web.json_response({'ok': True, 'uuid': record['code'], 'name': record['id'], 'os': record['os'], 'engines': record['engines'], 'pool': record['pools'][0],
-                              'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'], 'ram_limit': record['ram_limit'], 'autostart': record.get('autostart', 'logon'), 'auto_restart': record.get('auto_restart', True)})
-
+    settings = {'ok': True, 'uuid': record['code'], 'name': record['id'], 'os': record['os'], 'engines': record['engines'],
+                'native_engines': record.get('native_engines', []), 'native_config': record.get('native_config', {}),
+                'pool': record['pools'][0], 'tags': record['tags'], 'slots': record['slots'], 'cpu_limit': record['cpu_limit'],
+                'ram_limit': record['ram_limit'], 'autostart': record.get('autostart', 'logon'), 'auto_restart': record.get('auto_restart', True)}
+    if 'hatchet' in record.get('native_engines', []):
+        settings['hatchet_token'] = record['hatchet_token']
+    if record.get('native_engines'):
+        settings['native_runtime_version'] = native_runtime_version(record['os'])
+    return web.json_response(settings, headers={'Cache-Control': 'no-store'})
 
 async def agent_binary(request):
     record = await usable(request)
@@ -374,6 +502,18 @@ async def agent_binary(request):
     return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/octet-stream', headers={'Content-Disposition': f'attachment; filename="{path.name}"', 'X-Worker-Version': binary_version(record['os']) or '', 'Cache-Control': 'no-store'})
 
 
+async def native_runtime(request):
+    record = await usable(request)
+    if not record.get('native_engines'):
+        return json_error(409, 'This install has no native Hatchet or Prefect worker selected')
+    path = native_runtime_path(record['os'])
+    if path is None:
+        return json_error(404, f"This server has no native engine runtime for {record['os']}")
+    return web.Response(body=await asyncio.to_thread(path.read_bytes), content_type='application/gzip',
+                        headers={'Content-Disposition': f'attachment; filename="{path.name}"',
+                                 'X-Native-Runtime-Version': native_runtime_version(record['os']) or '', 'Cache-Control': 'no-store'})
+
+
 async def bundle(request):
     await usable(request)
     data = await asyncio.to_thread(build_bundle)
@@ -381,7 +521,9 @@ async def bundle(request):
 
 
 async def progress(request):
-    record = await usable(request)
+    record = await usable(request, require_pending=False)
+    if record.get('state') not in ('pending', 'connecting'):
+        return json_error(409, 'This install is no longer in progress')
     try: body = await request.json()
     except ValueError: return json_error(400, 'Invalid JSON')
     step, state = body.get('step') if isinstance(body, dict) else None, body.get('state') if isinstance(body, dict) else None
@@ -394,21 +536,71 @@ async def progress(request):
     return web.Response(status=204)
 
 
+def _claim_matches(record, body):
+    secret = body.get('claim') if isinstance(body, dict) else None
+    return bool(record.get('claim_hash') and isinstance(secret, str) and claim_hash(secret) == record['claim_hash'])
+
+
 async def complete(request):
-    record = await usable(request)
+    record = await usable(request, require_pending=False)
     try: body = await request.json()
     except ValueError: return json_error(400, 'Invalid JSON')
     if not isinstance(body, dict): return json_error(400, 'Invalid request')
-    secret = body.get('claim')
-    if not record.get('claim_hash') or not isinstance(secret, str) or claim_hash(secret) != record['claim_hash']:
+    if not _claim_matches(record, body):
         return json_error(409, 'This install link was claimed by a different PC, or not claimed yet; the registration is refused')
+    if record.get('state') not in ('pending', 'connecting'):
+        return json_error(409, 'This install is no longer eligible for registration')
     try: await asyncio.to_thread(register, record, body.get('token'), body.get('hostname'))
     except InstallError as exc:
         record.update(error=str(exc)); write_record(record)
         return json_error(409, str(exc))
-    record.update(state='registered', step='register', error=None, registered_at=now(), hostname=str(body.get('hostname') or '')[:100])
+    record.update(state='connecting', step='connect', error=None, registered_at=record.get('registered_at') or now(), hostname=str(body.get('hostname') or '')[:100])
     write_record(record)
-    return web.json_response({'ok': True, 'id': record['id']})
+    return web.json_response({'ok': True, 'id': record['id'], 'state': 'connecting'}, headers={'Cache-Control': 'no-store'})
+
+
+async def ready(request):
+    record = await usable(request, require_pending=False)
+    try: body = await request.json()
+    except ValueError: return json_error(400, 'Invalid JSON')
+    if not _claim_matches(record, body):
+        return json_error(409, 'This install link was claimed by a different PC; readiness is refused')
+    if record.get('state') == 'registered':
+        return web.json_response({'ok': True, 'state': 'registered'}, headers={'Cache-Control': 'no-store'})
+    if record.get('state') != 'connecting':
+        return json_error(409, 'This install has not registered a worker yet')
+    from .workers import catalog, registry
+    worker = next((item for item in registry() if item.get('uuid') == record['code']), None)
+    if worker is None:
+        return json_error(409, 'The worker registration is not available')
+    status = (await catalog([worker]))[0]
+    if not status.get('online'):
+        return json_error(409, 'The execution service is not connected')
+    native = status.get('_native_worker_status', {})
+    for engine in record.get('native_engines', []):
+        if not isinstance(native.get(engine), dict) or native[engine].get('state') != 'ready':
+            return json_error(409, f'The native {engine} worker is not connected and ready')
+    record.update(state='registered', step='ready', error=None, registered_at=record.get('registered_at') or now())
+    _remove_hatchet_secret(record)
+    write_record(record)
+    return web.json_response({'ok': True, 'state': 'registered'}, headers={'Cache-Control': 'no-store'})
+
+
+async def abort(request):
+    record = await usable(request, require_pending=False)
+    try: body = await request.json()
+    except ValueError: return json_error(400, 'Invalid JSON')
+    if not _claim_matches(record, body):
+        return json_error(409, 'This install link was claimed by a different PC; rollback is refused')
+    if record.get('state') not in ('connecting', 'pending', 'registered'):
+        return json_error(409, 'This install is no longer eligible for rollback')
+    from .fleet_registry import unregister_worker
+    await asyncio.to_thread(unregister_worker, relay_id=record['code'])
+    request.app['relay'].revoke_peer(record['code'])
+    record.update(state='failed', step=record.get('step') or 'engine', error='The worker did not reach readiness')
+    _remove_hatchet_secret(record)
+    write_record(record)
+    return web.json_response({'ok': True, 'state': 'failed'}, headers={'Cache-Control': 'no-store'})
 
 
 async def state(request):
@@ -422,7 +614,10 @@ async def state(request):
 def add_routes(app):
     app.router.add_post('/install/{code}/claim', claim)
     app.router.add_get('/install/{code}/agent-worker', agent_binary)
+    app.router.add_get('/install/{code}/native-runtime', native_runtime)
     app.router.add_get('/install/{code}/bundle.tgz', bundle)
     app.router.add_post('/install/{code}/progress', progress)
     app.router.add_post('/install/{code}/complete', complete)
+    app.router.add_post('/install/{code}/ready', ready)
+    app.router.add_post('/install/{code}/abort', abort)
     app.router.add_get('/install/{code}/state', state)
