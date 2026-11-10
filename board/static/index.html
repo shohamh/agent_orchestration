@@ -173,7 +173,7 @@
   @media (hover: none) { .card .backend-link { position: static; width: auto; height: auto; gap: 4px; margin-top: 6px; font-size: 12px; background: none; border: 0; opacity: 1; } }
   .card .meta .when { flex: none; white-space: nowrap; }
   .card .states { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-  .card.movable { cursor: grab; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+  .card.movable { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
   .card.moving { opacity: .6; }
   /* An agent is blocked until a person answers. */
   .card.needs-you { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
@@ -686,15 +686,147 @@ document.addEventListener("keydown", (e) => {
 const MOVE_LABELS = { reorder: "Change priority", restart: "Run again", start_now: "Start now", cancel: "Cancel run",
   stop: "Stop gracefully", mark_done: "Mark done", continue: "Continue" };
 let drag = null;              // the drag in progress
-let suppressClick = false;    // a drag ends with a click on the card; don't open it
 const movingIds = new Set();  // cards whose move request is in flight
+
+// One touch recognizer arbitrates a held card/lane press: before 280ms, movement is scrolling;
+// after that, movement on a movable card starts its drag; if still stationary at 500ms, show its menu.
+let touchPress = null;
+const TOUCH_DRAG_HOLD = 280, TOUCH_MENU_DELAY = 500, TOUCH_MOVE_THRESHOLD = 6;
+function panTouchScroll(node, dx, dy) {
+  if (!dx && !dy) return;
+  const horizontal = Math.abs(dx) > Math.abs(dy), delta = horizontal ? dx : dy;
+  const canScroll = (scroll) => {
+    const max = horizontal ? scroll.scrollWidth - scroll.clientWidth : scroll.scrollHeight - scroll.clientHeight;
+    const at = horizontal ? scroll.scrollLeft : scroll.scrollTop;
+    return max > 0 && (delta < 0 ? at < max : at > 0);
+  };
+  for (let scroll = node; scroll; scroll = scroll.parentElement) {
+    if (!canScroll(scroll)) continue;
+    if (horizontal) scroll.scrollLeft -= dx; else scroll.scrollTop -= dy;
+    return;
+  }
+  const page = document.scrollingElement;
+  if (page && canScroll(page)) page.scrollBy(horizontal ? -dx : 0, horizontal ? 0 : -dy);
+}
+
+function touchPressStart(event, card) {
+  if (touchPress || event.pointerType !== "touch" || event.button !== 0) return;
+  const node = card ? event.target.closest(".card[data-id]") : null;
+  const pending = { card, node, target: event.target, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY,
+    pointerId: event.pointerId, dragReady: false, started: false, menu: false, panning: false };
+  touchPress = pending;
+  let timer = null;
+  const clearTimer = () => { clearTimeout(timer); timer = null; };
+  const removeListeners = () => {
+    removeEventListener("pointermove", move); removeEventListener("pointerup", up); removeEventListener("pointercancel", up);
+    removeEventListener("keydown", key, true);
+  };
+  const cleanup = () => {
+    clearTimer(); removeListeners();
+    if (touchPress === pending) touchPress = null;
+  };
+  const suppressClickOnRelease = () => {
+    if (!pending.card) return;
+    const release = (event) => {
+      if (event.pointerId !== pending.pointerId) return;
+      removeEventListener("pointerup", release); removeEventListener("pointercancel", release);
+      if (event.type === "pointerup") {
+        if (pending.menu) { event.preventDefault(); event.stopPropagation(); }
+        const node = pending.node;
+        if (node) {
+          let expire;
+          const suppress = (click) => {
+            node.removeEventListener("click", suppress, true);
+            clearTimeout(expire);
+            click.preventDefault(); click.stopImmediatePropagation();
+          };
+          node.addEventListener("click", suppress, true);
+          expire = setTimeout(() => node.removeEventListener("click", suppress, true), 1000);
+        }
+      }
+    };
+    addEventListener("pointerup", release); addEventListener("pointercancel", release);
+  };
+  const openMenu = (menuEvent) => {
+    if (touchPress !== pending || pending.started || pending.menu) return;
+    clearTimer();
+    pending.menu = true;
+    suppressClickOnRelease();
+    cleanup();
+    const at = { target: menuEvent?.target || pending.target, clientX: menuEvent?.clientX ?? pending.x, clientY: menuEvent?.clientY ?? pending.y };
+    if (pending.card) cardMenu(at, pending.card); else laneMenu(at);
+  };
+  const startDrag = (e) => {
+    suppressClickOnRelease();
+    cleanup();
+    pending.started = true;
+    beginDrag(pending);
+    const dragMovePointer = (event) => {
+      if (event.pointerId !== pending.pointerId) return;
+      event.preventDefault(); dragMove(event.clientX, event.clientY);
+    };
+    const dragUp = (event) => {
+      if (event.pointerId !== pending.pointerId) return;
+      stopDragListeners(); dragEnd(event.type === "pointercancel");
+    };
+    const dragKey = (event) => {
+      if (event.key === "Escape") { stopDragListeners(); dragEnd(true); }
+    };
+    const stopDragListeners = () => {
+      removeEventListener("pointermove", dragMovePointer); removeEventListener("pointerup", dragUp); removeEventListener("pointercancel", dragUp);
+      removeEventListener("keydown", dragKey, true);
+    };
+    addEventListener("pointermove", dragMovePointer, { passive: false });
+    addEventListener("pointerup", dragUp); addEventListener("pointercancel", dragUp); addEventListener("keydown", dragKey, true);
+    dragMove(e.clientX, e.clientY);
+  };
+  const move = (e) => {
+    if (e.pointerId !== pending.pointerId) return;
+    const distance = Math.hypot(e.clientX - pending.x, e.clientY - pending.y);
+    if (pending.menu) { e.preventDefault(); return; }
+    if (pending.panning) {
+      e.preventDefault();
+      panTouchScroll(pending.node || pending.target, e.clientX - pending.lastX, e.clientY - pending.lastY);
+      pending.lastX = e.clientX; pending.lastY = e.clientY;
+      return;
+    }
+    if (distance < TOUCH_MOVE_THRESHOLD) return;
+    if (!pending.dragReady) {
+      if (pending.card && Object.keys(pending.card.moves || {}).length) {
+        clearTimer(); pending.panning = true; suppressClickOnRelease(); e.preventDefault();
+        panTouchScroll(pending.node, e.clientX - pending.x, e.clientY - pending.y);
+        pending.lastX = e.clientX; pending.lastY = e.clientY;
+      } else { suppressClickOnRelease(); cleanup(); }
+      return;
+    }
+    if (pending.card && Object.keys(pending.card.moves || {}).length) startDrag(e);
+    else { suppressClickOnRelease(); cleanup(); }
+  };
+  const up = (e) => { if (e.pointerId === pending.pointerId) cleanup(); };
+  const key = (e) => { if (e.key === "Escape") { suppressClickOnRelease(); cleanup(); } };
+  addEventListener("pointermove", move, { passive: false });
+  addEventListener("pointerup", up); addEventListener("pointercancel", up); addEventListener("keydown", key, true);
+  timer = setTimeout(() => {
+    if (touchPress !== pending) return;
+    pending.dragReady = true;
+    timer = setTimeout(() => openMenu(), TOUCH_MENU_DELAY - TOUCH_DRAG_HOLD);
+  }, TOUCH_DRAG_HOLD);
+}
+
+// Movable cards use manual scrolling before the hold so a held vertical gesture can drag.
+$("columns").addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "touch" || event.button !== 0 || event.target.closest("a, button, input, textarea, select")) return;
+  const node = event.target.closest(".card[data-id]");
+  if (node) {
+    const card = cardById(node.dataset.id);
+    if (card) touchPressStart(event, card);
+  } else touchPressStart(event, null);
+});
 
 function dragStart(event, card) {
   if (event.button !== 0 || event.target.closest("a, button, input, textarea, select")) return;
-  const node = event.currentTarget, touch = event.pointerType === "touch";
-  const pending = { card, node, x: event.clientX, y: event.clientY, pointerId: event.pointerId, started: false };
-  // Touch: hold briefly to drag, so swiping still scrolls the board. Mouse/pen: move a few pixels.
-  const timer = touch ? setTimeout(() => begin(), 280) : null;
+  if (event.pointerType === "touch") { touchPressStart(event, card); return; }
+  const node = event.currentTarget, pending = { card, node, x: event.clientX, y: event.clientY, pointerId: event.pointerId, started: false };
   const begin = () => {
     if (pending.started) return;
     pending.started = true;
@@ -704,7 +836,6 @@ function dragStart(event, card) {
     if (e.pointerId !== pending.pointerId) return;
     if (!pending.started) {
       if (Math.hypot(e.clientX - pending.x, e.clientY - pending.y) < 6) return;
-      if (touch) { cleanup(); return; } // moved before the hold: it's a scroll
       begin();
     }
     e.preventDefault();
@@ -713,7 +844,6 @@ function dragStart(event, card) {
   const up = (e) => { if (e.pointerId !== pending.pointerId) return; cleanup(); if (pending.started) dragEnd(e.type === "pointercancel"); };
   const key = (e) => { if (e.key === "Escape" && pending.started) { cleanup(); dragEnd(true); } };
   const cleanup = () => {
-    clearTimeout(timer);
     removeEventListener("pointermove", move); removeEventListener("pointerup", up); removeEventListener("pointercancel", up);
     removeEventListener("keydown", key);
   };
@@ -927,7 +1057,7 @@ function renderCard(card, when) {
   const who = [name, where, q].filter(Boolean).join(" · ");
   return el("div", { class: `card${movable ? " movable" : ""}${movingIds.has(card.id) ? " moving" : ""}${needsYou(card) ? " needs-you" : ""}`, tabindex: "0", role: "button", "data-id": card.id,
       "aria-roledescription": movable ? "draggable card" : "card",
-      onclick: (e) => { if (!suppressClick) openCard(card.id); }, onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
+      onclick: () => openCard(card.id), onkeydown: (e) => { if (e.key === "Enter") openCard(card.id); },
       onpointerdown: movable ? (e) => dragStart(e, card) : null },
     el("div", { class: "title" }, card.title, priority ? " " : null, priority),
     chip ? el("div", { class: "states" }, chip) : null,
@@ -1002,7 +1132,16 @@ function laneMenu(event) {
     { label: "Clear filter", disabled: !query, onSelect: () => setFilter("") }]);
 }
 $("columns").addEventListener("contextmenu", (e) => {
-  if (e.pointerType === "touch" || e.target.closest("a, input, textarea, select")) return;
+  const interactive = e.target.closest("a, button, input, textarea, select");
+  if (e.pointerType === "touch" || (touchPress && !touchPress.started)) {
+    if (interactive) return;
+    e.preventDefault();
+    const pending = touchPress;
+    if (pending && !pending.started && !pending.menu
+      && (pending.node ? pending.node.contains(e.target) : e.target.closest("#columns"))) pending.openMenu(e);
+    return;
+  }
+  if (interactive) return;
   e.preventDefault();
   if (drag) return;
   const node = e.target.closest(".card[data-id]"), card = node && cardById(node.dataset.id);

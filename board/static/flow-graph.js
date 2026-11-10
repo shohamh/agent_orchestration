@@ -107,6 +107,9 @@
 
     let model = null, drawn = null, vp = { x: 0, y: 0, k: 1 }, gesture = null, touched = false;
     const pointers = new Map();
+    let touchLongPress = null;
+    const TOUCH_MENU_DELAY = 500, TOUCH_MOVE_THRESHOLD = 5;
+
 
     function glyph(d) {
       return s('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' }, s('path', { d }));
@@ -237,6 +240,22 @@
       return step ? { type: 'node', id: step.dataset.step } : edge ? { type: 'edge', from: edge.dataset.from, to: edge.dataset.to } : { type: 'canvas' };
     }
     const dropTarget = (e) => doc.elementFromPoint(e.clientX, e.clientY)?.closest?.('[data-step]')?.dataset.step;
+    function clearTouchLongPress(press = touchLongPress) {
+      if (!press) return;
+      clearTimeout(press.timer);
+      root.removeEventListener('keydown', press.key, true);
+      if (touchLongPress === press) touchLongPress = null;
+    }
+    function showTouchMenu(press) {
+      if (touchLongPress !== press || press.opened) return;
+      clearTimeout(press.timer);
+      press.opened = true;
+      gesture = null;
+      clearPreview();
+      const menuEvent = { target: press.target, clientX: press.clientX, clientY: press.clientY };
+      on.menu(menuEvent, targetOf(press.target), toGraph(press.point));
+    }
+
     function clearPreview() {
       svgEl.querySelector('.fg-preview')?.setAttribute('d', '');
       svgEl.classList.remove('connecting');
@@ -249,6 +268,7 @@
       try { svgEl.setPointerCapture(e.pointerId); } catch {}
       pointers.set(e.pointerId, local(e));
       if (pointers.size === 2) {
+        clearTouchLongPress();
         const [a, b] = [...pointers.values()];
         gesture = { mode: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, vp: { ...vp } };
         clearPreview(); return;
@@ -267,11 +287,30 @@
         gesture = { mode: 'pan', start, vp: { ...vp }, target, moved: false };
         if (target.type === 'canvas') { e.preventDefault(); svgEl.focus({ preventScroll: true }); }
       }
+      if (e.pointerType === 'touch' && pointers.size === 1 && on.menu && root.Overlays) {
+        const press = { pointerId: e.pointerId, target: e.target, point: start, clientX: e.clientX, clientY: e.clientY,
+          opened: false, timer: null, key: null };
+        touchLongPress = press;
+        press.key = (event) => {
+          if (event.key !== 'Escape' || touchLongPress !== press) return;
+          clearTouchLongPress(press);
+          gesture = null; pointers.clear(); clearPreview();
+        };
+        root.addEventListener('keydown', press.key, true);
+        press.timer = setTimeout(() => {
+          if (touchLongPress === press && pointers.has(press.pointerId)) showTouchMenu(press);
+        }, TOUCH_MENU_DELAY);
+      }
     });
     svgEl.addEventListener('pointermove', (e) => {
-      if (!pointers.has(e.pointerId) || !gesture) return;
+      if (!pointers.has(e.pointerId)) return;
       const pt = local(e);
       pointers.set(e.pointerId, pt);
+      if (touchLongPress?.pointerId === e.pointerId && !touchLongPress.opened
+        && Math.hypot(e.clientX - touchLongPress.clientX, e.clientY - touchLongPress.clientY) >= TOUCH_MOVE_THRESHOLD) {
+        clearTouchLongPress();
+      }
+      if (!gesture) return;
       if (gesture.mode === 'pinch') {
         if (pointers.size < 2) return;
         touched = true;
@@ -300,6 +339,7 @@
     function endGesture(e) {
       if (!pointers.has(e.pointerId)) return;
       pointers.delete(e.pointerId);
+      if (touchLongPress?.pointerId === e.pointerId) clearTouchLongPress();
       const g = gesture;
       if (!g) return;
       if (g.mode === 'pinch') { if (!pointers.size) { gesture = null; redraw(); } return; }
@@ -342,7 +382,12 @@
     });
     // ---- right click and double click: the context decides what's on offer
     svgEl.addEventListener('contextmenu', (e) => {
-      if (!model || !on.menu || !root.Overlays || e.pointerType === 'touch') return;
+      if (!model || !on.menu || !root.Overlays) return;
+      if (e.pointerType === 'touch' || touchLongPress) {
+        e.preventDefault();
+        if (touchLongPress && !touchLongPress.opened) showTouchMenu(touchLongPress);
+        return;
+      }
       e.preventDefault();
       on.menu(e, targetOf(e.target), toGraph(local(e)));
     });

@@ -807,6 +807,21 @@ test('phone: full screen, step list and form editing without sideways scrolling,
   const handle = await evaluate(`(() => { const b = document.querySelector('[data-handle="agent_1"] .hit').getBoundingClientRect(); return Math.min(b.width, b.height); })()`);
   assert.ok(handle >= 44, `connector handle is a 44px target (${handle})`);
   await shot('phone-graph');
+  const stepTouch = await centre('[data-step="phone_step"] .box');
+  await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [stepTouch] });
+  await waitFor('document.querySelector(".ctx-menu")', 'the graph long-press menu');
+  assert.deepEqual(await evaluate('[...document.querySelectorAll(".ctx-item span")].map(n => n.textContent)'),
+    ['Edit step', 'Add agent step after', 'Add program step after', 'Duplicate', 'Copy step ID', 'Delete step']);
+  await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await press('Escape');
+  await waitFor('!document.querySelector(".ctx-menu")', 'Escape closes the graph menu');
+  const movedCanvas = await evaluate(`(() => { const b = document.querySelector('.fg-svg').getBoundingClientRect(); return { x: b.right - 20, y: b.bottom - 20 }; })()`);
+  await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [movedCanvas] });
+  await call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: movedCanvas.x + 12, y: movedCanvas.y }] });
+  await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(550);
+  assert.equal(await evaluate('document.querySelector(".ctx-menu")'), null, 'movement cancels the graph long press');
+
   const tap = async (at) => { await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] }); await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }); await sleep(50); };
   const before = await evaluate(q('.fg-viewport') + '.getAttribute("transform")');
   const canvas = await evaluate(`(() => { const b = document.querySelector('.fg-svg').getBoundingClientRect(); return { x: b.left + 12, y: b.bottom - 12 }; })()`);

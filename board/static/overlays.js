@@ -6,7 +6,7 @@
  *   .fg-help, .fb-info, .fl-info      help icons: a click (or Enter) also keeps their text open until you click away
  *
  * A modal dialog makes everything outside it inert, so each overlay is placed inside the dialog
- * its anchor belongs to. Touch has no hover, and a long press stays with the browser and the board.
+ * its anchor belongs to. Touch has no hover; a stationary long press uses the same context menu as right-click.
  */
 (function (root) {
   'use strict';

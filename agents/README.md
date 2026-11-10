@@ -16,8 +16,14 @@ To resume a session after a restart, copy its ACP session ID from the chat and s
 creating a session with the same agent and workspace. Loading depends on agent support; if it
 is unavailable, a transport retry reconstructs recent conversation context instead.
 
-## Start the local workers (Windows / PowerShell)
+## Start the session worker
+For Docker Compose deployments where Hatchet cards run on a Fleet PC, start the session worker inside the Docker network:
+```powershell
+docker compose --profile hatchet up -d agent-session-worker-hatchet
+```
+The container loads `hatchet/.env` and shares the Docker network with `flow-host`. The Windows host command below is for direct execution; it cannot reach a `flow-host`-only relay URL.
 
+### Direct host execution (Windows / PowerShell)
 From the repository root:
 
 ```powershell

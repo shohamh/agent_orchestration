@@ -92,7 +92,6 @@ services:
     environment:
       <<: *flow-env
       HATCHET_CLIENT_TOKEN: ${HATCHET_WORKER_CLIENT_TOKEN:-}
-
   agent-session-worker-prefect:
     <<: *flow-worker
     profiles: ["prefect"]

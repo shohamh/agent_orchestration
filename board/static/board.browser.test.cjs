@@ -43,13 +43,16 @@ const session = (id, worker) => ({ id, title: id, task: 'agent-session', agent: 
 const LINKS = [session('on-live', 'pc-on'), session('on-dead', 'pc-off'), session('on-lost', 'pc-unregistered'),
   { id: 'run-dead', title: 'run-dead', task: 'x', agent: 'pi', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'main', id: 'pc-off', state: 'running' }] },
   { id: 'run-ok', title: 'run-ok', task: 'x', agent: 'pi', column: 'running', status: 'RUNNING', created_at: ago(900), started_at: ago(800), workers: [{ step: 'old', id: 'pc-off', state: 'done' }, { step: 'main', id: 'pc-on', state: 'running' }] }];
-const BOARDS = { research: LONG, empty: [], planned: [], many: MANY, flowrun: FLOW_RUN, kinds: KINDS, links: LINKS };
+const TOUCH_DRAG = [{ id: 'touch-drag', title: 'Touch drag', task: 'agent-session', agent: 'codex', session_state: 'question',
+  column: 'queued', status: 'QUEUED', created_at: ago(900), started_at: ago(800), moves: { running: 'continue' } }];
+const BOARDS = { research: LONG, empty: [], planned: [], many: MANY, flowrun: FLOW_RUN, kinds: KINDS, links: LINKS, touch: TOUCH_DRAG };
 const SCHEDULES = {
   planned: [{ id: 'later1', system: 'hatchet', board: 'planned', title: 'Later program', enabled: true, cron: null, next_at: '2026-11-09T09:00:00Z', overlap: 'skip' }],
   flowrun: [{ id: 'later2', system: 'hatchet', board: 'flowrun', title: 'Next flow run', enabled: true, cron: '0 9 * * *', next_at: '2026-11-09T09:00:00Z', summary: 'Every day at 09:00', overlap: 'skip' }],
 };
 
 let holdSnapshot = false, workersDown = false, devRevision = 'v1';
+const moveRequests = [];
 const WORKERS = [{ id: 'pc-on', pools: ['build'], tags: [], online: true }, { id: 'pc-off', pools: ['build'], tags: [], online: false }];
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://localhost');
@@ -58,6 +61,17 @@ const server = http.createServer((request, response) => {
   if (url.pathname === '/dev-reload-test') {
     response.writeHead(200, { 'Content-Type': 'text/html' });
     response.end(`<script>sessionStorage.setItem('dev-reloads', String(Number(sessionStorage.getItem('dev-reloads') || 0) + 1))</script><script src="/static/dev-reload.js"></script>`);
+    return;
+  }
+  const move = url.pathname.match(/^\/api\/cards\/([^/]+)\/([^/]+)\/move$/);
+  if (move && request.method === 'POST') {
+    let raw = '';
+    request.on('data', (chunk) => { raw += chunk; });
+    request.on('end', () => {
+      const id = decodeURIComponent(move[2]);
+      moveRequests.push({ path: url.pathname, body: JSON.parse(raw) });
+      json({ id });
+    });
     return;
   }
   if (url.pathname === '/api/systems') return json({ systems: ['hatchet'], columns: COLUMNS });
@@ -101,7 +115,7 @@ async function waitFor(expression, label = expression) {
 async function openBoard(name) {
   await call('Page.navigate', { url: base });
   await waitFor('document.readyState === "complete"');
-  await evaluate(`localStorage.setItem('boards', '["research","empty","planned","many","flowrun","kinds","links"]'); localStorage.setItem('board', '"${name}"'); localStorage.removeItem('hideFinished')`);
+  await evaluate(`localStorage.setItem('boards', '["research","empty","planned","many","flowrun","kinds","links","touch"]'); localStorage.setItem('board', '"${name}"'); localStorage.removeItem('hideFinished')`);
   await call('Page.navigate', { url: base });
   await waitFor('document.querySelectorAll("#columns .column").length === 6', 'the lanes');
   if (!holdSnapshot) await waitFor('loadedContext === contextKey()', 'the first card snapshot');
@@ -330,6 +344,103 @@ const cardlessText = (selector) => evaluate(`document.querySelector(${JSON.strin
 const menuLabels = () => evaluate(`[...document.querySelectorAll('.ctx-item span')].map((n) => n.textContent)`);
 const choose = (label) => evaluate(`[...document.querySelectorAll('.ctx-item')].find((n) => n.textContent.startsWith(${JSON.stringify(label)})).click()`);
 const key = async (name, code = name) => { await call('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code, windowsVirtualKeyCode: { Escape: 27, ArrowDown: 40, Enter: 13 }[name] }); await call('Input.dispatchKeyEvent', { type: 'keyUp', key: name, code }); };
+const phone = async () => {
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+};
+const desktop = async () => {
+  await call('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+};
+const touch = (type, at) => call('Input.dispatchTouchEvent', {
+  type, touchPoints: type === 'touchEnd' || type === 'touchCancel' ? [] : [{ ...at, id: 1 }],
+});
+const touchPoint = (selector) => evaluate(`(() => {
+  const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+})()`);
+
+test('phone long-press opens card and lane menus at the touch point; movement and cancellation suppress them', async () => {
+  await openBoard('research');
+  await waitFor(`document.querySelector('.card[data-id="q1"]')`);
+  await phone();
+  try {
+    const at = await touchPoint('.card[data-id="q1"]');
+    await touch('touchStart', at);
+    await waitFor(`document.querySelector('.ctx-menu')`, 'the card long-press menu');
+    assert.deepEqual(await menuLabels(), ['Open', 'Move to top', 'Move to bottom', 'Cancel run', 'Only codex cards', 'Copy title', 'Copy run ID']);
+    const position = await evaluate(`(() => { const r = document.querySelector('.ctx-menu').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; })()`);
+    assert.ok(position.left <= at.x && at.x <= position.right && position.top <= at.y && at.y <= position.bottom,
+      'the menu is anchored at the touch point, with viewport-edge placement allowed');
+    await touch('touchEnd', at);
+    await key('Escape');
+    await waitFor(`!document.querySelector('.ctx-menu')`, 'Escape closes the card menu');
+
+    const laneAt = await touchPoint('[data-col="scheduled"] h2');
+    await touch('touchStart', laneAt);
+    await waitFor(`document.querySelector('.ctx-menu')`, 'the lane long-press menu');
+    assert.deepEqual(await menuLabels(), ['New card', 'Hide done / failed', 'Clear filter']);
+    await touch('touchEnd', laneAt);
+    await key('Escape');
+    await waitFor(`!document.querySelector('.ctx-menu')`);
+
+    await evaluate('window.scrollTo(0, 0)');
+    const moved = { x: at.x, y: at.y - 18 };
+    await touch('touchStart', at);
+    await touch('touchMove', moved);
+    await touch('touchEnd', moved);
+    assert.equal(await evaluate(`document.getElementById('drawer').classList.contains('open')`), false, 'movement resolves to scrolling, not a card click');
+    assert.ok(await evaluate('window.scrollY > 0'), 'a pre-hold vertical move scrolls the mobile board');
+    await sleep(550);
+    assert.equal(await evaluate(`document.querySelector('.ctx-menu')`), null, 'movement before the threshold cancels the menu');
+
+    await touch('touchStart', at);
+    await touch('touchEnd', at);
+    await sleep(550);
+    assert.equal(await evaluate(`document.querySelector('.ctx-menu')`), null, 'pointerup clears the long-press timer');
+
+    await touch('touchStart', at);
+    await key('Escape');
+    await touch('touchEnd', at);
+    assert.equal(await evaluate(`document.getElementById('drawer').classList.contains('open')`), false, 'Escape prevents the pending press from opening the card');
+    await sleep(550);
+    assert.equal(await evaluate(`document.querySelector('.ctx-menu')`), null, 'Escape clears the long-press timer');
+
+    await touch('touchStart', at);
+    await touch('touchCancel', at);
+    await sleep(550);
+    assert.equal(await evaluate(`document.querySelector('.ctx-menu')`), null, 'pointercancel clears the long-press timer');
+  } finally {
+    await desktop();
+  }
+});
+
+test('phone can drag a card and submit the existing move request', async () => {
+  await openBoard('touch');
+  await waitFor(`document.querySelector('.card[data-id="touch-drag"]')`);
+  await phone();
+  moveRequests.length = 0;
+  try {
+    const points = await evaluate(`(() => {
+      const a = document.querySelector('.card[data-id="touch-drag"]').getBoundingClientRect();
+      const b = document.querySelector('[data-col="running"]').getBoundingClientRect();
+      return { from: { x: a.left + a.width / 2, y: a.top + a.height / 2 },
+        to: { x: b.left + b.width / 2, y: b.top + b.height / 2 } };
+    })()`);
+    await touch('touchStart', points.from);
+    await sleep(320);
+    await touch('touchMove', points.to);
+    await waitFor(`document.body.classList.contains('dragging')`, 'the card drag');
+    await touch('touchEnd', points.to);
+    for (let i = 0; i < 120 && !moveRequests.length; i++) await sleep(25);
+    assert.deepEqual(moveRequests, [{
+      path: '/api/cards/hatchet/touch-drag/move',
+      body: { board: 'touch', to: 'running', above: null, below: null },
+    }], 'the touch drop uses the existing move API path');
+  } finally {
+    await desktop();
+  }
+});
 
 test('right click on a card offers what the engine allows, and a lane offers board actions', async () => {
   await openBoard('research');
@@ -353,6 +464,7 @@ test('right click on a card offers what the engine allows, and a lane offers boa
   await key('Escape');
   await waitFor(`!document.querySelector('.ctx-menu')`);
 });
+
 
 test('hovering a card shows its details; a title shows as a quick tooltip', async () => {
   await openBoard('research');
