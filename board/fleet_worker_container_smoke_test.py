@@ -94,6 +94,7 @@ def print_container_diagnostics(container, install_code):
     except (OSError, subprocess.TimeoutExpired):
         return
     text = result.stdout + "\n" + result.stderr
+    component_sections = []
     with tempfile.TemporaryDirectory() as directory:
         for component in ("hatchet", "prefect"):
             path = os.path.join(directory, f"component-{component}.log")
@@ -106,7 +107,8 @@ def print_container_diagnostics(container, install_code):
                 continue
             if logs.returncode == 0:
                 with open(path, encoding="utf-8", errors="replace") as handle:
-                    text += f"\n--- {component} component ---\n{handle.read()}"
+                    component_sections.append(f"\n--- {component} component ---\n" + "\n".join(handle.read().splitlines()[-60:]))
+    text += "".join(component_sections)
     if install_code:
         text = text.replace(install_code, "[redacted install code]")
     text = re.sub(
@@ -117,12 +119,23 @@ def print_container_diagnostics(container, install_code):
         r"(?i)(\b(?:[A-Z_]*TOKEN|token)\s*[=:]\s*)[^\s,;]+",
         r"\1[redacted]", text,
     )
-    lines = [line for line in text.splitlines()
-             if "==>" in line or any(word in line.lower() for word in
-                                     ("error", "failed", "refused", "could not", "did not start",
-                                      "connect", "unreachable", "unauthorized", "permission"))]
+    lines = text.splitlines()
+    component_lines = []
+    in_component = False
+    filtered = []
+    for line in lines:
+        if line.startswith("--- ") and line.endswith(" component ---"):
+            in_component = True
+            component_lines.append(line)
+        elif in_component:
+            component_lines.append(line)
+        elif "==>" in line or any(word in line.lower() for word in
+                                  ("error", "failed", "refused", "could not", "did not start",
+                                   "connect", "unreachable", "unauthorized", "permission")):
+            filtered.append(line)
+    lines = filtered[-40:] + component_lines[-120:]
     if lines:
-        print("Worker container diagnostics:\n" + "\n".join(lines[-80:]), file=sys.stderr)
+        print("Worker container diagnostics:\n" + "\n".join(lines), file=sys.stderr)
 
 async def api(session, base, method, path, body=None):
     async with session.request(method, base + path, json=body) as response:
@@ -317,15 +330,19 @@ async def run(args):
             run_id = launched.get("id")
             if not run_id:
                 raise HarnessError("the engine did not return a flow run id")
-            dag = await wait_flow_done(session, base, args.engine, run_id, flow_name)
-            await wait_card_done(session, base, args.engine, flow_name, run_id)
-            node = next((item for item in dag.get("nodes", []) if item.get("step") == "mark_container"), None)
-            actual_worker = ((node or {}).get("execution") or {}).get("worker") or {}
-            if actual_worker.get("id") != worker_id:
-                raise HarnessError("DAG execution metadata did not report the installed worker id")
-            actual_marker = await docker_async("exec", container, "cat", marker_path)
-            if actual_marker != marker:
-                raise HarnessError("the UUID-specific marker was not found in the worker container")
+            try:
+                dag = await wait_flow_done(session, base, args.engine, run_id, flow_name)
+                await wait_card_done(session, base, args.engine, flow_name, run_id)
+                node = next((item for item in dag.get("nodes", []) if item.get("step") == "mark_container"), None)
+                actual_worker = ((node or {}).get("execution") or {}).get("worker") or {}
+                if actual_worker.get("id") != worker_id:
+                    raise HarnessError("DAG execution metadata did not report the installed worker id")
+                actual_marker = await docker_async("exec", container, "cat", marker_path)
+                if actual_marker != marker:
+                    raise HarnessError("the UUID-specific marker was not found in the worker container")
+            except HarnessError:
+                print_container_diagnostics(container, install_code)
+                raise
             print(json.dumps({"engine": args.engine, "worker_id": worker_id, "run_id": run_id,
                               "container_execution": "verified"}), flush=True)
         finally:

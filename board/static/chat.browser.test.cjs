@@ -200,6 +200,7 @@ test('chat supports approvals, typed answers, live-update preservation, paging, 
     assert.deepEqual(posts.at(-1), { url: '/api/cards/hatchet/run1/input', body: { type: 'approval', id: 'permission', optionId: 'allow-123' } });
     await evaluate(`document.querySelector('[aria-label="Other"]').value = 'invalid'; document.querySelector('[aria-label="Other"]').dispatchEvent(new Event('input')); document.querySelector('.question-card').requestSubmit()`);
     await waitFor('document.querySelector(".transcript-error")');
+    await waitFor('document.querySelector(".question-card button")?.disabled === false');
     assert.equal(await evaluate('document.querySelector(".question-card button")?.disabled === false'), true, 'a transport acknowledgement must not prevent correcting an answer rejected by the driver');
     assert.equal(await evaluate('document.querySelector(".question-card .request-resolution") !== null'), false);
     await evaluate(`document.querySelector('[aria-label="Other"]').value = 'ok'; document.querySelector('[aria-label="Other"]').dispatchEvent(new Event('input')); document.querySelector('.question-card').requestSubmit()`);
