@@ -388,9 +388,10 @@ class StartLinearizationTests(FleetFixture):
 
     async def test_cancel_marker_recorded_before_the_start_is_never_confirmed(self):
         from flowkit.distributed import execute_step, mark_cancelled
+        from flowkit.worker_service import capacity_call
         app, server, entered, proceed = await self.held_start_service('pc-a')
         self.write_registry([('pc-a', server.make_url(''))])
-        self.assertTrue(app['capacity'].try_acquire('blocker')['acquired'])  # keep the job queued
+        self.assertTrue((await capacity_call(app['capacity'].try_acquire, 'blocker'))['acquired'])  # keep the job queued
         task = asyncio.create_task(execute_step(parse(self.FLOW), 'go', {'input': {}, 'steps': {}}, 'early-run', self.receive, self.sink))
         try:
             await until(lambda: any(getattr(j, 'waiting_reason', None) == 'full_slots' for j in app['jobs'].values()), message='queued job')
