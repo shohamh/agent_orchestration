@@ -89,6 +89,9 @@ async def api(session, base, method, path, body=None):
         except (aiohttp.ContentTypeError, json.JSONDecodeError):
             payload = {}
         if response.status >= 400:
+            detail = payload.get("error")
+            if path == "/api/fleet/installs" and isinstance(detail, str) and detail:
+                raise HarnessError(f"Board API returned HTTP {response.status}: {detail[:400]}")
             raise HarnessError(f"Board API returned HTTP {response.status}")
         return payload
 
