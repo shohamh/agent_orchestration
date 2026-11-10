@@ -32,9 +32,15 @@ def runtime_paths() -> Path:
     root = Path(value)
     if not (root / 'python').is_dir() or not (root / 'packages').is_dir() or not (root / 'agents').is_dir():
         raise RuntimeError('The bundled native engine runtime is incomplete')
-    for path in (root / 'packages', root / 'agents'):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
+    paths = [root / 'packages', root / 'agents']
+    for path in paths:
+        value = str(path)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+    inherited = os.environ.get('PYTHONPATH', '')
+    import_paths = [str(path) for path in paths]
+    import_paths.extend(path for path in inherited.split(os.pathsep) if path and path not in import_paths)
+    os.environ['PYTHONPATH'] = os.pathsep.join(import_paths)
     return root
 
 

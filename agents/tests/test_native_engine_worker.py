@@ -1,6 +1,7 @@
 """Offline contracts for the per-PC native engine dispatcher."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -80,6 +81,32 @@ class NativeDispatchPollerTests(unittest.TestCase):
             status = json.loads((Path(directory) / 'runtime/native-engines/hatchet.json').read_text())
         self.assertNotIn('token', status)
         self.assertNotIn(token, json.dumps(status))
+
+    def test_native_runtime_packages_are_importable_in_child_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            packages = runtime / 'packages'
+            prefect = packages / 'prefect'
+            (runtime / 'python').mkdir()
+            (runtime / 'agents').mkdir()
+            prefect.mkdir(parents=True)
+            (prefect / '__init__.py').write_text("RUNTIME_SENTINEL = 'bundled'\n", encoding='utf-8')
+            package_path = str(packages)
+            agent_path = str(runtime / 'agents')
+            with patch.dict(os.environ, {'AGENT_WORKER_NATIVE_RUNTIME': directory, 'PYTHONPATH': ''}):
+                try:
+                    native.runtime_paths()
+                    child = subprocess.run(
+                        [sys.executable, '-c', 'import prefect; print(prefect.RUNTIME_SENTINEL)'],
+                        env=os.environ.copy(), capture_output=True, text=True, check=False,
+                    )
+                finally:
+                    for path in (package_path, agent_path):
+                        while path in sys.path:
+                            sys.path.remove(path)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual(child.stdout.strip(), 'bundled')
+
 
     def test_installed_entrypoint_selects_the_configured_engine(self):
         with patch.dict(os.environ, {'AGENT_WORKER_NATIVE_ENGINE': 'hatchet'}), \
