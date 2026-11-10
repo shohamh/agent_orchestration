@@ -949,7 +949,8 @@ async def fleet_install_create(request: web.Request) -> web.Response:
         raise ValueError('unknown install fields: ' + ', '.join(sorted(unknown)))
     import engine_admin
     import hatchet_tokens
-    engines = body.get('engines', [])
+    credential = None
+    issuer = None
     hatchet_config = None
     if 'hatchet' in engines:
         hatchet_config = engine_admin.config_for('hatchet')
