@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 AGENTS = Path(__file__).resolve().parents[1]
@@ -12,7 +13,43 @@ sys.path.insert(0, str(AGENTS))
 import native_engine_worker as native
 
 
+class FleetMetadataProjectionTests(unittest.TestCase):
+    def test_hatchet_labels_and_prefect_tags_track_fleet_sets_and_clear_removed_values(self):
+        metadata = {'revision': 7, 'pools': ['gpu', 'lab'], 'tags': ['linux', 'cuda']}
+        self.assertEqual(native.hatchet_fleet_labels(metadata),
+                         {'fleet_pools': 'gpu,lab', 'fleet_tags': 'linux,cuda'})
+        self.assertEqual(native.prefect_fleet_tags(metadata),
+                         ['fleet-pool:gpu', 'fleet-pool:lab', 'fleet-tag:cuda', 'fleet-tag:linux'])
+        cleared = {'revision': 8, 'pools': ['default'], 'tags': []}
+        self.assertTrue(native.metadata_changed(metadata, cleared))
+        self.assertEqual(native.hatchet_fleet_labels(cleared),
+                         {'fleet_pools': 'default', 'fleet_tags': ''})
+        self.assertEqual(native.prefect_fleet_tags(cleared), ['fleet-pool:default'])
+
+    def test_hatchet_projection_calls_live_worker_label_upsert(self):
+        from hatchet_sdk.types.labels import WorkerLabel
+        dispatcher = Mock()
+        client = SimpleNamespace(dispatcher=dispatcher)
+        metadata = {'revision': 1, 'pools': ['build'], 'tags': ['linux']}
+        native.apply_hatchet_fleet_labels(client, 'hatchet-worker-id', metadata)
+        worker_id, labels = dispatcher.upsert_worker_labels.call_args.args
+        self.assertEqual(worker_id, 'hatchet-worker-id')
+        self.assertTrue(all(isinstance(label, WorkerLabel) for label in labels))
+        self.assertEqual({label.key: label.value for label in labels},
+                         {'fleet_pools': 'build', 'fleet_tags': 'linux'})
+
+    def test_prefect_projection_updates_only_the_stable_deployment_tags(self):
+        flow = SimpleNamespace(deploy=Mock())
+        metadata = {'revision': 1, 'pools': ['build'], 'tags': ['linux']}
+        native.prefect_deploy(flow, 'agent-pc', 'pc-queue', 'pc-deployment', metadata)
+        kwargs = flow.deploy.call_args.kwargs
+        self.assertEqual((kwargs['name'], kwargs['work_pool_name'], kwargs['work_queue_name']),
+                         ('pc-deployment', 'agent-pc', 'pc-queue'))
+        self.assertEqual(kwargs['tags'], ['fleet-pool:build', 'fleet-tag:linux'])
+
+
 class NativeDispatchPollerTests(unittest.TestCase):
+
     def test_unacknowledged_engine_submission_is_reused_on_retry(self):
         submit = Mock(return_value='engine-run-1')
         poller = native._NativeDispatchPoller('hatchet', 'private-service-token', submit, {})

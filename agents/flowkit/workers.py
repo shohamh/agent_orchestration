@@ -17,6 +17,7 @@ _CACHE_LOCK = threading.Lock()  # the flow host serves requests on threads
 # A limits push that failed is not retried on every catalog call (placement polls every 2 s):
 # worker id -> (wanted limits, monotonic retry time, result). A changed registry value retries now.
 PUSH_RETRY_SECONDS = {'failed': 30, 'unsupported': 300}
+_METADATA_PUSH_BACKOFF = {}
 _PUSH_BACKOFF = {}
 
 
@@ -105,6 +106,42 @@ async def push_limits(client, worker, capacity):
     return result
 
 
+def metadata(worker):
+    return {'revision': worker.get('settings_revision', 0),
+            'pools': list(worker.get('pools') or []), 'tags': list(worker.get('tags') or [])}
+
+
+async def push_fleet_metadata(client, worker):
+    """Project authoritative Fleet labels to selected native engines through the PC service."""
+    if not worker.get('native_engines'):
+        return {'state': 'not_required'}
+    import time
+    wanted = metadata(worker)
+    held = _METADATA_PUSH_BACKOFF.get(worker['id'])
+    if held and held[0] == wanted and time.monotonic() < held[1]:
+        return held[2]
+    try:
+        async with client.post(worker['url'] + '/fleet/metadata', json=wanted, headers=worker['_headers']) as response:
+            if response.status == 404:
+                result = {'state': 'unsupported', 'message': 'Update the PC worker to enable native engine metadata sync'}
+            else:
+                data = await response.json(content_type=None)
+                if not isinstance(data, dict):
+                    raise ValueError('The PC returned an invalid Fleet metadata response')
+                if response.status == 200 and data.get('revision') == wanted['revision']:
+                    result = {'state': 'applied'}
+                elif response.status == 400 and 'stale' in str(data.get('error', '')).lower():
+                    result = {'state': 'stale', 'message': 'The PC has a newer Fleet metadata revision'}
+                else:
+                    result = {'state': 'failed', 'message': str(data.get('error') or f'status {response.status}')[:300]}
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        result = {'state': 'failed', 'message': 'The PC did not accept Fleet metadata; retried on the next check'}
+    _METADATA_PUSH_BACKOFF[worker['id']] = (wanted, time.monotonic() + (5 if result['state'] == 'applied' else 30), result)
+    return result
+
+
+
+
 async def _push(client, worker, wanted, capacity):
     try:
         gate_id = capacity.get('gate_id') if isinstance(capacity, dict) else None
@@ -137,7 +174,8 @@ async def catalog(snapshot=None):
                            'connection': 'relay' if relayed(worker.get('url')) else 'configured' if worker.get('url') else 'awaiting'})
             from .fleet_registry import warnings
             if warnings(worker): public['warnings'] = warnings(worker)
-            pending = {'settings_sync': {'state': 'pending'}}
+            pending = {'settings_sync': {'state': 'pending'},
+                       'metadata_sync': {'state': 'pending' if worker.get('native_engines') else 'not_required'}}
             try:
                 if worker.get('_error'): return {**public, 'online': False, 'reason': worker['_error'], 'status': 'credentials_unavailable', **pending}
                 if not worker.get('url'): return {**public, 'online': False, 'status': 'awaiting_connection', **pending}
@@ -153,12 +191,23 @@ async def catalog(snapshot=None):
                               **({'capacity': data['capacity']} if isinstance(data.get('capacity'), dict) else {}),
                               **({'worker_version': str(data['worker_version'])[:64]} if data.get('worker_version') else {})}
                     result['_native_worker_status'] = {
-                        engine: {key: native.get(engine, {}).get(key) for key in ('state', 'worker_id', 'worker_name', 'work_pool', 'work_queue', 'deployment')
-                                 if isinstance(native.get(engine), dict) and isinstance(native[engine].get(key), str)}
+                        engine: {key: native.get(engine, {}).get(key)
+                                 for key in ('state', 'worker_id', 'worker_name', 'work_pool', 'work_queue', 'deployment',
+                                             'fleet_metadata_revision', 'fleet_metadata_state', 'fleet_metadata_error')
+                                 if isinstance(native.get(engine), dict)
+                                 and isinstance(native[engine].get(key), (str, int))}
                         for engine in worker.get('native_engines', [])
                     }
-                    if data.get('draining'): result.update(online=False, status='updating')
                 result['settings_sync'] = await push_limits(client, worker, result.get('capacity'))
+                result['metadata_sync'] = await push_fleet_metadata(client, worker)
+                if result['metadata_sync']['state'] == 'applied':
+                    states = [result['_native_worker_status'].get(engine, {}) for engine in worker.get('native_engines', [])]
+                    failed = next((state for state in states if state.get('fleet_metadata_state') == 'failed'), None)
+                    if failed:
+                        result['metadata_sync'] = {'state': 'failed', 'message': str(failed.get('fleet_metadata_error') or 'Native engine metadata update failed')[:300]}
+                    elif not all(state.get('fleet_metadata_revision') == str(metadata(worker)['revision'])
+                                 and state.get('fleet_metadata_state') == 'applied' for state in states):
+                        result['metadata_sync'] = {'state': 'pending'}
                 return result
             except _Mismatch:
                 return {**public, 'online': False, 'status': 'identity_mismatch', **pending}

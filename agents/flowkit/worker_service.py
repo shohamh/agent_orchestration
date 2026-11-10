@@ -458,6 +458,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app['slots'], app['count'], app['stats'] = asyncio.Semaphore(count), count, {'active':0}
     app['draining'], app['version'] = False, os.environ.get('FLOW_WORKER_VERSION', '')
     app['root'] = Path(root or os.environ.get('FLOW_WORKER_ROOT', ROOT/'agents/runtime/execution'))
+    app['fleet_metadata_lock'] = asyncio.Lock()
     from .capacity import CapacityGate
     app['capacity'] = capacity
     from .capabilities import probe as default_probe
@@ -529,6 +530,36 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
         revision = int(raw_revision) if raw_revision is not None else None
         await capacity_call(lambda: app['capacity'].configure(**data, expected_gate_id=expected, settings_revision=revision))
         return web.json_response({'settings': (await capacity_call(app['capacity'].metrics))['settings']})
+    async def configure_fleet_metadata(request):
+        """Persist the coordinator's revisioned native-engine pool/tag projection."""
+        try: data = await request.json()
+        except (ValueError, UnicodeDecodeError): raise ValueError('Invalid JSON body') from None
+        if not isinstance(data, dict) or set(data) != {'revision', 'pools', 'tags'}:
+            raise ValueError('Body must contain exactly revision, pools and tags')
+        revision = data['revision']
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise ValueError('revision must be a non-negative whole number')
+        for field in ('pools', 'tags'):
+            values = data[field]
+            if (not isinstance(values, list) or len(values) > 50
+                    or any(not isinstance(value, str) or not value or len(value) > 100 or value != value.strip()
+                           or ',' in value or any(ord(c) < 32 or ord(c) == 127 for c in value) for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError('pools and tags must contain at most 50 unique valid labels')
+        path = app['root'] / 'fleet-metadata.json'
+        async with app['fleet_metadata_lock']:
+            try: previous = json.loads(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError): previous = None
+            previous_revision = previous.get('revision', 0) if isinstance(previous, dict) else 0
+            if revision < previous_revision:
+                raise ValueError('Stale Fleet metadata revision')
+            if (revision == previous_revision and isinstance(previous, dict)
+                    and (previous.get('pools') != data['pools'] or previous.get('tags') != data['tags'])):
+                raise ValueError('Fleet metadata changed without a newer revision')
+            from .restart import atomic_json
+            await asyncio.to_thread(atomic_json, path, data)
+        return web.json_response({'revision': revision})
+
     async def create(request):
         config = await request.json()
         if 'authorize' in config and not isinstance(config['authorize'], bool):
@@ -716,6 +747,7 @@ def make_app(worker_id=None, root=None, slots=None, pool=None, tags=None, token=
     app.router.add_get('/capabilities', inventory)
     app.router.add_post('/capabilities/refresh', refresh_capabilities)
     app.router.add_post('/capacity/settings', configure)
+    app.router.add_post('/fleet/metadata', configure_fleet_metadata)
     app.router.add_post('/jobs', create)
     app.router.add_get('/jobs/{id}', status)
     app.router.add_post('/jobs/{id}/input', receive)

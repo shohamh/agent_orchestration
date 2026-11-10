@@ -93,16 +93,16 @@ function reset() {
   tags = ['cuda', 'linux', 'windows'];
   workers = new Map(Object.entries({
     'pc-a': { id: 'pc-a', pools: ['build', 'gpu'], tags: ['windows', 'cuda'], engines: ['hatchet', 'prefect'], slots: 2, cpu_limit: 90, ram_limit: 90,
-      connection: 'configured', online: true, status: 'online', hostname: 'BUILD-01', active: 1, settings_sync: { state: 'applied' },
+      connection: 'configured', online: true, status: 'online', hostname: 'BUILD-01', active: 1, settings_sync: { state: 'applied' }, metadata_sync: { state: 'applied' },
       inventory: { agents: { codex: result('installed'), claude: result('absent'), demo: result('installed'), pi: result('unknown') },
         commands: { git: result('installed'), cargo: result('absent') }, refreshed_at: iso(5), cached: false },
       _url: 'http://10.1.2.3:8096', _token_env: 'PC_A_TOKEN' },
     'pc-b': { id: 'pc-b', pools: ['build'], tags: ['linux'], engines: ENGINES, slots: 1, cpu_limit: 90, ram_limit: 90, connection: 'configured',
-      online: false, status: 'unreachable', settings_sync: { state: 'pending' }, warnings: ['slots 500 in the registry is above the maximum of 100; 100 is enforced and stored at the next registry save'],
+      online: false, status: 'unreachable', settings_sync: { state: 'pending' }, metadata_sync: { state: 'pending' }, warnings: ['slots 500 in the registry is above the maximum of 100; 100 is enforced and stored at the next registry save'],
       inventory: { agents: { codex: result('installed', 600) }, commands: {}, refreshed_at: iso(600), cached: true },
       _url: 'http://10.1.2.4:8096', _token_env: 'PC_B_TOKEN' },
     'pc-c': { id: 'pc-c', pools: ['default'], tags: [], engines: ['hatchet'], slots: 1, cpu_limit: 90, ram_limit: 90, connection: 'awaiting',
-      online: false, status: 'awaiting_connection', settings_sync: { state: 'pending' } },
+      online: false, status: 'awaiting_connection', settings_sync: { state: 'pending' }, metadata_sync: { state: 'not_required' } },
   }));
   metrics = { 'pc-a': { state: 'known', reason: null, cpu_percent: 42.4, ram_percent: 63.2, sample_age_seconds: 0.5, window_seconds: 10,
     ram_basis: 'physical total minus available', leases: 1, settings: { slots: 2, cpu_limit: 90, ram_limit: 90 } } };
@@ -509,6 +509,13 @@ test('the same PC connects to a second engine by editing it, never as a duplicat
   assert.match(await text(`${worker('pc-a')} [data-engine="trigger"]`), /Trigger\.dev: Unconfirmed/);
   assert.doesNotMatch(await text(`${worker('pc-a')} [data-engine="trigger"]`), /Connected/);
   await noSecrets();
+});
+
+test('shows native engine pool and tag synchronization state', async () => {
+  await openFleet();
+  assert.match(await text(worker('pc-a')), /Pools and tags are synchronized to selected native engines on pc-a/);
+  assert.match(await text(worker('pc-b')), /Pools and tags are waiting for the PC or its native engines to apply them/);
+  assert.doesNotMatch(await text(worker('pc-c')), /Native engine metadata/);
 });
 
 test('settings edits: limits and slots, validated, with the sync state', async () => {

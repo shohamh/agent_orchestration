@@ -13,6 +13,14 @@ pool and tags after admission. A worker is not considered ready until its select
 worker is ready. Engine endpoint reachability, cross-PC native transfer/cancellation and combined
 native/relay admission are not verified here.
 
+Fleet pools and tags are projected to selected native engines after registration and whenever the
+Fleet settings revision changes. Hatchet receives the namespaced worker labels `fleet_pools` and
+`fleet_tags`; Prefect receives deployment tags `fleet-pool:<name>` and `fleet-tag:<name>`.
+These labels help find and organize native workers/deployments; they do not change Hatchet or
+Prefect scheduling. Fleet remains the placement authority, and each PC keeps its own Prefect
+process pool and queue.
+The Fleet card reports pending, applied or failed metadata sync for workers with native engines.
+
 ## Register a PC
 
 One registration is one PC, however many engines and pools it serves. In the board, open

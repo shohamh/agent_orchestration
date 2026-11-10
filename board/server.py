@@ -780,7 +780,7 @@ async def workers_list(request: web.Request) -> web.Response:
 SYSTEM_ENGINES = {'hatchet': 'hatchet', 'prefect': 'prefect', 'trigger-dev': 'trigger', 'trigger': 'trigger'}
 FLEET_FIELDS = {'id', 'pools', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'url', 'token_env'}
 PUBLIC_WORKER = {'id', 'uuid', 'pools', 'pool', 'tags', 'engines', 'slots', 'cpu_limit', 'ram_limit', 'connection', 'online',
-                 'status', 'hostname', 'active', 'warnings'}
+                 'status', 'hostname', 'active', 'warnings', 'metadata_sync'}
 PUBLIC_CAPACITY = {'state', 'reason', 'cpu_percent', 'ram_percent', 'sample_age_seconds', 'window_seconds', 'ram_basis',
                    'leases', 'settings'}
 PUBLIC_RESULT = {'status', 'checked_at', 'auth_status'}
@@ -808,6 +808,9 @@ def public_worker(worker: Any) -> dict[str, Any]:
                                    for e, s in worker['engine_status'].items() if isinstance(s, dict)}
     if isinstance(worker.get('settings_sync'), dict):
         result['settings_sync'] = {k: str(worker['settings_sync'][k])[:300] for k in ('state', 'message') if k in worker['settings_sync']}
+    if isinstance(worker.get('metadata_sync'), dict):
+        result['metadata_sync'] = {k: str(worker['metadata_sync'][k])[:300]
+                                   for k in ('state', 'message') if k in worker['metadata_sync']}
     return result
 
 

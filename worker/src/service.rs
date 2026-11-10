@@ -40,6 +40,7 @@ pub struct App {
     pub active: AtomicU64,
     pub inventory: Mutex<Value>,
     pub inventory_lock: tokio::sync::Mutex<()>,
+    pub fleet_metadata_lock: Mutex<()>,
 }
 
 /// An error a client can read: `{"error": message}` with the status the Python service uses.
@@ -82,6 +83,7 @@ impl App {
             active: AtomicU64::new(0),
             inventory: Mutex::new(inventory),
             inventory_lock: tokio::sync::Mutex::new(()),
+            fleet_metadata_lock: Mutex::new(()),
         })
     }
 
@@ -144,6 +146,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/capabilities", get(inventory))
         .route("/capabilities/refresh", post(refresh_capabilities))
         .route("/capacity/settings", post(configure))
+        .route("/fleet/metadata", post(configure_fleet_metadata))
         .route("/jobs", post(create))
         .route("/jobs/{id}", get(status).delete(cancel))
         .route("/jobs/{id}/input", post(receive))
@@ -194,9 +197,18 @@ fn native_engine_status(root: &PathBuf) -> Value {
             continue;
         }
         let mut safe = json!({"state": state});
-        for key in ["worker_id", "worker_name", "work_pool", "work_queue", "deployment"] {
+        for key in [
+            "worker_id",
+            "worker_name",
+            "work_pool",
+            "work_queue",
+            "deployment",
+            "fleet_metadata_revision",
+            "fleet_metadata_state",
+            "fleet_metadata_error",
+        ] {
             if let Some(value) = status.get(key).and_then(Value::as_str) {
-                if value.len() <= 256 {
+                if value.len() <= 300 {
                     safe[key] = json!(value);
                 }
             }
@@ -325,6 +337,59 @@ async fn configure(
     Ok(Json(json!({"settings": app.gate.metrics()["settings"]})))
 }
 
+
+fn valid_fleet_metadata_values(value: &Value) -> bool {
+    let Some(values) = value.as_array().filter(|values| values.len() <= 50) else {
+        return false;
+    };
+    let mut unique = BTreeSet::new();
+    values.iter().all(|item| {
+        let Some(text) = item.as_str() else {
+            return false;
+        };
+        !text.is_empty()
+            && text.chars().count() <= 100
+            && text.trim() == text
+            && !text.contains(',')
+            && !text.chars().any(char::is_control)
+            && unique.insert(text)
+    })
+}
+
+async fn configure_fleet_metadata(
+    State(app): State<Arc<App>>,
+    body: bytes::Bytes,
+) -> ApiResult {
+    let data: Value = serde_json::from_slice(&body).map_err(|_| bad("Invalid JSON body"))?;
+    let Some(map) = data.as_object().filter(|map| {
+        map.len() == 3 && ["revision", "pools", "tags"].iter().all(|key| map.contains_key(*key))
+    }) else {
+        return Err(bad("Body must contain exactly revision, pools and tags"));
+    };
+    let revision = map["revision"]
+        .as_u64()
+        .ok_or_else(|| bad("revision must be a non-negative whole number"))?;
+    if !valid_fleet_metadata_values(&map["pools"]) || !valid_fleet_metadata_values(&map["tags"]) {
+        return Err(bad("pools and tags must contain at most 50 unique valid labels"));
+    }
+    let _guard = app.fleet_metadata_lock.lock().unwrap();
+    let path = app.root.join("fleet-metadata.json");
+    let previous = read_json(&path);
+    let previous_revision = previous.as_ref().and_then(|value| value["revision"].as_u64()).unwrap_or(0);
+    if revision < previous_revision {
+        return Err(bad("Stale Fleet metadata revision"));
+    }
+    if revision == previous_revision
+        && previous.as_ref().is_some_and(|value| {
+            value["pools"] != map["pools"] || value["tags"] != map["tags"]
+        })
+    {
+        return Err(bad("Fleet metadata changed without a newer revision"));
+    }
+    let metadata = json!({"revision": revision, "pools": map["pools"], "tags": map["tags"]});
+    crate::util::atomic_json(&path, &metadata).map_err(|_| bad("Could not save Fleet metadata"))?;
+    Ok(Json(json!({"revision": revision})))
+}
 fn find(app: &App, id: &str) -> Result<Arc<Job>, ApiError> {
     app.jobs
         .lock()

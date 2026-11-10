@@ -52,7 +52,8 @@ class Fixture(unittest.IsolatedAsyncioTestCase):
         sampler = patch('flowkit.capacity.MachineSampler.sample', return_value=None)
         sampler.start(); self.addCleanup(sampler.stop)
         from flowkit import workers
-        workers._PUSH_BACKOFF.clear(); self.addCleanup(workers._PUSH_BACKOFF.clear)
+        workers._PUSH_BACKOFF.clear(); workers._METADATA_PUSH_BACKOFF.clear()
+        self.addCleanup(workers._PUSH_BACKOFF.clear); self.addCleanup(workers._METADATA_PUSH_BACKOFF.clear)
         import flow_host
         self.host = flow_host.serve(None, '127.0.0.1', 0)
         threading.Thread(target=self.host.serve_forever, daemon=True).start()
@@ -133,6 +134,28 @@ class SettingsPushTests(Fixture):
         self.assertTrue(gate.try_acquire('new-job')['acquired'])
         self.assertNotIn(TOKEN, json.dumps(body))
         self.assertNotIn('127.0.0.1', json.dumps(body))
+
+
+    async def test_native_fleet_metadata_is_pushed_and_revisions_replace_removed_values(self):
+        app, server, _, _ = await self.service()
+        worker = {'id': 'pc-a', 'pools': ['build', 'gpu'], 'tags': ['linux'], 'engines': ['prefect'],
+                  'native_engines': ['prefect'], 'native_config': {'prefect_worker_api_url': 'http://127.0.0.1:4200/api'},
+                  'url': str(server.make_url('')), 'token_env': 'PC_A_TOKEN', 'settings_revision': 10}
+        self.write_registry([worker])
+        from flowkit.workers import catalog
+        listed = (await catalog())[0]
+        self.assertEqual(listed['metadata_sync']['state'], 'pending',
+                         'the local service accepted metadata, but no Prefect process reported applying it')
+        path = self.root / 'pc-a' / 'fleet-metadata.json'
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
+                         {'revision': 10, 'pools': ['build', 'gpu'], 'tags': ['linux']})
+
+        worker.update(pools=['gpu'], tags=[], settings_revision=11)
+        self.write_registry([worker])
+        listed = (await catalog())[0]
+        self.assertEqual(listed['metadata_sync']['state'], 'pending')
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
+                         {'revision': 11, 'pools': ['gpu'], 'tags': []})
 
     async def test_offline_save_is_pending_then_pushed_when_the_worker_connects(self):
         self.write_registry([{'id': 'pc-a', 'pools': ['build']}])  # awaiting connection

@@ -36,9 +36,44 @@ pub struct Settings {
     pub native_config: Value,
     pub hatchet_token: Option<String>,
     pub native_runtime_version: Option<String>,
+    pub fleet_pools: Vec<String>,
+    pub fleet_tags: Vec<String>,
+}
+
+fn valid_fleet_labels(values: &[String]) -> bool {
+    values.len() <= 50
+        && values.iter().all(|value| {
+            !value.is_empty()
+                && value.len() <= 100
+                && value.trim() == value
+                && !value.contains(',')
+                && !value.chars().any(|ch| ch.is_control())
+        })
+        && values.iter().collect::<std::collections::HashSet<_>>().len() == values.len()
+}
+
+fn fleet_metadata_from_claim(given: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let pool = given["pool"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "The install claim is missing the Fleet pool.".to_string())?
+        .to_string();
+    let tags = given["tags"]
+        .as_array()
+        .ok_or_else(|| "The install claim is missing Fleet tags.".to_string())?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned)
+            .ok_or_else(|| "The install claim contains invalid Fleet tags.".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pools = vec![pool];
+    if !valid_fleet_labels(&pools) || !valid_fleet_labels(&tags) {
+        return Err("The install claim contains invalid Fleet pool or tag values.".into());
+    }
+    Ok((pools, tags))
 }
 
 fn settings_from_claim(given: &Value) -> Result<Settings, String> {
+    let (fleet_pools, fleet_tags) = fleet_metadata_from_claim(given)?;
     let native_engines = given["native_engines"]
         .as_array()
         .ok_or_else(|| "The install claim is missing its native-engine selection.".to_string())?
@@ -132,6 +167,8 @@ fn settings_from_claim(given: &Value) -> Result<Settings, String> {
         native_config,
         hatchet_token,
         native_runtime_version,
+        fleet_pools,
+        fleet_tags,
     })
 }
 
@@ -895,6 +932,13 @@ fn write_native_components(
     if !components.is_empty() || path.exists() {
         crate::util::atomic_json(&path, &json!({"components": components})).map_err(|e| e.to_string())?;
     }
+    if !settings.native_engines.is_empty() {
+        crate::util::atomic_json(
+            &home.file("runtime/fleet-metadata.json"),
+            &json!({"revision": 0, "pools": settings.fleet_pools, "tags": settings.fleet_tags}),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let active = &settings.native_engines;
     let status_dir = home.file("runtime/native-engines");
     for engine in ["hatchet", "prefect"] {
@@ -1372,13 +1416,15 @@ mod tests {
             native_config: Value::Object(native_config),
             hatchet_token: hatchet_token.map(str::to_owned),
             native_runtime_version: (!engines.is_empty()).then(|| "0123456789abcdef".into()),
+            fleet_pools: vec!["build".into()],
+            fleet_tags: vec!["gpu".into()],
         }
     }
 
     #[test]
     fn claim_settings_keep_only_the_selected_native_engines() {
         let prefect = settings_from_claim(&json!({
-            "name": "pc", "slots": 2, "engines": ["prefect", "trigger"],
+            "name": "pc", "slots": 2, "engines": ["prefect", "trigger"], "pool": "build", "tags": ["gpu"],
             "native_engines": ["prefect"], "native_config": {
                 "prefect_worker_api_url": "https://prefect.example/api"
             }, "native_runtime_version": "0123456789abcdef"
@@ -1388,7 +1434,7 @@ mod tests {
         assert!(!prefect.native_config.to_string().contains("token"));
 
         let trigger = settings_from_claim(&json!({
-            "name": "pc", "engines": ["trigger"], "native_engines": [],
+            "name": "pc", "engines": ["trigger"], "native_engines": [], "pool": "default", "tags": [],
             "native_config": {}
         })).unwrap();
         assert!(trigger.native_engines.is_empty());
@@ -1399,7 +1445,7 @@ mod tests {
     #[test]
     fn native_claims_require_runtime_and_a_dedicated_hatchet_token() {
         let missing_runtime = json!({
-            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"],
+            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"], "pool": "build", "tags": [],
             "native_config": {
                 "hatchet_api_url": "https://hatchet.example/api",
                 "hatchet_worker_grpc_host_port": "hatchet.example:7070",
@@ -1408,7 +1454,7 @@ mod tests {
         });
         assert!(settings_from_claim(&missing_runtime).is_err());
         let missing_token = json!({
-            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"],
+            "name": "pc", "engines": ["hatchet"], "native_engines": ["hatchet"], "pool": "build", "tags": [],
             "native_config": {
                 "hatchet_api_url": "https://hatchet.example/api",
                 "hatchet_worker_grpc_host_port": "hatchet.example:7070",
@@ -1433,6 +1479,8 @@ mod tests {
         let runtime = temp.path().join("native-runtime");
         let prefect = settings(&["prefect"], None);
         write_native_components(&home, &options(), &prefect, Some(&runtime)).unwrap();
+        let metadata = crate::util::read_json(&home.file("runtime/fleet-metadata.json")).unwrap();
+        assert_eq!(metadata, json!({"revision": 0, "pools": ["build"], "tags": ["gpu"]}));
         let data = crate::util::read_json(&home.file("components.json")).unwrap();
         let components = data["components"].as_array().unwrap();
         let names = components.iter().filter_map(|component| component["name"].as_str()).collect::<Vec<_>>();

@@ -54,6 +54,58 @@ def prefect_names(identity: str) -> tuple[str, str, str]:
     return pool, queue, deployment
 
 
+def read_fleet_metadata() -> dict[str, Any]:
+    """Read the coordinator's revisioned pool/tag projection for this PC."""
+    path = Path(os.environ['AGENT_WORKER_HOME']) / 'runtime' / 'fleet-metadata.json'
+    try:
+        metadata = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {'revision': 0, 'pools': [], 'tags': []}
+    if (not isinstance(metadata, dict) or set(metadata) != {'revision', 'pools', 'tags'}
+            or type(metadata['revision']) is not int or metadata['revision'] < 0):
+        raise ValueError('The Fleet metadata projection is invalid')
+    for field in ('pools', 'tags'):
+        values = metadata[field]
+        if (not isinstance(values, list) or len(values) > 50
+                or any(not isinstance(value, str) or not value or len(value) > 100 or value != value.strip()
+                       or ',' in value or any(ord(c) < 32 or ord(c) == 127 for c in value) for value in values)
+                or len(set(values)) != len(values)):
+            raise ValueError('The Fleet metadata projection is invalid')
+    return metadata
+
+
+def hatchet_fleet_labels(metadata: dict[str, Any]) -> dict[str, str]:
+    """Stable namespaced labels; the Board remains authoritative for placement."""
+    return {'fleet_pools': ','.join(metadata['pools']), 'fleet_tags': ','.join(metadata['tags'])}
+
+
+def prefect_fleet_tags(metadata: dict[str, Any]) -> list[str]:
+    """Prefect deployment tags are for organization, not worker routing."""
+    return sorted([*(f'fleet-pool:{pool}' for pool in metadata['pools']),
+                   *(f'fleet-tag:{tag}' for tag in metadata['tags'])])
+
+
+def apply_hatchet_fleet_labels(client: Any, worker_id: str, metadata: dict[str, Any]) -> None:
+    from hatchet_sdk.types.labels import WorkerLabel
+    labels = [WorkerLabel(key=key, value=value) for key, value in hatchet_fleet_labels(metadata).items()]
+    client.dispatcher.upsert_worker_labels(worker_id, labels)
+
+
+def prefect_deploy(flow: Any, pool: str, queue: str, deployment: str, metadata: dict[str, Any]) -> None:
+    flow.deploy(name=deployment, work_pool_name=pool, work_queue_name=queue, build=False, push=False,
+                tags=prefect_fleet_tags(metadata))
+
+
+def metadata_changed(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    return previous != current
+
+
+def record_metadata_status(engine: str, status_fields: dict[str, str], metadata: dict[str, Any],
+                           state: str, error: str = '') -> None:
+    status_fields.update(fleet_metadata_revision=str(metadata['revision']),
+                         fleet_metadata_state=state, fleet_metadata_error=error[:300])
+    write_status(engine, 'ready', **status_fields)
+
 def status_path(engine: str) -> Path:
     home = Path(os.environ.get('AGENT_WORKER_HOME', ''))
     if not home.is_absolute():
@@ -65,7 +117,8 @@ def status_path(engine: str) -> Path:
 
 def write_status(engine: str, state: str, **fields: Any) -> None:
     safe = {'state': state, 'updated_at': time.time()}
-    for key in ('worker_id', 'worker_name', 'work_pool', 'work_queue', 'deployment', 'error'):
+    for key in ('worker_id', 'worker_name', 'work_pool', 'work_queue', 'deployment',
+                'fleet_metadata_revision', 'fleet_metadata_state', 'fleet_metadata_error', 'error'):
         value = fields.get(key)
         if isinstance(value, (str, int, float)) and len(str(value)) <= 500:
             safe[key] = value
@@ -388,11 +441,12 @@ def _hatchet_main() -> None:
         from hatchet_windows import install
         install()
     identity = worker_uuid()
+    metadata = read_fleet_metadata()
     client = _hatchet_client_from_environment()
     workflow = build_hatchet_workflow(client)
     worker_name = f'aw-{uuid.UUID(identity).hex}'
     worker = client.worker(worker_name, slots=int(os.environ.get('AGENT_WORKER_SLOTS', '1')),
-                           labels={'fleet_worker_id': identity}, workflows=[workflow])
+                           labels={'fleet_worker_id': identity, **hatchet_fleet_labels(metadata)}, workflows=[workflow])
     write_status('hatchet', 'starting', worker_name=worker_name)
     failure: list[BaseException] = []
     dispatcher: _NativeDispatchPoller | None = None
@@ -429,6 +483,7 @@ def _hatchet_main() -> None:
             raise RuntimeError('The Hatchet SDK worker did not register before the readiness timeout')
 
         status_fields['worker_id'] = worker_id
+        record_metadata_status('hatchet', status_fields, metadata, 'applied')
 
         def submit(job_id: str, nonce: str) -> str:
             run_ref = workflow.run(input={'job_id': job_id, 'nonce': nonce},
@@ -443,6 +498,18 @@ def _hatchet_main() -> None:
                 raise RuntimeError('The Hatchet SDK worker disconnected') from None
             if dispatcher.fatal_error():
                 raise RuntimeError(dispatcher.fatal_error())
+            try:
+                current = read_fleet_metadata()
+                if metadata_changed(metadata, current):
+                    apply_hatchet_fleet_labels(client, worker_id, current)
+                    metadata = current
+                    record_metadata_status('hatchet', status_fields, metadata, 'applied')
+                elif status_fields.get('fleet_metadata_state') == 'failed':
+                    apply_hatchet_fleet_labels(client, worker_id, metadata)
+                    record_metadata_status('hatchet', status_fields, metadata, 'applied')
+            except Exception:
+                record_metadata_status('hatchet', status_fields, metadata, 'failed',
+                                       'Native engine metadata update failed')
             time.sleep(2)
         raise RuntimeError('The Hatchet SDK worker stopped')
     except BaseException as error:
@@ -506,8 +573,11 @@ def _prefect_main() -> None:
         if 'already exists' not in (queue_result.stderr + queue_result.stdout).lower():
             raise RuntimeError('Could not create the Prefect per-PC work queue')
     flow = build_prefect_flow()
-    flow.deploy(name=deployment, work_pool_name=pool, work_queue_name=queue, build=False, push=False)
-    write_status('prefect', 'starting', worker_name=worker_name, work_pool=pool, work_queue=queue, deployment=deployment)
+    metadata = read_fleet_metadata()
+    prefect_deploy(flow, pool, queue, deployment, metadata)
+    write_status('prefect', 'starting', worker_name=worker_name, work_pool=pool, work_queue=queue,
+                 deployment=deployment, fleet_metadata_revision=str(metadata['revision']),
+                 fleet_metadata_state='applied')
     process = subprocess.Popen([sys.executable, '-m', 'prefect', 'worker', 'start', '--pool', pool,
                                 '--work-queue', queue, '--name', worker_name, '--limit',
                                 os.environ.get('AGENT_WORKER_SLOTS', '1')], env=env,
@@ -524,7 +594,8 @@ def _prefect_main() -> None:
     reader.start()
     deadline = time.monotonic() + READY_TIMEOUT
     dispatcher: _NativeDispatchPoller | None = None
-    status_fields = {'worker_name': worker_name, 'work_pool': pool, 'work_queue': queue, 'deployment': deployment}
+    status_fields = {'worker_name': worker_name, 'work_pool': pool, 'work_queue': queue, 'deployment': deployment,
+                     'fleet_metadata_revision': str(metadata['revision']), 'fleet_metadata_state': 'applied'}
     try:
         worker_id: str | None = None
         while time.monotonic() < deadline:
@@ -560,6 +631,18 @@ def _prefect_main() -> None:
         while process.poll() is None:
             if dispatcher.fatal_error():
                 raise RuntimeError(dispatcher.fatal_error())
+            try:
+                current = read_fleet_metadata()
+                if metadata_changed(metadata, current):
+                    prefect_deploy(flow, pool, queue, deployment, current)
+                    metadata = current
+                    record_metadata_status('prefect', status_fields, metadata, 'applied')
+                elif status_fields.get('fleet_metadata_state') == 'failed':
+                    prefect_deploy(flow, pool, queue, deployment, metadata)
+                    record_metadata_status('prefect', status_fields, metadata, 'applied')
+            except Exception:
+                record_metadata_status('prefect', status_fields, metadata, 'failed',
+                                       'Native engine metadata update failed')
             time.sleep(2)
         raise RuntimeError('The Prefect process worker stopped')
     except BaseException as error:

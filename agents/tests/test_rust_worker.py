@@ -180,6 +180,23 @@ class RustWorkerTests(FleetFixture):
             with self.assertRaises(urllib.error.HTTPError) as caught: self.pc.get('/health', token=token)
             self.assertEqual(caught.exception.code, 401)
 
+    def test_fleet_metadata_endpoint_is_authenticated_revisioned_and_replaceable(self):
+        metadata = {'revision': 10, 'pools': ['build', 'gpu'], 'tags': ['linux']}
+        request = urllib.request.Request(
+            f'http://127.0.0.1:{self.pc.port}/fleet/metadata',
+            data=json.dumps(metadata).encode(), method='POST', headers={'Content-Type': 'application/json'})
+        with self.assertRaises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(request, timeout=10)
+        self.assertEqual(denied.exception.code, 401)
+        status, body = self.pc.post('/fleet/metadata', metadata)
+        self.assertEqual((status, body['revision']), (200, 10))
+        self.assertEqual(json.loads((self.pc.root/'fleet-metadata.json').read_text(encoding='utf-8')), metadata)
+        self.assertEqual(self.pc.post('/fleet/metadata', {'revision': 9, 'pools': [], 'tags': []})[0], 400)
+        self.assertEqual(self.pc.post('/fleet/metadata', {'revision': 10, 'pools': [], 'tags': []})[0], 400)
+        cleared = {'revision': 11, 'pools': [], 'tags': []}
+        self.assertEqual(self.pc.post('/fleet/metadata', cleared)[0], 200)
+        self.assertEqual(json.loads((self.pc.root/'fleet-metadata.json').read_text(encoding='utf-8')), cleared)
+
     def test_capabilities_report_installed_and_absent_software(self):
         inventory = self.pc.get('/capabilities')
         self.assertEqual(set(inventory), {'agents', 'commands', 'refreshed_at'})

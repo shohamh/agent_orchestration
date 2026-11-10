@@ -97,6 +97,13 @@
     return `Limits not applied yet: ${sync.message || 'the PC did not accept them'}.`;
   }
 
+  function metadataSyncText(sync, id) {
+    if (sync?.state === 'applied') return `Pools and tags are synchronized to selected native engines on ${id}.`;
+    if (sync?.state === 'pending' || !sync) return 'Pools and tags are waiting for the PC or its native engines to apply them.';
+    if (sync?.state === 'unsupported') return `Pools and tags are not synchronized: ${sync.message || 'update the PC worker'}.`;
+    return `Pools and tags are not synchronized yet: ${sync.message || 'the native engine did not accept them'}.`;
+  }
+
   /* Setup guidance for the selected engine workers. The backend's status is authoritative about
    * runtime readiness; these instructions describe the intended per-PC setup. */
   function instructions({ engines = [], os = 'windows', existing = null } = {}) {
@@ -476,7 +483,10 @@
           h('dt', {}, 'Pools'), h('dd', {}, worker.pools.map((p) => filterChip('pool', p))),
           h('dt', {}, 'Tags'), h('dd', {}, worker.tags.length ? worker.tags.map((t) => filterChip('tag', t)) : h('span', { class: 'fl-hint' }, 'none')),
           h('dt', {}, 'Limits'), h('dd', { class: 'fl-limits', title: syncText(worker.settings_sync, worker.id) }, `CPU ${worker.cpu_limit}% · RAM ${worker.ram_limit}% · ${plural(worker.slots, 'slot')}`,
-            h('span', { class: 'fl-sync' }, ` · ${syncText(worker.settings_sync, worker.id)}`))),
+            h('span', { class: 'fl-sync' }, ` · ${syncText(worker.settings_sync, worker.id)}`)),
+          worker.metadata_sync && worker.metadata_sync.state !== 'not_required'
+            ? [h('dt', {}, 'Native engine metadata'), h('dd', { class: 'fl-sync', title: metadataSyncText(worker.metadata_sync, worker.id) }, metadataSyncText(worker.metadata_sync, worker.id))]
+            : null),
         h('section', { class: 'fl-capabilities', 'aria-label': `Capabilities of ${worker.id}` },
           h('p', { class: 'fl-refreshed' }, inv ? `Last refreshed ${formatTime(inv.refreshed_at)}` : 'Capabilities unknown',
             inv?.cached ? h('span', { class: 'fl-hint' }, ' · Last known results; the PC is not connected') : null),
