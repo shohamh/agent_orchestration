@@ -93,6 +93,17 @@ def print_container_diagnostics(container, install_code):
     except (OSError, subprocess.TimeoutExpired):
         return
     text = result.stdout + "\n" + result.stderr
+    for component in ("hatchet", "prefect"):
+        try:
+            logs = subprocess.run(
+                ["docker", "exec", container, "tail", "-n", "80",
+                 f"/home/node/.agent-worker/component-{component}.log"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if logs.returncode == 0:
+            text += f"\n--- {component} component ---\n{logs.stdout}\n{logs.stderr}"
     if install_code:
         text = text.replace(install_code, "[redacted install code]")
     text = re.sub(
@@ -105,9 +116,10 @@ def print_container_diagnostics(container, install_code):
     )
     lines = [line for line in text.splitlines()
              if "==>" in line or any(word in line.lower() for word in
-                                     ("error", "failed", "refused", "could not", "did not start"))]
+                                     ("error", "failed", "refused", "could not", "did not start",
+                                      "connect", "unreachable", "unauthorized", "permission"))]
     if lines:
-        print("Worker container diagnostics:\n" + "\n".join(lines[-40:]), file=sys.stderr)
+        print("Worker container diagnostics:\n" + "\n".join(lines[-80:]), file=sys.stderr)
 
 async def api(session, base, method, path, body=None):
     async with session.request(method, base + path, json=body) as response:
