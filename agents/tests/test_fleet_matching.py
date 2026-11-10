@@ -201,6 +201,10 @@ class FleetFixture(unittest.IsolatedAsyncioTestCase):
                               ('flowkit.distributed.TIMEOUT_SLACK', 0),
                               ('flowkit.worker_service.AUTHORIZATION_TIMEOUT', .5), ('flowkit.worker_service.COORDINATOR_STALE', .5)):
             patcher = patch(target, value); patcher.start(); self.addCleanup(patcher.stop)
+        # Admission lifecycle tests exercise placement transitions, not host load. Keep their
+        # real capacity window deterministic while the worker services continue sampling.
+        sampler = patch('flowkit.capacity.MachineSampler.sample', lambda _: (1.0, 1.0))
+        sampler.start(); self.addCleanup(sampler.stop)
         self.events = []
 
     async def sink(self, event): self.events.append(event)

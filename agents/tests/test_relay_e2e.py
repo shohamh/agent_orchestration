@@ -19,7 +19,7 @@ from agents.tests.test_fleet_matching import FleetFixture, info, until
 from agents.tests.worker_fixture import make_app
 
 TOKEN = 'e2e-token-0123456789abcdefghijklmnop'
-FORM = {'id': 'pc-r', 'os': 'linux', 'engines': ['hatchet', 'prefect', 'trigger'], 'pool': 'build', 'tags': [], 'slots': 1,
+FORM = {'id': 'pc-r', 'os': 'linux', 'engines': ['trigger'], 'pool': 'build', 'tags': [], 'slots': 1,
         'cpu_limit': 100, 'ram_limit': 100, 'server': 'http://192.168.1.10:8090'}
 FLOW = {'name': 'relayed', 'worker': {'pool': 'build'}, 'steps': {'go': {'kind': 'program', 'run': 'python -c "print(\'ran through the relay\')"'}}}
 

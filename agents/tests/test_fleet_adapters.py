@@ -343,7 +343,8 @@ class AttachedSourceTests(ServiceFixture):
         self.assertEqual(result['state'], 'done')
         workspace = Path(result['workspace'])
         self.assertEqual(workspace.name, 'agent-run')
-        self.assertIn(str(self.root/'pc-a'), result['workspace'], 'on the worker')
+        self.assertTrue(any(os.path.samefile(parent, self.root) for parent in workspace.parents),
+                        'workspace should remain inside the worker root despite Windows 8.3 path aliases')
 
     async def test_every_step_of_a_flow_sees_the_attachments_prepared_once(self):
         from flowkit.definition import parse
