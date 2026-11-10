@@ -418,11 +418,8 @@ def build_hatchet_workflow(client: Any) -> Any:
 def build_prefect_flow() -> Any:
     from prefect import flow
 
-    @flow(name=PREFECT_FLOW)
-    def start_admitted_job(job_id: str, nonce: str) -> dict[str, Any]:
-        return _local_job_request(job_id, nonce)
-
-    return start_admitted_job
+    source = runtime_paths() / 'agents'
+    return flow.from_source(source=str(source), entrypoint='native_prefect_flow.py:start_admitted_job')
 
 
 def _hatchet_client_from_environment() -> Any:
