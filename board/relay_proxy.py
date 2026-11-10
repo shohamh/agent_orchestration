@@ -14,7 +14,8 @@ from aiohttp import web
 MAX_BODY = 200 * 1024 * 1024
 CHUNK = 64 * 1024
 FORWARD_REQUEST = ('authorization', 'content-type', 'accept', 'x-relay-status', 'x-relay-drop')
-FORWARD_RESPONSE = ('content-type', 'content-disposition', 'cache-control', 'x-worker-version', 'x-runtime-version')
+FORWARD_RESPONSE = ('content-type', 'content-disposition', 'cache-control', 'x-worker-version', 'x-runtime-version',
+                    'x-native-runtime-version')
 PREFIXES = ('/install/', '/update/', '/relay/')
 
 

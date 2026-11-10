@@ -27,6 +27,9 @@ def fake_relay(seen):
         seen.append({'method': request.method, 'path': request.path_qs, 'client': request.headers.get('X-Relay-Client'),
                      'authorization': request.headers.get('Authorization'), 'cookie': request.headers.get('Cookie'),
                      'size': len(body), 'relay_status': request.headers.get('X-Relay-Status')})
+        if request.path.endswith('/native-runtime'):
+            return web.Response(body=b'native-engine-runtime', content_type='application/gzip',
+                                headers={'X-Native-Runtime-Version': '0123456789abcdef'})
         if request.path.endswith('/slow'):
             await asyncio.sleep(.3)
             return web.Response(status=204)
@@ -76,6 +79,11 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/install/CODE/complete?status=409', json={'a': 1})
         self.assertEqual((response.status, await response.json()), (409, {'echo': 8}))
         self.assertEqual(self.seen[-1]['path'], '/install/CODE/complete?status=409')
+
+    async def test_native_runtime_integrity_header_passes_through(self):
+        response = await self.client.get('/install/CODE/native-runtime')
+        self.assertEqual((response.status, await response.read()), (200, b'native-engine-runtime'))
+        self.assertEqual(response.headers.get('X-Native-Runtime-Version'), '0123456789abcdef')
 
     async def test_big_bodies_stream_both_ways(self):
         payload = os.urandom(6 * 1024 * 1024)

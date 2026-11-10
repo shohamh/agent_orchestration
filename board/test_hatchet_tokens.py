@@ -40,7 +40,7 @@ class HatchetTokenIssuerTests(unittest.IsolatedAsyncioTestCase):
             if request.cookies.get('hatchet_admin') != 'admin-session':
                 return web.json_response({'error': 'session required'}, status=401)
             return web.json_response({'rows': [{
-                'metadata': {'id': TOKEN_ID}, 'name': self.created['name'], 'readOnly': False,
+                'metadata': {'id': TOKEN_ID}, 'name': self.created['name'],
                 'expiresAt': '2099-01-01T00:00:00Z',
             }]})
 

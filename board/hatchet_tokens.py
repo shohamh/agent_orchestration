@@ -116,7 +116,8 @@ class HatchetTokenIssuer:
                 raise HatchetTokenError(f'Hatchet created a worker token but its ID could not be confirmed (HTTP {status}); revoke the token named {name!r} in Hatchet Admin before retrying.')
             rows = listing.get('rows') if isinstance(listing, dict) else None
             matching = [row for row in rows if isinstance(row, dict) and row.get('name') == name] if isinstance(rows, list) else []
-            if len(matching) != 1 or matching[0].get('readOnly') is not False:
+            # Hatchet <= v0.114 omitted readOnly; those versions create unrestricted tokens by default.
+            if len(matching) != 1 or matching[0].get('readOnly', False) is not False:
                 raise HatchetTokenError(f'Hatchet created a worker token but its ID could not be confirmed; revoke the token named {name!r} in Hatchet Admin before retrying.')
             metadata = matching[0].get('metadata')
             token_id = metadata.get('id') if isinstance(metadata, dict) else None
