@@ -142,12 +142,12 @@ jobs:
       - name: Start disposable Hatchet stack
         if: matrix.engine == 'hatchet'
         run: |
-          admin_password="$(openssl rand -hex 24)"
-          echo "::add-mask::$admin_password"
-          echo "HATCHET_ADMIN_PASSWORD=$admin_password" >> "$GITHUB_ENV"
           cp hatchet/.env.example hatchet/.env
           docker compose --env-file hatchet/.env -f hatchet/docker-compose.yml up -d
           sh hatchet/scripts/create-token.sh
+          admin_password='$RIPR8MO2N80R:C$'
+          echo "::add-mask::$admin_password"
+          echo "HATCHET_ADMIN_PASSWORD=$admin_password" >> "$GITHUB_ENV"
       - name: Start disposable Prefect stack
         if: matrix.engine == 'prefect'
         run: |

@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import subprocess
+import re
 import sys
 import time
 import uuid
@@ -82,6 +83,32 @@ async def docker_async(*args, timeout=60):
     return await asyncio.to_thread(docker, *args, timeout=timeout)
 
 
+
+def print_container_diagnostics(container, install_code):
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--tail", "80", container],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    text = result.stdout + "\n" + result.stderr
+    if install_code:
+        text = text.replace(install_code, "[redacted install code]")
+    text = re.sub(
+        r"\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b",
+        "[redacted JWT]", text,
+    )
+    text = re.sub(
+        r"(?i)(\b(?:[A-Z_]*TOKEN|token)\s*[=:]\s*)[^\s,;]+",
+        r"\1[redacted]", text,
+    )
+    lines = [line for line in text.splitlines()
+             if "==>" in line or any(word in line.lower() for word in
+                                     ("error", "failed", "refused", "could not", "did not start"))]
+    if lines:
+        print("Worker container diagnostics:\n" + "\n".join(lines[-40:]), file=sys.stderr)
+
 async def api(session, base, method, path, body=None):
     async with session.request(method, base + path, json=body) as response:
         try:
@@ -103,6 +130,7 @@ async def wait_registered(session, base, install_code, worker_id, engine, contai
         data = await api(session, base, "GET", "/api/fleet/installs")
         record = next((item for item in data.get("installs", []) if item.get("code") == install_code), None)
         if record and record.get("state") in ("failed", "expired", "cancelled", "unregistered"):
+            print_container_diagnostics(container, install_code)
             raise HarnessError(f"worker install ended in state {record['state']}")
         fleet = await api(session, base, "GET", "/api/fleet")
         worker = next((item for item in fleet.get("workers", []) if item.get("id") == worker_id), None)
@@ -117,6 +145,7 @@ async def wait_registered(session, base, install_code, worker_id, engine, contai
             except HarnessError:
                 running = "unknown"
             if running == "false":
+                print_container_diagnostics(container, install_code)
                 raise HarnessError("worker container exited before registration completed")
             last_inspect = time.monotonic()
         await asyncio.sleep(2)
