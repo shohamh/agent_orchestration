@@ -54,7 +54,7 @@ class HatchetTokenIssuerTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post(f'/api/v1/tenants/{TENANT}/api-tokens', create)
         app.router.add_get(f'/api/v1/tenants/{TENANT}/api-tokens', list_tokens)
         app.router.add_post(f'/api/v1/api-tokens/{TOKEN_ID}', revoke)
-        self.server = TestServer(app, host='localhost')
+        self.server = TestServer(app, host='127.0.0.1')
         await self.server.start_server()
         self.addAsyncCleanup(self.server.close)
 

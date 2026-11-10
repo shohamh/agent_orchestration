@@ -43,9 +43,14 @@ class IssuedWorkerToken:
     name: str
 
 
+
+def _admin_session(*, timeout: aiohttp.ClientTimeout) -> aiohttp.ClientSession:
+    # Self-hosted Hatchet commonly uses a private IP, but its login cookie must be accepted there.
+    return aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.CookieJar(unsafe=True))
+
 class HatchetTokenIssuer:
     def __init__(self, api_url: str, email: str, password: str, tenant_id: str | None = None,
-                 session_factory=aiohttp.ClientSession):
+                 session_factory=_admin_session):
         parts = urlsplit(api_url)
         if parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or parts.password or parts.fragment:
             raise HatchetTokenError('Configure a valid Hatchet API URL in Admin before creating a Hatchet worker install.')
