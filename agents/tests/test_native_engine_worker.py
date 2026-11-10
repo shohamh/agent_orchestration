@@ -49,6 +49,31 @@ class FleetMetadataProjectionTests(unittest.TestCase):
         self.assertEqual(kwargs['tags'], ['fleet-pool:build', 'fleet-tag:linux'])
 
 
+class NativeHatchetWorkflowTests(unittest.TestCase):
+    def test_dispatch_workflow_validates_and_forwards_the_job_input(self):
+        class Workflow:
+            def task(self, **_kwargs):
+                return lambda function: setattr(self, 'start_admitted_job', function) or function
+
+        workflow = Workflow()
+        client = Mock()
+        client.workflow.return_value = workflow
+
+        native.build_hatchet_workflow(client)
+
+        validator = client.workflow.call_args.kwargs['input_validator']
+        payload = validator.model_validate({'job_id': 'job-1', 'nonce': 'nonce-1'})
+        with patch.object(native, '_local_job_request', return_value={'started': True}) as start:
+            result = workflow.start_admitted_job(payload, object())
+        self.assertEqual(result, {'started': True})
+        start.assert_called_once_with('job-1', 'nonce-1')
+
+        from pydantic import ValidationError
+        with self.assertRaises(ValidationError):
+            validator.model_validate({'job_id': 'job-1'})
+
+
+
 class NativeDispatchPollerTests(unittest.TestCase):
 
     def test_unacknowledged_engine_submission_is_reused_on_retry(self):

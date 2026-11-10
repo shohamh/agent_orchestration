@@ -405,12 +405,14 @@ def _local_job_request(job_id: str, nonce: str) -> dict[str, Any]:
 def build_hatchet_workflow(client: Any) -> Any:
     """The same task definition is registered on the PC and used by the coordinator to target it."""
     from datetime import timedelta
+    from pydantic import create_model
 
-    workflow = client.workflow(name=HATCHET_WORKFLOW)
+    input_model = create_model('NativeDispatchInput', job_id=(str, ...), nonce=(str, ...))
+    workflow = client.workflow(name=HATCHET_WORKFLOW, input_validator=input_model)
 
     @workflow.task(name='start-admitted-job', schedule_timeout=timedelta(days=30), execution_timeout=timedelta(minutes=1))
-    def start_admitted_job(payload: dict[str, str], _ctx: Any) -> dict[str, Any]:
-        return _local_job_request(payload['job_id'], payload['nonce'])
+    def start_admitted_job(payload: Any, _ctx: Any) -> dict[str, Any]:
+        return _local_job_request(payload.job_id, payload.nonce)
 
     return workflow
 
