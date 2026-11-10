@@ -72,6 +72,7 @@ services:
     image: agent-flow-worker-hatchet:local
     command: ["python", "-u", "agents/flow_worker_service.py", "hatchet"]
     environment:
+      <<: *flow-env
       HATCHET_CLIENT_TOKEN: ${HATCHET_WORKER_CLIENT_TOKEN:-}
 
   flow-worker-prefect:
@@ -89,6 +90,7 @@ services:
     image: agent-flow-worker-hatchet:local
     command: ["python", "-u", "agents/hatchet_worker.py"]
     environment:
+      <<: *flow-env
       HATCHET_CLIENT_TOKEN: ${HATCHET_WORKER_CLIENT_TOKEN:-}
 
   agent-session-worker-prefect:
