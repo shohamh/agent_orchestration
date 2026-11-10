@@ -222,7 +222,7 @@ before(async () => {
   await call('Page.enable');
   await desktop();
   await call('Page.navigate', { url: base });
-  await waitFor('typeof FlowBuilder === "object" && document.querySelector("#flows-btn")');
+  await waitFor('document.readyState === "complete" && typeof FlowBuilder === "object" && document.querySelector("#flows-btn")');
 });
 after(async () => {
   if (socket) socket.close();
