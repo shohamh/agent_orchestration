@@ -12,6 +12,7 @@ import os
 import shlex
 import subprocess
 import re
+import tempfile
 import sys
 import time
 import uuid
@@ -93,17 +94,19 @@ def print_container_diagnostics(container, install_code):
     except (OSError, subprocess.TimeoutExpired):
         return
     text = result.stdout + "\n" + result.stderr
-    for component in ("hatchet", "prefect"):
-        try:
-            logs = subprocess.run(
-                ["docker", "exec", container, "tail", "-n", "80",
-                 f"/home/node/.agent-worker/component-{component}.log"],
-                capture_output=True, text=True, timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if logs.returncode == 0:
-            text += f"\n--- {component} component ---\n{logs.stdout}\n{logs.stderr}"
+    with tempfile.TemporaryDirectory() as directory:
+        for component in ("hatchet", "prefect"):
+            path = os.path.join(directory, f"component-{component}.log")
+            try:
+                logs = subprocess.run(
+                    ["docker", "cp", f"{container}:/home/node/.agent-worker/component-{component}.log", path],
+                    capture_output=True, text=True, timeout=15,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if logs.returncode == 0:
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    text += f"\n--- {component} component ---\n{handle.read()}"
     if install_code:
         text = text.replace(install_code, "[redacted install code]")
     text = re.sub(
