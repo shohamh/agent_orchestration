@@ -125,6 +125,8 @@ jobs:
             echo "CI_HOST_IP=$host_ip"
             echo "BOARD_HOST=0.0.0.0"
             echo "HATCHET_HOST=$host_ip"
+            echo "HATCHET_WORKER_GRPC_HOST_PORT=$host_ip:7077"
+            echo "HATCHET_WORKER_TLS_STRATEGY=none"
             echo "HATCHET_CLIENT_HOST_PORT=$host_ip:7077"
             echo "HATCHET_CLIENT_SERVER_URL=http://$host_ip:8080"
             echo "PREFECT_WORKER_API_URL=http://$host_ip:4200/api"
