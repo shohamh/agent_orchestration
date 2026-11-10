@@ -34,7 +34,7 @@ jobs:
       - name: Board tests
         run: python -m unittest discover -s board -p 'test_*.py' -v
       - name: Chat UI tests
-        run: node --test board/static/chat.test.cjs board/static/chat.browser.test.cjs board/static/flow-builder.test.cjs board/static/flow-builder.browser.test.cjs board/static/card-search.test.cjs board/static/card-search.browser.test.cjs
+        run: node --test --test-concurrency=1 board/static/chat.test.cjs board/static/chat.browser.test.cjs board/static/flow-builder.test.cjs board/static/flow-builder.browser.test.cjs board/static/card-search.test.cjs board/static/card-search.browser.test.cjs
       - name: Install Trigger.dev test dependencies
         run: npm ci --prefix trigger.dev/example-project
       - name: Trigger.dev bridge tests
