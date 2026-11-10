@@ -140,7 +140,7 @@ class BinaryDownloadTests(unittest.IsolatedAsyncioTestCase):
         await self.client.start_server()
 
     def create_install(self, os_name, name):
-        return worker_install.create({'id': name, 'os': os_name, 'engines': ['hatchet'], 'pool': 'build',
+        return worker_install.create({'id': name, 'os': os_name, 'engines': ['trigger'], 'pool': 'build',
                                       'server': 'http://192.0.2.10:8090'})
 
     async def assert_binary(self, client, path, os_name, headers=None):
