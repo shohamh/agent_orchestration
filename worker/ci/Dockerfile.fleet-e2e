@@ -8,4 +8,5 @@ COPY dist/worker/agent-worker-x86_64-unknown-linux-musl /usr/local/bin/agent-wor
 COPY worker/ci/fleet-e2e-entrypoint.sh /usr/local/bin/fleet-e2e-entrypoint
 RUN chmod 0755 /usr/local/bin/agent-worker /usr/local/bin/fleet-e2e-entrypoint
 
+USER node
 ENTRYPOINT ["/usr/local/bin/fleet-e2e-entrypoint"]
