@@ -62,10 +62,42 @@ jobs:
       - name: Import public page trees and transfer a page between workers
         run: python -m unittest discover -s agents/integration_tests -v
 
+  fleet-worker-linux:
+    name: Build Linux Fleet worker for engine E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: worker
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build the Linux Rust worker
+        run: sh worker/ci/build.sh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: agents/requirements.txt
+      - name: Build the offline native-engine runtime
+        run: python worker/ci/build-native-runtime.py --os linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fleet-worker-linux
+          path: |
+            dist/worker/agent-worker-x86_64-unknown-linux-musl*
+            dist/worker/native-runtime-linux.tar.gz*
+          if-no-files-found: error
+
   native-engine-public:
+    needs: fleet-worker-linux
     name: Public Confluence with ${{ matrix.engine }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -76,14 +108,30 @@ jobs:
       ENGINE: ${{ matrix.engine }}
       FLOW_BACKENDS: ${{ matrix.engine }}
       FLOW_HOST_URL: http://127.0.0.1:8095
-      BOARD_HOST: 127.0.0.1
       BOARD_PORT: '8093'
-      HATCHET_CLIENT_HOST_PORT: 127.0.0.1:7077
-      HATCHET_CLIENT_SERVER_URL: http://127.0.0.1:8080
       HATCHET_CLIENT_TLS_STRATEGY: none
       PREFECT_API_URL: ${{ matrix.engine == 'prefect' && 'http://127.0.0.1:4200/api' || '' }}
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: fleet-worker-linux
+          path: dist/worker
+      - name: Configure endpoints reachable by the Fleet container
+        run: |
+          host_ip="$(ip route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+          test -n "$host_ip"
+          {
+            echo "CI_HOST_IP=$host_ip"
+            echo "BOARD_HOST=0.0.0.0"
+            echo "HATCHET_HOST=$host_ip"
+            echo "HATCHET_CLIENT_HOST_PORT=$host_ip:7077"
+            echo "HATCHET_CLIENT_SERVER_URL=http://$host_ip:8080"
+            echo "PREFECT_WORKER_API_URL=http://$host_ip:4200/api"
+            echo "FLOW_RELAY_URL=http://127.0.0.1:8097"
+          } >> "$GITHUB_ENV"
+      - name: Build actual Rust worker container
+        run: docker build -f worker/ci/Dockerfile.fleet-e2e -t fleet-worker-e2e .
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
@@ -120,6 +168,8 @@ jobs:
           exit 1
       - name: Import public Cloud page, transfer between workers and restart the native step
         run: python -u board/workers_smoke_test.py --base http://127.0.0.1:8093 --systems "$ENGINE" --public-confluence
+      - name: Register container worker and run through the native engine
+        run: python -u board/fleet_worker_container_smoke_test.py --base http://127.0.0.1:8093 --server-address "http://$CI_HOST_IP:8093" --engine "$ENGINE" --image fleet-worker-e2e
       - name: Show redacted runtime logs on failure
         if: failure()
         run: |
