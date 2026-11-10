@@ -110,9 +110,12 @@ cd ..
 cp board/.env.example board/.env
 ```
 
-Copy `HATCHET_CLIENT_TOKEN` from `hatchet/.env` into `board/.env`. Set `BOARD_PASSWORD` before
-making the Board reachable beyond localhost. From the repository root, start the Board and workers:
-
+Copy `HATCHET_CLIENT_TOKEN` from `hatchet/.env` into the Board environment for normal engine API
+calls. For **Fleet → Register PC** with Hatchet selected, also set `HATCHET_ADMIN_EMAIL` and
+`HATCHET_ADMIN_PASSWORD` for a Hatchet ADMIN/OWNER session account in the same tenant. The Board
+infers that tenant from `HATCHET_CLIENT_TOKEN`; these credentials stay on the Board server, which
+creates a separate worker-capable token for each install. Set `BOARD_PASSWORD` before making the
+Board reachable beyond localhost. From the root:
 ```bash
 docker compose up -d --build
 ```
@@ -172,7 +175,10 @@ the local npm mirror on port `4873`. On the offline host:
 2. In `/opt/agent_orchestration`, copy `.env.example` to `.env` and set `FLOW_HOST_TOKEN`,
    `HATCHET_WORKER_CLIENT_TOKEN` from step 1, `COMPOSE_PROFILES=hatchet`, `FLOW_BACKENDS=hatchet`,
    and `ENGINES=hatchet`. Copy `board/.env.example` to `board/.env`; set `BOARD_PASSWORD`,
-   `HATCHET_CLIENT_TOKEN` from step 1, and `HATCHET_DASHBOARD_URL=http://<server>:8080`. Then start from the repo root:
+   `HATCHET_CLIENT_TOKEN` from step 1, `HATCHET_DASHBOARD_URL=http://<server>:8080`,
+   `HATCHET_ADMIN_EMAIL` and `HATCHET_ADMIN_PASSWORD` for an ADMIN/OWNER account in the same
+   tenant. The Board infers its tenant from `HATCHET_CLIENT_TOKEN`; issuer credentials stay only
+   on the Board and are not copied to workers. Then start from the repo root:
 
    ```bash
    docker compose --profile hatchet up -d --no-build

@@ -28,10 +28,15 @@ Verified on 2026-11-02 against both stacks:
 
 ```bash
 cd board
-cp .env.example .env    # HATCHET_CLIENT_TOKEN (from hatchet/.env) and/or TRIGGER_SECRET_KEY (tr_prod_... from the dashboard)
+cp .env.example .env    # HATCHET_CLIENT_TOKEN (from hatchet/.env) and/or TRIGGER_SECRET_KEY
 docker compose up -d --build
 python smoke_test.py    # optional: end-to-end check against every configured backend
 ```
+
+For Hatchet Fleet installs, also configure `HATCHET_ADMIN_EMAIL` and `HATCHET_ADMIN_PASSWORD` in
+this environment. The Hatchet user must be an ADMIN/OWNER in the same tenant as
+`HATCHET_CLIENT_TOKEN`; the Board infers the tenant from that existing API token. These credentials
+are used only as a server-side login session to create/revoke per-PC worker tokens.
 
 The board reaches both stacks through their published ports (`host.docker.internal`). It doesn't join their networks, so either stack can be down. A backend is enabled only when its credential is set.
 
@@ -43,6 +48,18 @@ disabled engines from reachable, unreachable, and authentication failures. Crede
 provided through the board's environment; the UI never reads or stores them. URL settings persist
 in the `board_data` Docker volume and apply to the board's adapters without a rebuild. Hatchet's SDK
 endpoint is constructed at startup, so changing its API URL takes effect after restarting the board.
+
+### Hatchet Fleet token issuance
+
+When Hatchet is selected in Fleet, the Board creates a unique, unrestricted worker-capable token
+named for the PC and install. The browser never asks for or sends a Hatchet token. The token is
+stored privately with the one-time install record and returned only by that PC's valid claim; it
+is not included in install-create/list responses, worker status, or install commands. Admin-session
+credentials remain in the Board environment and are never sent to FlowHost or the worker PC.
+
+The Board revokes a token when an install is cancelled, when an expired/failed install is next
+listed in Fleet, or when its worker is unregistered. Expiration cleanup is lazy: if Fleet is not
+opened after a link expires, the token remains until the next install-list request.
 
 For offline deployment, point each API URL at the engine address reachable from the board container;
 set dashboard URLs to addresses reachable by the browser (including remote phones). The two URL
@@ -118,8 +135,9 @@ instead (tailnet only; the phone needs the Tailscale app).
 Cards keep to a title, an agent and a time. Hover a card for its full story: the latest update, workers, queue and times.
 Explanations elsewhere sit behind tooltips, and touch screens, which have no hover, keep them inline.
 
-Right-click for what you can do with the thing under the pointer. On a card that's open, the same moves as dragging it,
-filter by its agent or worker, and copy its title or run ID. Fleet PCs and flows in the list have menus too. In the graph:
+Right-click (or long-press without moving on a phone) for what you can do with the thing under the pointer. On a card that's open,
+the same moves as dragging it, filter by its agent or worker, and copy its title or run ID. On a phone, ordinary movement scrolls;
+hold a movable card briefly, then move it to drag. Fleet PCs and flows in the list have menus too. In the graph:
 
 - **A step:** edit, add a step after it, duplicate, copy its ID, delete.
 - **A dependency:** edit either end, remove it.
@@ -160,9 +178,9 @@ activation does.
 
 ## Drag and drop
 
-Drag a card (on a phone, hold it briefly first) to another column or to a new place in Queued. While
-you drag, columns the card can't go to are dimmed and each allowed column says what dropping does.
-The rules are in `moves.py`; the server checks them again before acting.
+Drag a card (on a phone, hold it briefly first) to another column or to a new place in Queued. Touch movement before the hold
+scrolls; moving a held card starts the drag, and staying still opens its menu. While you drag, columns the card can't go to are
+dimmed and each allowed column says what dropping does. The rules are in `moves.py`; the server checks them again before acting.
 
 | Drop | Action | Hatchet | Trigger.dev | Prefect |
 |---|---|---|---|---|

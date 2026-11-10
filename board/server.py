@@ -858,9 +858,39 @@ async def fleet_update(request: web.Request) -> web.Response:
     return fleet_answer(await request.app['flow_host'].update_worker(request.match_info['worker_id'], await fleet_worker_body(request)))
 
 async def fleet_unregister(request: web.Request) -> web.Response:
-    return fleet_answer(await request.app['flow_host'].unregister_worker(request.match_info['worker_id']))
+    result = await request.app['flow_host'].unregister_worker(request.match_info['worker_id'])
+    if result[0] == 200:
+        import hatchet_tokens
+        try:
+            tokens = hatchet_tokens.install_tokens_for_worker(request.match_info['worker_id'])
+        except hatchet_tokens.HatchetTokenError as exc:
+            log.warning('could not read Hatchet token cleanup metadata (%s)', type(exc).__name__)
+        else:
+            for code, _record in tokens:
+                await revoke_install_hatchet_token(code)
+    return fleet_answer(result)
 
-INSTALL_FIELDS = {'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server', 'autostart', 'auto_restart', 'hatchet_token'}
+
+async def revoke_install_hatchet_token(code: str) -> None:
+    import hatchet_tokens
+    try:
+        await hatchet_tokens.revoke_install_token(code)
+    except Exception as exc:
+        # Keep private metadata so a later install-list poll can retry; never log Hatchet credentials.
+        log.warning('could not revoke the Hatchet token for install %s (%s)', code, type(exc).__name__)
+
+
+async def revoke_issued_hatchet_token(issuer: Any, credential: Any, context: str) -> None:
+    try:
+        await issuer.revoke_worker_token(credential.token_id)
+    except Exception as exc:
+        log.warning('could not revoke the Hatchet token for %s (%s)', context, type(exc).__name__)
+
+INSTALL_FIELDS = {
+    'id', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'server',
+    'autostart', 'auto_restart', 'hatchet_api_url',
+    'hatchet_worker_grpc_host_port', 'hatchet_worker_tls_strategy', 'prefect_worker_api_url',
+}
 
 
 async def fleet_updates(request: web.Request) -> web.Response:
@@ -901,7 +931,12 @@ def public_install_answer(result: tuple[int, Any]) -> web.Response:
 
 
 async def fleet_installs(request: web.Request) -> web.Response:
-    return public_install_answer(await request.app['flow_host'].fleet_installs())
+    result = await request.app['flow_host'].fleet_installs()
+    if result[0] == 200 and isinstance(result[1], dict):
+        for install in result[1].get('installs', []):
+            if isinstance(install, dict) and install.get('state') in ('cancelled', 'expired', 'failed', 'unregistered') and install.get('code'):
+                await revoke_install_hatchet_token(install['code'])
+    return public_install_answer(result)
 
 
 async def fleet_install_create(request: web.Request) -> web.Response:
@@ -910,20 +945,59 @@ async def fleet_install_create(request: web.Request) -> web.Response:
     if unknown:
         raise ValueError('unknown install fields: ' + ', '.join(sorted(unknown)))
     import engine_admin
+    import hatchet_tokens
     engines = body.get('engines', [])
+    hatchet_config = None
     if 'hatchet' in engines:
-        config = engine_admin.config_for('hatchet')
-        body['hatchet_api_url'] = config['api_url']
-        body['hatchet_worker_grpc_host_port'] = config['hatchet_worker_grpc_host_port']
-        body['hatchet_worker_tls_strategy'] = config['hatchet_worker_tls_strategy']
+        hatchet_config = engine_admin.config_for('hatchet')
+        body['hatchet_api_url'] = hatchet_config['api_url']
+        body['hatchet_worker_grpc_host_port'] = hatchet_config['hatchet_worker_grpc_host_port']
+        body['hatchet_worker_tls_strategy'] = hatchet_config['hatchet_worker_tls_strategy']
+        try:
+            issuer = hatchet_tokens.HatchetTokenIssuer.from_environment(hatchet_config['api_url'])
+            credential = await issuer.issue_worker_token(body.get('id', ''))
+        except hatchet_tokens.HatchetTokenError as exc:
+            return web.json_response({'error': str(exc)}, status=503)
+        body['hatchet_token'] = credential.token
     if 'prefect' in engines:
         config = engine_admin.config_for('prefect')
         body['prefect_worker_api_url'] = config['prefect_worker_api_url']
-    return public_install_answer(await request.app['flow_host'].create_install(body))
+    try:
+        result = await request.app['flow_host'].create_install(body)
+    except Exception:
+        if credential is not None:
+            await revoke_issued_hatchet_token(issuer, credential, 'the failed install request')
+        raise
+    if credential is not None:
+        if result[0] != 200:
+            await revoke_issued_hatchet_token(issuer, credential, 'the rejected install request')
+        else:
+            record = result[1].get('install', {}) if isinstance(result[1], dict) else {}
+            code = record.get('code') if isinstance(record, dict) else None
+            if not code:
+                await revoke_issued_hatchet_token(issuer, credential, 'an install without a claim code')
+                return web.json_response({'error': 'The flow host created no usable install link; the Hatchet token was revoked.'}, status=502)
+            try:
+                hatchet_tokens.remember_install_token(code, body['id'], credential, hatchet_config['api_url'], issuer.tenant_id)
+            except Exception as exc:
+                try:
+                    await request.app['flow_host'].cancel_install(code)
+                except Exception:
+                    pass
+                await revoke_issued_hatchet_token(issuer, credential, 'an install whose cleanup metadata could not be saved')
+                log.error('could not save Hatchet token cleanup metadata (%s)', type(exc).__name__)
+                return web.json_response({'error': 'Could not safely save Hatchet token cleanup metadata; the install link was cancelled.'}, status=500)
+    return public_install_answer(result)
 
 
 async def fleet_install_cancel(request: web.Request) -> web.Response:
-    return public_install_answer(await request.app['flow_host'].cancel_install(request.match_info['code']))
+    code = request.match_info['code']
+    result = await request.app['flow_host'].cancel_install(code)
+    if result[0] == 200 and isinstance(result[1], dict):
+        install = result[1].get('install')
+        if isinstance(install, dict) and install.get('state') == 'cancelled':
+            await revoke_install_hatchet_token(code)
+    return public_install_answer(result)
 
 
 async def fleet_refresh(request: web.Request) -> web.Response:

@@ -16,12 +16,14 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
 from flowkit import install
+
 from flowkit.relay import make_app
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +34,7 @@ FORM = {'id': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'h
         'prefect_worker_api_url': 'http://192.168.1.30:4200/api',
         'pool': 'build', 'tags': ['gpu'], 'slots': 2,
         'cpu_limit': 80, 'ram_limit': 85, 'server': 'http://192.168.1.10:8090', 'autostart': 'boot', 'auto_restart': False}
+BOARD_FORM = {key: value for key, value in FORM.items() if key != 'hatchet_token'}
 
 
 SECRET = 'pc-claim-secret-0123456789abcdefghij'
@@ -337,10 +340,12 @@ class RouteTests(Isolated, unittest.IsolatedAsyncioTestCase):
         record = self.make(tags=['gpu', 'cuda'])
         status, body = await self.claim(record)
         self.assertEqual(status, 200)
+        self.assertEqual(body['hatchet_token'], GOOD_TOKEN, 'the PC receives its private worker credential only after proving the install claim')
+        shown = install.view(install.read_record(record['code']))
+        self.assertNotIn(GOOD_TOKEN, json.dumps(shown), 'public Fleet views never disclose the worker credential')
+        self.assertEqual((shown['uuid'], shown['claimed_host']), (record['code'], 'PC-1'))
         self.assertEqual({k: body[k] for k in ('ok', 'uuid', 'name', 'os', 'engines', 'pool', 'tags', 'slots', 'cpu_limit', 'ram_limit', 'autostart', 'auto_restart')},
                          {'ok': True, 'uuid': record['code'], 'name': 'build-pc', 'os': 'windows', 'engines': ['hatchet', 'prefect'], 'pool': 'build', 'tags': ['gpu', 'cuda'], 'slots': 2, 'cpu_limit': 80, 'ram_limit': 85, 'autostart': 'boot', 'auto_restart': False})
-        shown = install.view(install.read_record(record['code']))
-        self.assertEqual((shown['uuid'], shown['claimed_host']), (record['code'], 'PC-1'))
         self.assertNotIn(SECRET, json.dumps(install.read_record(record['code'])), 'only a hash of the secret is stored')
 
     async def test_another_pc_running_the_same_command_is_refused_with_who_has_it(self):
@@ -520,6 +525,7 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         with patch.object(sys, 'path', [str(ROOT / 'board'), *sys.path]):
             import server as board_server
             import engine_admin
+            import hatchet_tokens
         admin_endpoints = {
             'hatchet': {'api_url': FORM['hatchet_api_url'],
                         'hatchet_worker_grpc_host_port': FORM['hatchet_worker_grpc_host_port'],
@@ -528,9 +534,19 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         }
         endpoint_patch = patch.object(engine_admin, 'config_for', side_effect=lambda engine: admin_endpoints[engine])
         endpoint_patch.start(); self.addCleanup(endpoint_patch.stop)
+        tenant_id = str(uuid.uuid4())
+        issuer = SimpleNamespace(
+            tenant_id=tenant_id,
+            issue_worker_token=AsyncMock(side_effect=lambda worker_id: hatchet_tokens.IssuedWorkerToken(
+                GOOD_TOKEN, str(uuid.uuid4()), f'agent-board:{worker_id}:{uuid.uuid4()}')),
+            revoke_worker_token=AsyncMock(),
+        )
+        issuer_patch = patch.object(hatchet_tokens.HatchetTokenIssuer, 'from_environment', return_value=issuer)
+        issuer_patch.start(); self.addCleanup(issuer_patch.stop)
 
         env = patch.dict(os.environ, {'FLOW_HOST_TOKEN': 'install-test-host-secret',
-                                      'BOARD_PASSWORD': 'install-test-password', 'BOARD_SECRET': 'install-test-cookie-key'})
+                                      'BOARD_PASSWORD': 'install-test-password', 'BOARD_SECRET': 'install-test-cookie-key',
+                                      'BOARD_HATCHET_TOKEN_STORE_PATH': str(self.root/'hatchet-tokens.json')})
         env.start(); self.addCleanup(env.stop)
         attempts = patch.object(install, 'FAILED_ATTEMPTS', {})
         attempts.start(); self.addCleanup(attempts.stop)
@@ -582,7 +598,7 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
             for auto_restart in (True, False):
                 with self.subTest(autostart=autostart, auto_restart=auto_restart):
                     name = f'{autostart}-restart-{int(auto_restart)}'
-                    status, created = await self.api('POST', json={**FORM, 'id': name, 'autostart': autostart, 'auto_restart': auto_restart})
+                    status, created = await self.api('POST', json={**BOARD_FORM, 'id': name, 'autostart': autostart, 'auto_restart': auto_restart})
                     self.assertEqual(status, 200, created)
                     public_json = json.dumps(created)
                     for secret in (GOOD_TOKEN, FORM['hatchet_api_url'], FORM['prefect_worker_api_url']):
@@ -611,21 +627,21 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         for changes in ({'autostart': 'startup'}, {'autostart': 'Boot'}, {'autostart': None}, {'autostart': True},
                         {'auto_restart': 'false'}, {'auto_restart': 0}, {'auto_restart': None}, {'extra': True}):
             with self.subTest(changes=changes):
-                status, rejected = await self.api('POST', json={**FORM, **changes})
+                status, rejected = await self.api('POST', json={**BOARD_FORM, **changes})
                 self.assertEqual(status, 400, rejected)
                 status, listing = await self.api('GET')
                 self.assertEqual((status, listing), (200, {'installs': []}))
-        status, created = await self.api('POST', json=FORM)
+        status, created = await self.api('POST', json=BOARD_FORM)
         self.assertEqual(status, 200, created)
         self.assertEqual((await self.claim(created['install']['code']))[0], 200)
 
     async def test_cancelling_a_uuid_burns_its_download_and_claim_and_frees_the_name(self):
-        status, created = await self.api('POST', json=FORM)
+        status, created = await self.api('POST', json=BOARD_FORM)
         self.assertEqual(status, 200, created)
         code = created['install']['code']
         expected_binary = b'MZ-fake-worker-agent-worker-x86_64-pc-windows-msvc.exe'
         self.assertEqual(await self.download(code), (200, expected_binary))
-        status, duplicate = await self.api('POST', json=FORM)
+        status, duplicate = await self.api('POST', json=BOARD_FORM)
         self.assertEqual(status, 400, duplicate)
 
         status, cancelled = await self.api('DELETE', f'/api/fleet/installs/{code}')
@@ -635,7 +651,7 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.claim(code))[0], 404)
         self.assertEqual(await self.api('GET'), (200, {'installs': []}))
 
-        status, fresh = await self.api('POST', json=FORM)
+        status, fresh = await self.api('POST', json=BOARD_FORM)
         self.assertEqual(status, 200, fresh)
         replacement = fresh['install']['code']
         self.assertNotEqual(replacement, code)
@@ -647,16 +663,16 @@ class BoardInstallContractTests(Isolated, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.download(code))[0], 404)
 
     async def test_bad_codes_and_unauthenticated_management_cannot_cancel_a_pending_install(self):
-        status, created = await self.api('POST', json=FORM)
+        status, created = await self.api('POST', json=BOARD_FORM)
         self.assertEqual(status, 200, created)
         code = created['install']['code']
         for method, path in (('GET', '/api/fleet/installs'), ('POST', '/api/fleet/installs'),
                              ('DELETE', f'/api/fleet/installs/{code}')):
-            async with self.pc.request(method, self.client.make_url(path), json=FORM) as response:
+            async with self.pc.request(method, self.client.make_url(path), json=BOARD_FORM) as response:
                 self.assertEqual(response.status, 401, path)
         for method, path in (('GET', '/fleet/installs'), ('POST', '/fleet/installs'),
                              ('DELETE', f'/fleet/installs/{code}')):
-            async with self.pc.request(method, self.host_url + path, json=FORM) as response:
+            async with self.pc.request(method, self.host_url + path, json=BOARD_FORM) as response:
                 self.assertEqual(response.status, 401, path)
         for bad_code in ('short', 'x' * 43, str(uuid.uuid4())):
             with self.subTest(code=bad_code):

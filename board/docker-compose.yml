@@ -24,6 +24,9 @@ services:
       BOARD_SECRET: ${BOARD_SECRET:-}
       # Hatchet (leave HATCHET_CLIENT_TOKEN empty to disable)
       HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+      # Hatchet Fleet token issuer: server-side credentials, never sent to the flow host or PCs.
+      HATCHET_ADMIN_EMAIL: ${HATCHET_ADMIN_EMAIL:-}
+      HATCHET_ADMIN_PASSWORD: ${HATCHET_ADMIN_PASSWORD:-}
       HATCHET_CLIENT_HOST_PORT: ${HATCHET_GRPC:-host.docker.internal:7077}
       HATCHET_CLIENT_SERVER_URL: ${HATCHET_URL:-http://host.docker.internal:8080}
       HATCHET_CLIENT_TLS_STRATEGY: none

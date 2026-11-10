@@ -1,8 +1,9 @@
 /* Fleet tab: the registered execution PCs, their live CPU/RAM, capabilities and settings, and
  * the registration form with engine- and OS-specific setup instructions. Pure helpers are
  * exported for node tests. Worker data is only ever placed in text nodes and attributes; the
- * board's fleet API never returns endpoints, token names or tokens. The per-PC Hatchet token is
- * submitted only when creating an install and is never retained after that request. */
+ * board's fleet API never returns endpoints, token names or tokens. The Board provisions a
+ * dedicated Hatchet worker token server-side and delivers it only to the installing PC.
+ */
 (function (root) {
   'use strict';
   const ENGINES = ['hatchet', 'prefect', 'trigger'];
@@ -111,7 +112,7 @@
       if (os === 'macos') warnings.push('macOS: its CPU/RAM sampler supports only Windows and Linux. The PC reports unknown capacity, so capacity-gated new work waits with "missing metrics".');
     }
     const notes = {
-      hatchet: 'Hatchet is intended to run as a native worker on this PC. Enter a dedicated, worker-capable (non-read-only) Hatchet token for this PC in the registration form; do not use the Board-global token. Its configured worker endpoint must be reachable from this PC and use the deployment TLS strategy. Readiness is shown only after the backend confirms the worker.',
+      hatchet: 'Hatchet is intended to run as a native worker on this PC. The Board creates a dedicated worker-capable token for this install using its server-side Hatchet ADMIN/OWNER session; do not enter or reuse the Board API token. Its configured worker endpoint must be reachable from this PC and use the deployment TLS strategy. Readiness is shown only after the backend confirms the worker.',
       prefect: 'Prefect is intended to run as a native worker on this PC. Its configured API URL must be reachable from this PC. Readiness is shown only after the backend confirms the worker.',
       trigger: 'Trigger.dev runs through the shared Fleet execution bridge; only the bridge’s backend availability is reported.',
     };
@@ -187,8 +188,6 @@
     else if (taken.includes(id)) errors.id = `${id} is already registered; edit it instead`;
     if (!OS_LABELS[v.os]) errors.os = "Choose the PC's operating system";
     if (!(v.engines || []).length) errors.engines = 'Choose at least one engine';
-    const hatchetToken = String(v.hatchet_token || '').trim();
-    if ((v.engines || []).includes('hatchet') && !hatchetToken) errors.hatchet_token = 'Enter a dedicated worker-capable Hatchet token for this PC; do not use the Board-global token';
     if (!validLabel(String(v.pool || '').trim())) errors.pool = 'A pool is 1 to 100 characters without commas';
     const tags = (v.tags || []).map((t) => String(t).trim());
     if (tags.some((t) => !validLabel(t))) errors.tags = 'A tag is 1 to 100 characters without commas';
@@ -206,7 +205,6 @@
     if (Object.keys(errors).length) return { errors, body: null };
     const body = { id, os: v.os, engines: ENGINES.filter((e) => v.engines.includes(e)), pool: String(v.pool).trim(), tags: [...new Set(tags)],
       slots: Number(v.slots), cpu_limit: Number(v.cpu_limit), ram_limit: Number(v.ram_limit), server: server.value, autostart, auto_restart: autoRestart };
-    if (body.engines.includes('hatchet')) body.hatchet_token = hatchetToken;
     return { errors, body };
   }
 
@@ -669,7 +667,7 @@
       const state = { os: preset.os || 'windows', pool: preset.pool || (S.pools.includes('default') ? 'default' : S.pools[0]) || 'default', newPool: false, tags: [...(preset.tags || [])], autostart: preset.autostart || 'logon', autoRestart: preset.auto_restart !== false };
       const errorBox = h('div', { class: 'fl-form-error', role: 'alert' });
       const fieldError = (name) => h('small', { class: 'fl-field-error', 'data-error': name, id: `fl-err-${name}` });
-      const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), hatchet_token: fieldError('hatchet_token'), pool: fieldError('pool'), tags: fieldError('tags'),
+      const errors = { id: fieldError('id'), os: fieldError('os'), engines: fieldError('engines'), pool: fieldError('pool'), tags: fieldError('tags'),
         slots: fieldError('slots'), cpu_limit: fieldError('cpu_limit'), ram_limit: fieldError('ram_limit'), server: fieldError('server'), autostart: fieldError('autostart'), auto_restart: fieldError('auto_restart') };
 
       const idInput = h('input', { name: 'id', maxlength: 64, autocomplete: 'off', spellcheck: 'false', value: preset.id || '', placeholder: 'for example build-pc-1', 'aria-describedby': 'fl-id-help fl-err-id' });
@@ -686,7 +684,7 @@
       const drawRestart = () => { restartHelp.textContent = autoRestartText(state.os, state.autostart); restartLabel.title = restartHelp.textContent; restartBox.disabled = state.autostart === 'none'; };
       const engineBoxes = h('fieldset', { class: 'fl-engines-choice' }, h('legend', {}, 'Engines'),
         h('div', { class: 'fl-choices' }, ENGINES.map((e) => h('label', { class: 'fl-check' }, h('input', { type: 'checkbox', name: 'engine', value: e, checked: f.engines.includes(e),
-          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); drawHatchetToken(); } }), ` ${ENGINE_LABELS[e]}`))), errors.engines);
+          onchange: (ev) => { f.engines = ENGINES.filter((x) => (x === e ? ev.target.checked : f.engines.includes(x))); } }), ` ${ENGINE_LABELS[e]}`))), errors.engines);
 
       const poolSelect = h('select', { name: 'pool', 'aria-describedby': 'fl-err-pool' });
       const newPoolInput = h('input', { name: 'new_pool', maxlength: 100, autocomplete: 'off', 'aria-label': 'New pool name', placeholder: 'New pool name', hidden: true });
@@ -727,17 +725,12 @@
       serverInput.addEventListener('input', drawServerWarning);
 
       const field = (label, input, helpText, helpId, name) => h('label', { class: 'fl-field' }, h('span', { class: 'fl-label' }, label, helpText ? info(helpText) : null), input, helpText ? h('small', { id: helpId, class: 'fl-help' }, helpText) : null, name ? errors[name] : null);
-      const hatchetTokenInput = h('input', { name: 'hatchet_token', type: 'password', autocomplete: 'new-password', spellcheck: 'false', 'aria-describedby': 'fl-hatchet-token-help fl-err-hatchet_token' });
-      const hatchetTokenField = field('Hatchet worker token', hatchetTokenInput,
-        'Required for Hatchet. Use a dedicated worker-capable (non-read-only) per-PC credential, never the Board-global token. It is sent only with this create request and is not included in the install command.',
-        'fl-hatchet-token-help', 'hatchet_token');
-      const drawHatchetToken = () => { hatchetTokenField.hidden = !f.engines.includes('hatchet'); if (!f.engines.includes('hatchet')) hatchetTokenInput.value = ''; };
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Create install command');
       const form = h('form', { class: 'fl-form-body', novalidate: true },
         h('div', { class: 'fl-form-head' }, h('h3', { id: 'fl-form-title' }, 'Register a PC'), info('Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.')),
         h('p', { class: 'fl-hint fl-help' }, 'Fill in the details first. When they are valid you get one command to run on the PC; nothing is created before that.'),
         field('Name', idInput, 'Letters, digits, dashes and underscores. This is how the PC appears in the fleet.', 'fl-id-help', 'id'),
-        osBoxes, autostartBox, restartLabel, engineBoxes, hatchetTokenField,
+        osBoxes, autostartBox, restartLabel, engineBoxes,
         h('fieldset', { class: 'fl-pools' }, h('legend', {}, 'Pool'), poolSelect, newPoolInput, errors.pool),
         h('fieldset', { class: 'fl-tags' }, h('legend', {}, 'Tags'), chosen, tagInput, tagList, errors.tags),
         h('fieldset', { class: 'fl-settings' }, h('legend', {}, 'Capacity', info('Slots: jobs at once, across all engines.\nNew work waits while a 10-second average is at or above a limit. Running work is never stopped.')),
@@ -755,7 +748,7 @@
         for (const node of Object.values(errors)) node.textContent = '';
         for (const input of form.querySelectorAll('[aria-invalid]')) input.removeAttribute('aria-invalid');
         const pool = state.newPool ? newPoolInput.value : poolSelect.value;
-        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, hatchet_token: hatchetTokenInput.value, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
+        const result = validateInstall({ id: idInput.value, os: state.os, engines: f.engines, pool, tags: state.tags, slots: slots.value, cpu_limit: cpu.value, ram_limit: ram.value, server: serverInput.value, autostart: state.autostart, auto_restart: state.autostart === 'none' ? true : state.autoRestart }, { taken: taken() });
         if (!result.body) {
           const names = Object.keys(result.errors);
           for (const name of names) { errors[name].textContent = result.errors[name]; form.querySelector(`[name="${name}"]`)?.setAttribute('aria-invalid', 'true'); }
@@ -766,7 +759,6 @@
         }
         S.busy = true; submit.disabled = true;
         const r = await request('POST', '/api/fleet/installs', result.body);
-        hatchetTokenInput.value = '';
         S.busy = false; submit.disabled = false;
         if (!r.ok) { errorBox.textContent = errorText(r); return; }
         say(`Install command created for ${result.body.id}.`);
@@ -774,7 +766,7 @@
         showInstall({ ...r.data.install, commands: r.data.commands }, r.data.commands);
       });
 
-      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart(); drawHatchetToken();
+      drawPoolOptions(); drawChosen(); drawServerWarning(); drawAutostart(); drawRestart();
       formPanel.replaceChildren(form);
       formPanel.hidden = false; list.hidden = true; pending.hidden = true;
       formPanel.parentElement.scrollTop = 0;
