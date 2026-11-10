@@ -158,6 +158,21 @@ class FleetAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await (await self.client.get('/api/fleet/tags')).json())['tags'], ['gpu'])
 
 
+    async def test_prefect_only_install_does_not_need_hatchet_credentials(self):
+        import engine_admin
+        code = str(uuid.uuid4())
+        public = {'id': 'pc-prefect', 'os': 'linux', 'engines': ['prefect']}
+        self.host.create_install = AsyncMock(return_value=(200, {
+            'install': {'id': 'pc-prefect', 'code': code, 'state': 'pending'},
+        }))
+        config = {'prefect_worker_api_url': 'http://prefect.example/api'}
+        with patch.object(engine_admin, 'config_for', return_value=config):
+            response = await self.client.post('/api/fleet/installs', json=public)
+        self.assertEqual(response.status, 200)
+        self.host.create_install.assert_awaited_once_with({
+            **public, 'prefect_worker_api_url': 'http://prefect.example/api',
+        })
+
     async def test_install_uses_admin_endpoints_and_never_returns_private_claim_fields(self):
         import engine_admin
         tenant = '11111111-1111-4111-8111-111111111111'
