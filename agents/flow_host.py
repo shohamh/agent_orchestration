@@ -920,8 +920,8 @@ class Api(BaseHTTPRequestHandler):
                 engine = body.get('engine')
                 if engine is not None and engine not in ENGINES: raise ValueError('Unknown engine')
                 card = body.get('card')
-                if card is not None:  # a standalone card: {agent, worker}
-                    if not isinstance(card, dict) or set(card) - {'agent', 'worker'}: raise ValueError('card must contain agent and worker')
+                if card is not None:  # a standalone card: {agent, worker[, command]}
+                    if not isinstance(card, dict) or set(card) - {'agent', 'worker', 'command'}: raise ValueError('card must contain agent and worker')
                     return self._send(200, asyncio.run(validate_card_launch(card.get('agent'), card.get('worker'), engine, card.get('command'))))
                 source = body.get('flow')
                 flow = parse_text(source) if isinstance(source, str) else parse(source)

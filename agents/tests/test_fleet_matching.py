@@ -814,6 +814,12 @@ class LaunchRouteTests(unittest.TestCase):
             with self.subTest(bad=bad): self.assertEqual(self.post(bad)[0], 400)
         self.assertNotIn('url', json.dumps([waiting, blocked]))
 
+    def test_standalone_program_card_launch_check_accepts_its_command(self):
+        status, body = self.post({'card': {'agent': 'program', 'worker': {'pool': 'build'}, 'command': 'python a.py'}, 'engine': 'hatchet'})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body['status'], 'wait')
+        self.assertEqual(self.post({'card': {'agent': 'program', 'worker': {'pool': 'build'}, 'extra': 1}})[0], 400)
+
     def test_offline_step_shows_its_last_known_check(self):
         checked = stamp(30)
         Path(os.environ['FLOW_WORKERS_FILE'] + '.inventory.json').write_text(
